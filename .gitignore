@@ -1,0 +1,13 @@
+__pycache__/
+*.py[cod]
+*.jsonl
+*.json
+results.csv
+out/
+data/
+outputs/
+.env
+.venv/
+bench_*/
+.DS_Store
+batchbench/

@@ -1,0 +1,2 @@
+locust>=2.22.0
+transformers>=4.39.0
