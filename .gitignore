@@ -11,3 +11,4 @@ outputs/
 bench_*/
 .DS_Store
 batchbench/
+generate_requests.sh
