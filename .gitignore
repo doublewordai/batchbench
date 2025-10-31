@@ -13,3 +13,6 @@ bench_*/
 generate_requests.sh
 rust-bench/target/
 *.csv
+target/
+dist/
+src/batchbench.egg-info/
