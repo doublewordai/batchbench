@@ -11,3 +11,4 @@ outputs/
 bench_*/
 .DS_Store
 generate_requests.sh
+rust-bench/target/

@@ -1,0 +1,33 @@
+[build-system]
+requires = ["setuptools>=69", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "batchbench"
+version = "0.1.1"
+description = "Offline and online benchmarking utilities for large language model workloads"
+readme = "README.md"
+authors = [
+    {name = "BatchBench Contributors"}
+]
+license = {text = "Apache-2.0"}
+requires-python = ">=3.9"
+dependencies = []
+
+[project.optional-dependencies]
+generate = ["transformers>=4.39.0"]
+offline = ["vllm>=0.4.0"]
+
+[project.scripts]
+'batchbench.generate' = "batchbench.generate:main"
+'batchbench.offline' = "batchbench.offline:main"
+'batchbench.online' = "batchbench.online:main"
+
+[tool.setuptools]
+package-dir = {"" = "src"}
+
+[tool.setuptools.packages.find]
+where = ["src"]
+
+[tool.setuptools.package-data]
+"batchbench" = ["bin/batchbench"]
