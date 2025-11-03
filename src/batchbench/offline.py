@@ -183,7 +183,7 @@ def main(argv: List[str] | None = None) -> int:
     prompts = tokenizer.batch_decode(tokenized_prompts)
 
     with capture_vllm_throughput() as collector:
-        llm.generate(prompts, sampling_params, use_tqdm=False)
+        llm.generate(prompts, sampling_params, use_tqdm=True)
         stats = collector.summary()
         csv_path = collector.save_csv(args.throughput_csv)
 
