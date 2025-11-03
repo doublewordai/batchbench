@@ -44,7 +44,7 @@ batchbench.offline \
   --ocl 1
 ```
 
-The command prints prompt/generation throughput statistics and writes the sampled history to `vllm_throughput_history.csv` (configurable via `--throughput_csv`).
+The command prints prompt/generation throughput statistics and writes the sampled history to a derived filename inside the directory supplied via `--throughput_dir` (default: current directory).
 
 ## Online Benchmarking
 

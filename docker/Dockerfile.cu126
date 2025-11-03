@@ -1,0 +1,44 @@
+FROM pytorch/pytorch:2.9.0-cuda12.6-cudnn9-devel
+
+# git installation
+RUN apt-get update \
+ && apt-get install -y --no-install-recommends git curl \
+ && rm -rf /var/lib/apt/lists/*
+
+# uv installation
+RUN curl -LsSf https://astral.sh/uv/install.sh | sh \
+ && ln -s /root/.local/bin/uv /usr/local/bin/uv
+
+# install vllm in a uv virtual environment (takes a long time)
+# we run it separately so that it can be cached by docker layers, and doesn't need reinstalling 
+# when we update batchbench code
+RUN cd /workspace/batchbench; \
+    uv venv /opt/batchbench/.venv; \
+    . /opt/batchbench/.venv/bin/activate; \
+    uv pip install vllm --torch-backend=auto; \
+    deactivate
+
+# Fetch latest commit hash from GitHub for the given branch
+ARG BATCHBENCH_COMMIT="6f08b60"
+ARG BATCHBENCH_REPO="https://github.com/doublewordai/batchbench.git"
+ARG BATCHBENCH_REF="main"
+
+# clone repo
+RUN set -eux; \
+    echo "Cloning BatchBench from ${BATCHBENCH_REPO} @ ${BATCHBENCH_COMMIT}"; \
+    git clone "${BATCHBENCH_REPO}" /workspace/batchbench; \
+    cd /workspace/batchbench; \
+    git checkout "${BATCHBENCH_COMMIT}"; \
+    . /opt/batchbench/.venv/bin/activate; \
+    uv pip install --no-cache-dir ".[offline,generate]"; \
+    deactivate
+
+# add uv venv to path for runtime
+ENV PATH="/opt/batchbench/.venv/bin:$PATH"
+
+# Install BatchBench entrypoint wrapper
+COPY ./run_docker.sh /usr/local/bin/batchbench-entrypoint
+RUN chmod +x /usr/local/bin/batchbench-entrypoint
+
+ENTRYPOINT ["/usr/local/bin/batchbench-entrypoint"]
+CMD []
