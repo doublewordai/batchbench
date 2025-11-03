@@ -14,11 +14,10 @@ from contextlib import contextmanager
 from random import randint
 from statistics import mean, pstdev
 from typing import Dict, Iterable, List, Optional
-
-logger = logging.getLogger(__name__)
-
 from vllm import LLM, SamplingParams  # type: ignore
+
 os.environ.setdefault("VLLM_LOG_STATS_INTERVAL", "1")
+logger = logging.getLogger(__name__)
 
 class VLLMThroughputCollector(logging.Handler):
     """Logging handler that captures vLLM throughput stats from INFO logs."""
@@ -33,10 +32,7 @@ class VLLMThroughputCollector(logging.Handler):
         )
 
     def emit(self, record: logging.LogRecord) -> None:  # type: ignore[override]
-        try:
-            msg = record.getMessage()
-        except Exception:
-            return
+        msg = record.getMessage()
         match = self.TP_LINE.search(msg)
         if match:
             self.prompt_tps.append(float(match.group(1)))
