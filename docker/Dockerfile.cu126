@@ -19,7 +19,7 @@ RUN cd /workspace/batchbench; \
     deactivate
 
 # Fetch latest commit hash from GitHub for the given branch
-ARG BATCHBENCH_COMMIT="6f08b60"
+ARG BATCHBENCH_COMMIT="33390bb"
 ARG BATCHBENCH_REPO="https://github.com/doublewordai/batchbench.git"
 ARG BATCHBENCH_REF="main"
 

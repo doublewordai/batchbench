@@ -8,6 +8,7 @@ import math
 import os
 import random
 import re
+import sys
 from pathlib import Path
 from typing import Any, List
 
@@ -200,10 +201,6 @@ def build_output_path(
 
     directory.mkdir(parents=True, exist_ok=True)
     output_path = directory / filename
-    if output_path.exists():
-        raise SystemExit(
-            f"Refusing to overwrite existing file {output_path}. Delete it or choose a different output directory."
-        )
     return output_path
 
 
@@ -239,6 +236,14 @@ def main(argv: List[str] | None = None) -> int:
         tokenizer_label=tokenizer_label,
     )
 
+    if output_path.exists():
+        print(
+            f"Output file {output_path} already exists; skipping generation.",
+            file=sys.stderr,
+        )
+        print(output_path)
+        return 0
+
     with output_path.open("w", encoding="utf-8") as handle:
         for prompt in prompts:
             json.dump({"text": prompt}, handle)
@@ -246,8 +251,11 @@ def main(argv: List[str] | None = None) -> int:
 
     print(
         f"Wrote {len(prompts)} request prompts to {output_path} "
-        f"with prefix overlap {args.prefix_overlap:.2f}."
+        f"with prefix overlap {args.prefix_overlap:.2f}.",
+        file=sys.stderr,
     )
+
+    print(output_path)
 
     return 0
 

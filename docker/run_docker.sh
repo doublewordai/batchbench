@@ -47,7 +47,6 @@ wait_for_local_http() {
   local pid=$2
   local retries=${ONLINE_SERVER_WAIT_RETRIES:-60}
   local delay=${ONLINE_SERVER_WAIT_DELAY_SECS:-1}
-
   if ! command -v curl >/dev/null 2>&1; then
     die "curl is required to perform readiness checks"
   fi
@@ -79,12 +78,9 @@ cleanup_server() {
 run_online() {
   log "Starting online benchmark"
 
-  local dataset_path=${ONLINE_DATASET_PATH:-/tmp/batchbench_requests.jsonl}
-  local dataset_dir
-  dataset_dir=$(dirname "$dataset_path")
-  mkdir -p "$dataset_dir"
+  local dataset_base=${ONLINE_DATASET_PATH:-/tmp/batchbench_requests.jsonl}
 
-  local generate_args=(python -m batchbench.generate --output "$dataset_path")
+  local generate_args=(python -m batchbench.generate --output "$dataset_base")
   [[ -n "${ONLINE_GENERATE_COUNT:-}" ]] && generate_args+=(--count "${ONLINE_GENERATE_COUNT}")
   [[ -n "${ONLINE_GENERATE_PREFIX_OVERLAP:-}" ]] && generate_args+=(--prefix-overlap "${ONLINE_GENERATE_PREFIX_OVERLAP}")
   [[ -n "${ONLINE_GENERATE_APPROX_INPUT_TOKENS:-}" ]] && generate_args+=(--approx-input-tokens "${ONLINE_GENERATE_APPROX_INPUT_TOKENS}")
@@ -98,7 +94,19 @@ run_online() {
   fi
 
   log "Generating request dataset:"; print_command "${generate_args[@]}"
-  "${generate_args[@]}"
+  local generated_output=()
+  if ! mapfile -t generated_output < <("${generate_args[@]}"); then
+    die "Request dataset generation failed"
+  fi
+  if ((${#generated_output[@]} == 0)); then
+    die "Dataset generator did not return a path"
+  fi
+  local last_index=$(( ${#generated_output[@]} - 1 ))
+  local dataset_path=${generated_output[$last_index]}
+  if [[ -z "$dataset_path" ]]; then
+    die "Dataset generator returned an empty path"
+  fi
+  log "Using dataset $dataset_path"
 
   local online_model=${ONLINE_MODEL:-}
   [[ -n "$online_model" ]] || die "ONLINE_MODEL must be set for online mode"
