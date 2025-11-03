@@ -120,6 +120,12 @@ def build_parser() -> argparse.ArgumentParser:
         help="Pipeline parallel world size for vLLM initialisation."
     )
     parser.add_argument(
+        "--gpu_memory_utilization",
+        type=float,
+        default=0.9,
+        help="Target GPU memory utilization for vLLM."
+    )
+    parser.add_argument(
         "--max_num_batched_tokens",
         type=int,
         default=512,
@@ -159,6 +165,7 @@ def main(argv: List[str] | None = None) -> int:
         "tensor_parallel_size": args.tensor_parallel_size,
         "pipeline_parallel_size": args.pipeline_parallel_size,
         "max_num_batched_tokens": args.max_num_batched_tokens,
+        "gpu_memory_utilization": args.gpu_memory_utilization
     }
 
     sampling_params = SamplingParams(
