@@ -34,6 +34,10 @@ def convert_conversation(conversation: List[Dict[str, Any]]) -> List[Dict[str, s
     Returns:
         List of dicts with 'content' and 'role' fields
     """
+    # Ignore the last message if it's from the assistant
+    if conversation and conversation[-1].get("role") == "assistant":
+        conversation = conversation[:-1]
+    
     converted = []
     for turn in conversation:
         converted.append({
