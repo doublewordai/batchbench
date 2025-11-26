@@ -16,3 +16,4 @@ rust-bench/target/
 target/
 dist/
 src/batchbench.egg-info/
+*.png
