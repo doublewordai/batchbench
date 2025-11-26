@@ -113,7 +113,7 @@ async fn main() -> Result<()> {
 
     if request_bodies.is_empty() {
         return Err(anyhow!(
-            "{} did not contain any JSON records with a `text` field",
+            "{} did not contain any valid JSON records with a `text` field",
             args.jsonl.display()
         ));
     }
@@ -181,18 +181,57 @@ fn load_requests(
         }
         let value: Value = serde_json::from_str(trimmed)
             .with_context(|| format!("line {} is not valid JSON: {}", idx + 1, trimmed))?;
-        let text = value
+        
+        let text_field = value
             .get("text")
-            .and_then(|v| v.as_str())
-            .ok_or_else(|| anyhow!("line {} missing string field `text`", idx + 1))?;
+            .ok_or_else(|| anyhow!("line {} missing field `text`", idx + 1))?;
+
+        let messages = if let Some(text_str) = text_field.as_str() {
+            // Handle text as a string
+            vec![json!({
+                "role": "user",
+                "content": text_str,
+            })]
+        } else if let Some(text_array) = text_field.as_array() {
+            // Handle text as an array of maps with content and role fields
+            let mut msgs = Vec::new();
+            for (msg_idx, msg) in text_array.iter().enumerate() {
+                let content = msg
+                    .get("content")
+                    .and_then(|v| v.as_str())
+                    .ok_or_else(|| {
+                        anyhow!(
+                            "line {} text[{}] missing string field `content`",
+                            idx + 1,
+                            msg_idx
+                        )
+                    })?;
+                let role = msg
+                    .get("role")
+                    .and_then(|v| v.as_str())
+                    .ok_or_else(|| {
+                        anyhow!(
+                            "line {} text[{}] missing string field `role`",
+                            idx + 1,
+                            msg_idx
+                        )
+                    })?;
+                msgs.push(json!({
+                    "role": role,
+                    "content": content,
+                }));
+            }
+            msgs
+        } else {
+            return Err(anyhow!(
+                "line {} field `text` must be either a string or an array",
+                idx + 1
+            ));
+        };
+
         let mut body = json!({
             "model": model,
-            "messages": [
-                {
-                    "role": "user",
-                    "content": text,
-                }
-            ]
+            "messages": messages,
         });
 
         if let Some(tokens) = output_tokens {

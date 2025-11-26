@@ -79,35 +79,41 @@ run_online() {
   log "Starting online benchmark"
 
   local dataset_base=${ONLINE_DATASET_PATH:-/tmp/batchbench_requests.jsonl}
+  local dataset_path=""
+  log "Preparing request dataset at: $dataset_base"
+  if [[ -f "$dataset_base" ]]; then
+    log "Using existing dataset: $dataset_base"
+    dataset_path="$dataset_base"
+  else
+    local generate_args=(python -m batchbench.generate --output "$dataset_base")
+    [[ -n "${ONLINE_GENERATE_COUNT:-}" ]] && generate_args+=(--count "${ONLINE_GENERATE_COUNT}")
+    [[ -n "${ONLINE_GENERATE_PREFIX_OVERLAP:-}" ]] && generate_args+=(--prefix-overlap "${ONLINE_GENERATE_PREFIX_OVERLAP}")
+    [[ -n "${ONLINE_GENERATE_APPROX_INPUT_TOKENS:-}" ]] && generate_args+=(--approx-input-tokens "${ONLINE_GENERATE_APPROX_INPUT_TOKENS}")
+    [[ -n "${ONLINE_GENERATE_TOKENIZER_MODEL:-}" ]] && generate_args+=(--tokenizer-model "${ONLINE_GENERATE_TOKENIZER_MODEL}")
+    [[ -n "${ONLINE_GENERATE_TOKEN_TOLERANCE:-}" ]] && generate_args+=(--token-tolerance "${ONLINE_GENERATE_TOKEN_TOLERANCE}")
+    [[ -n "${ONLINE_GENERATE_HUGGINGFACE_TOKEN:-}" ]] && generate_args+=(--huggingface-token "${ONLINE_GENERATE_HUGGINGFACE_TOKEN}")
 
-  local generate_args=(python -m batchbench.generate --output "$dataset_base")
-  [[ -n "${ONLINE_GENERATE_COUNT:-}" ]] && generate_args+=(--count "${ONLINE_GENERATE_COUNT}")
-  [[ -n "${ONLINE_GENERATE_PREFIX_OVERLAP:-}" ]] && generate_args+=(--prefix-overlap "${ONLINE_GENERATE_PREFIX_OVERLAP}")
-  [[ -n "${ONLINE_GENERATE_APPROX_INPUT_TOKENS:-}" ]] && generate_args+=(--approx-input-tokens "${ONLINE_GENERATE_APPROX_INPUT_TOKENS}")
-  [[ -n "${ONLINE_GENERATE_TOKENIZER_MODEL:-}" ]] && generate_args+=(--tokenizer-model "${ONLINE_GENERATE_TOKENIZER_MODEL}")
-  [[ -n "${ONLINE_GENERATE_TOKEN_TOLERANCE:-}" ]] && generate_args+=(--token-tolerance "${ONLINE_GENERATE_TOKEN_TOLERANCE}")
-  [[ -n "${ONLINE_GENERATE_HUGGINGFACE_TOKEN:-}" ]] && generate_args+=(--huggingface-token "${ONLINE_GENERATE_HUGGINGFACE_TOKEN}")
+    if [[ -n "${ONLINE_GENERATE_EXTRA_ARGS:-}" ]]; then
+      # shellcheck disable=SC2206
+      generate_args+=(${ONLINE_GENERATE_EXTRA_ARGS})
+    fi
 
-  if [[ -n "${ONLINE_GENERATE_EXTRA_ARGS:-}" ]]; then
-    # shellcheck disable=SC2206
-    generate_args+=(${ONLINE_GENERATE_EXTRA_ARGS})
+    log "Generating request dataset:"; print_command "${generate_args[@]}"
+    local generated_output=()
+    if ! mapfile -t generated_output < <("${generate_args[@]}"); then
+      die "Request dataset generation failed"
+    fi
+    if ((${#generated_output[@]} == 0)); then
+      die "Dataset generator did not return a path"
+    fi
+    local last_index=$(( ${#generated_output[@]} - 1 ))
+    dataset_path=${generated_output[$last_index]}
+    if [[ -z "$dataset_path" ]]; then
+      die "Dataset generator returned an empty path"
+    fi
+    log "Using dataset $dataset_path"
   fi
-
-  log "Generating request dataset:"; print_command "${generate_args[@]}"
-  local generated_output=()
-  if ! mapfile -t generated_output < <("${generate_args[@]}"); then
-    die "Request dataset generation failed"
-  fi
-  if ((${#generated_output[@]} == 0)); then
-    die "Dataset generator did not return a path"
-  fi
-  local last_index=$(( ${#generated_output[@]} - 1 ))
-  local dataset_path=${generated_output[$last_index]}
-  if [[ -z "$dataset_path" ]]; then
-    die "Dataset generator returned an empty path"
-  fi
-  log "Using dataset $dataset_path"
-
+  
   local online_model=${ONLINE_MODEL:-}
   [[ -n "$online_model" ]] || die "ONLINE_MODEL must be set for online mode"
 
