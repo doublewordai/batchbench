@@ -18,17 +18,28 @@ RUN cd /workspace/batchbench; \
     uv pip install vllm --torch-backend=auto; \
     deactivate
 
-# Fetch latest commit hash from GitHub for the given branch
-ARG BATCHBENCH_COMMIT="1b0afb2"
-ARG BATCHBENCH_REPO="https://github.com/doublewordai/batchbench.git"
-ARG BATCHBENCH_REF="main"
+# # Fetch latest commit hash from GitHub for the given branch
+# ARG BATCHBENCH_COMMIT="7b0b6e9"
+# ARG BATCHBENCH_REPO="https://github.com/doublewordai/batchbench.git"
+# ARG BATCHBENCH_REF="main"
 
-# clone repo
+# # clone repo
+# RUN set -eux; \
+#     echo "Cloning BatchBench from ${BATCHBENCH_REPO} @ ${BATCHBENCH_COMMIT}"; \
+#     git clone "${BATCHBENCH_REPO}" /workspace/batchbench; \
+#     cd /workspace/batchbench; \
+#     git checkout "${BATCHBENCH_COMMIT}"; \
+#     . /opt/batchbench/.venv/bin/activate; \
+#     uv pip install --no-cache-dir ".[offline,generate]"; \
+#     deactivate
+
+# Copy local source files for faster development cycle
+COPY /pyproject.toml /README.md /MANIFEST.in /workspace/batchbench/
+COPY /src/ /workspace/batchbench/src/
+
+# Install BatchBench from local source
 RUN set -eux; \
-    echo "Cloning BatchBench from ${BATCHBENCH_REPO} @ ${BATCHBENCH_COMMIT}"; \
-    git clone "${BATCHBENCH_REPO}" /workspace/batchbench; \
     cd /workspace/batchbench; \
-    git checkout "${BATCHBENCH_COMMIT}"; \
     . /opt/batchbench/.venv/bin/activate; \
     uv pip install --no-cache-dir ".[offline,generate]"; \
     deactivate
@@ -37,7 +48,7 @@ RUN set -eux; \
 ENV PATH="/opt/batchbench/.venv/bin:$PATH"
 
 # Install BatchBench entrypoint wrapper
-COPY ./run_docker.sh /usr/local/bin/batchbench-entrypoint
+COPY ./docker/run_docker.sh /usr/local/bin/batchbench-entrypoint
 RUN chmod +x /usr/local/bin/batchbench-entrypoint
 
 ENTRYPOINT ["/usr/local/bin/batchbench-entrypoint"]

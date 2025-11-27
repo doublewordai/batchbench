@@ -32,6 +32,8 @@ export ONLINE_CLIENT_MODEL=${ONLINE_CLIENT_MODEL:-$ONLINE_MODEL}
 export ONLINE_USERS=${ONLINE_USERS:-4}
 export ONLINE_REQUESTS_PER_USER=${ONLINE_REQUESTS_PER_USER:-10}
 export ONLINE_REQUEST_TIMEOUT_SECS=${ONLINE_REQUEST_TIMEOUT_SECS:-120}
+# export ONLINE_RANDOM_REQUESTS=${ONLINE_RANDOM_REQUESTS:-true}  # Uncomment to enable random request selection
+# export ONLINE_VERBOSE=${ONLINE_VERBOSE:-true}  # Uncomment to enable verbose mode
 
 exec docker run --rm \
   --gpus all \
@@ -53,6 +55,8 @@ exec docker run --rm \
   -e ONLINE_USERS \
   -e ONLINE_REQUESTS_PER_USER \
   -e ONLINE_REQUEST_TIMEOUT_SECS \
+  -e ONLINE_RANDOM_REQUESTS \
+  -e ONLINE_VERBOSE \
   -v "$OUTPUT_DIR":/outputs \
   -v "/.cache/huggingface":/.cache/huggingface \
   "$IMAGE_NAME"

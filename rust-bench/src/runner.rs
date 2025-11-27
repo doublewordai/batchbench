@@ -120,7 +120,12 @@ async fn dispatch_request(
     event_tx: &mpsc::UnboundedSender<WorkerEvent>,
     status_tx: &mpsc::UnboundedSender<StatusEvent>,
 ) -> Result<()> {
-    let request_body = config.request_body_for(user_id)?.clone();
+    let request_body = if config.random_request_pool.is_some() {
+        config.random_request_body()?.clone()
+    } else {
+        config.request_body_for(user_id)?.clone()
+    };
+    
     match single_attempt(client, config, &request_body).await {
         Ok(stats) => {
             event_tx
@@ -131,7 +136,10 @@ async fn dispatch_request(
                     latency: stats.latency,
                 })
                 .map_err(|_| anyhow!("metrics channel closed before success event"))?;
-            let _ = status_tx.send(StatusEvent::Tokens(stats.completion_tokens));
+            let _ = status_tx.send(StatusEvent::Tokens {
+                prompt_tokens: stats.prompt_tokens,
+                completion_tokens: stats.completion_tokens,
+            });
         }
         Err(err) => {
             let message = err.to_string();
@@ -153,6 +161,11 @@ async fn single_attempt(
     config: &BenchmarkConfig,
     body: &Value,
 ) -> Result<RequestStats> {
+    if config.verbose {
+        let sanitized_body = sanitize_request_body(body);
+        println!("[REQUEST] {}", serde_json::to_string(&sanitized_body)?);
+    }
+
     let start = Instant::now();
     let mut request = client.post(config.endpoint.clone());
     for (name, value) in config.headers.iter() {
@@ -174,6 +187,12 @@ async fn single_attempt(
     }
 
     let payload: Value = serde_json::from_slice(&bytes)?;
+    
+    if config.verbose {
+        let sanitized_response = sanitize_response(&payload);
+        println!("[RESPONSE] {}", serde_json::to_string(&sanitized_response)?);
+    }
+    
     let (prompt_tokens, completion_tokens) = extract_usage(&payload)?;
     let latency = start.elapsed();
 
@@ -197,6 +216,66 @@ fn extract_usage(payload: &Value) -> Result<(u64, u64)> {
         .and_then(|value| value.as_u64())
         .unwrap_or(0);
     Ok((prompt_tokens, completion_tokens))
+}
+
+fn sanitize_request_body(body: &Value) -> Value {
+    let mut sanitized = body.clone();
+    
+    if let Some(obj) = sanitized.as_object_mut() {
+        if let Some(messages) = obj.get_mut("messages") {
+            if let Some(arr) = messages.as_array_mut() {
+                for msg in arr.iter_mut() {
+                    if let Some(msg_obj) = msg.as_object_mut() {
+                        if let Some(content) = msg_obj.get_mut("content") {
+                            if let Some(text) = content.as_str() {
+                                let preview = truncate_text(text, 50);
+                                *content = Value::String(preview);
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }
+    
+    sanitized
+}
+
+fn sanitize_response(response: &Value) -> Value {
+    let mut sanitized = response.clone();
+    
+    if let Some(obj) = sanitized.as_object_mut() {
+        if let Some(choices) = obj.get_mut("choices") {
+            if let Some(arr) = choices.as_array_mut() {
+                for choice in arr.iter_mut() {
+                    if let Some(choice_obj) = choice.as_object_mut() {
+                        if let Some(message) = choice_obj.get_mut("message") {
+                            if let Some(msg_obj) = message.as_object_mut() {
+                                if let Some(content) = msg_obj.get_mut("content") {
+                                    if let Some(text) = content.as_str() {
+                                        let preview = truncate_text(text, 50);
+                                        *content = Value::String(preview);
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }
+    
+    sanitized
+}
+
+fn truncate_text(text: &str, max_chars: usize) -> String {
+    let trimmed = text.trim();
+    if trimmed.chars().count() <= max_chars {
+        trimmed.to_string()
+    } else {
+        let truncated: String = trimmed.chars().take(max_chars).collect();
+        format!("{}...", truncated)
+    }
 }
 
 #[derive(Debug)]
@@ -329,7 +408,10 @@ fn percentile(sorted_latencies: &[Duration], quantile: f64) -> Option<Duration> 
 
 #[derive(Debug, Clone)]
 enum StatusEvent {
-    Tokens(u64),
+    Tokens {
+        prompt_tokens: u64,
+        completion_tokens: u64,
+    },
     Requests {
         successes: u64,
         failures: u64,
@@ -338,7 +420,8 @@ enum StatusEvent {
 }
 
 struct StatusSnapshot {
-    total_tokens: u64,
+    total_prompt_tokens: u64,
+    total_completion_tokens: u64,
     successes: u64,
     failures: u64,
     planned: Option<u64>,
@@ -346,7 +429,8 @@ struct StatusSnapshot {
 
 async fn track_status(mut updates: mpsc::UnboundedReceiver<StatusEvent>, start: Instant) {
     let mut snapshot = StatusSnapshot {
-        total_tokens: 0,
+        total_prompt_tokens: 0,
+        total_completion_tokens: 0,
         successes: 0,
         failures: 0,
         planned: None,
@@ -354,8 +438,12 @@ async fn track_status(mut updates: mpsc::UnboundedReceiver<StatusEvent>, start: 
 
     while let Some(event) = updates.recv().await {
         match event {
-            StatusEvent::Tokens(delta) => {
-                snapshot.total_tokens = snapshot.total_tokens.saturating_add(delta);
+            StatusEvent::Tokens {
+                prompt_tokens,
+                completion_tokens,
+            } => {
+                snapshot.total_prompt_tokens = snapshot.total_prompt_tokens.saturating_add(prompt_tokens);
+                snapshot.total_completion_tokens = snapshot.total_completion_tokens.saturating_add(completion_tokens);
             }
             StatusEvent::Requests {
                 successes,
@@ -377,7 +465,7 @@ async fn track_status(mut updates: mpsc::UnboundedReceiver<StatusEvent>, start: 
 fn render_status(snapshot: &StatusSnapshot, start: Instant, stay: bool) {
     let elapsed = start.elapsed().as_secs_f64();
     let throughput = if elapsed > 0.0 {
-        snapshot.total_tokens as f64 / elapsed
+        snapshot.total_completion_tokens as f64 / elapsed
     } else {
         0.0
     };
@@ -387,18 +475,20 @@ fn render_status(snapshot: &StatusSnapshot, start: Instant, stay: bool) {
         .map(|total| format!(" / {}", total))
         .unwrap_or_default();
 
+    let elapsed_line = format!("Elapsed: {:.1}s", elapsed);
     let throughput_line = format!("Throughput: {:.2} tok/s", throughput);
-    let tokens_line = format!("Completion tokens: {}", snapshot.total_tokens);
+    let prompt_tokens_line = format!("Input tokens: {}", snapshot.total_prompt_tokens);
+    let completion_tokens_line = format!("Output tokens: {}", snapshot.total_completion_tokens);
     let requests_line = format!("Requests: {}{}", completed, planned_text);
     let failures_line = format!("Failures: {}", snapshot.failures);
 
     print!(
-        "\r\x1b[2K{}\n\x1b[2K{}\n\x1b[2K{}\n\x1b[2K{}\n",
-        throughput_line, tokens_line, requests_line, failures_line
+        "\r\x1b[2K{}\n\x1b[2K{}\n\x1b[2K{}\n\x1b[2K{}\n\x1b[2K{}\n\x1b[2K{}\n",
+        elapsed_line, throughput_line, prompt_tokens_line, completion_tokens_line, requests_line, failures_line
     );
 
     if stay {
-        print!("\x1b[4A\r");
+        print!("\x1b[6A\r");
     }
 
     let _ = io::stdout().flush();

@@ -20,10 +20,12 @@ pub struct BenchmarkConfig {
     pub mode: RunMode,
     pub request_body: Value,
     pub per_user_bodies: Option<Vec<Value>>,
+    pub random_request_pool: Option<Vec<Value>>,
     pub request_timeout: Duration,
     pub max_retries: usize,
     pub retry_delay: Duration,
     pub headers: HeaderMap,
+    pub verbose: bool,
 }
 
 impl BenchmarkConfig {
@@ -75,10 +77,12 @@ impl BenchmarkConfig {
             mode,
             request_body,
             per_user_bodies: None,
+            random_request_pool: None,
             request_timeout: Duration::from_secs(6000),
             max_retries: 2,
             retry_delay: Duration::from_millis(250),
             headers,
+            verbose: false,
         })
     }
 
@@ -94,6 +98,11 @@ impl BenchmarkConfig {
         if !retry_delay.is_zero() {
             self.retry_delay = retry_delay;
         }
+        self
+    }
+
+    pub fn with_verbose(mut self, verbose: bool) -> Self {
+        self.verbose = verbose;
         self
     }
 
@@ -123,6 +132,19 @@ impl BenchmarkConfig {
         Ok(self)
     }
 
+    pub fn with_random_request_pool(mut self, bodies: Vec<Value>) -> Result<Self> {
+        if bodies.is_empty() {
+            return Err(anyhow!("random request pool cannot be empty"));
+        }
+
+        self.request_body = bodies
+            .first()
+            .cloned()
+            .unwrap_or_else(|| self.request_body.clone());
+        self.random_request_pool = Some(bodies);
+        Ok(self)
+    }
+
     pub fn request_body_for(&self, user_id: usize) -> Result<&Value> {
         if let Some(bodies) = &self.per_user_bodies {
             bodies
@@ -130,6 +152,17 @@ impl BenchmarkConfig {
                 .ok_or_else(|| anyhow!("no request body configured for user {}", user_id))
         } else {
             Ok(&self.request_body)
+        }
+    }
+
+    pub fn random_request_body(&self) -> Result<&Value> {
+        if let Some(pool) = &self.random_request_pool {
+            use rand::Rng;
+            let mut rng = rand::thread_rng();
+            let idx = rng.gen_range(0..pool.len());
+            Ok(&pool[idx])
+        } else {
+            Err(anyhow!("random request pool is not configured"))
         }
     }
 }

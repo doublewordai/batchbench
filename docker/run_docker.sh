@@ -157,6 +157,8 @@ run_online() {
   [[ -n "${ONLINE_RETRY_DELAY_MS:-}" ]] && online_args+=(--retry-delay-ms "${ONLINE_RETRY_DELAY_MS}")
   [[ -n "${ONLINE_OUTPUT_TOKENS:-}" ]] && online_args+=(--output-tokens "${ONLINE_OUTPUT_TOKENS}")
   [[ -n "${ONLINE_OUTPUT_VARY:-}" ]] && online_args+=(--output-vary "${ONLINE_OUTPUT_VARY}")
+  [[ "${ONLINE_RANDOM_REQUESTS:-}" == "true" ]] && online_args+=(--random-requests)
+  [[ "${ONLINE_VERBOSE:-}" == "true" ]] && online_args+=(--verbose)
 
   if [[ -n "${ONLINE_CLIENT_EXTRA_ARGS:-}" ]]; then
     # shellcheck disable=SC2206

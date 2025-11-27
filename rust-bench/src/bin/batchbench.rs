@@ -66,6 +66,14 @@ struct Args {
     /// Apply a +/- uniform variation when --output-tokens is provided
     #[arg(long)]
     output_vary: Option<usize>,
+
+    /// Enable verbose mode to print request/response details
+    #[arg(long, short)]
+    verbose: bool,
+
+    /// Enable random request selection mode (users select random requests from entire dataset)
+    #[arg(long)]
+    random_requests: bool,
 }
 
 #[tokio::main]
@@ -123,21 +131,51 @@ async fn main() -> Result<()> {
         return Err(anyhow!("users must be greater than zero"));
     }
 
-    if request_bodies.len() < user_count {
+    if !args.random_requests && request_bodies.len() < user_count {
         return Err(anyhow!(
-            "requested {} users but JSONL only provided {} records",
+            "requested {} users but JSONL only provided {} records (use --random-requests to select randomly from dataset)",
             user_count,
             request_bodies.len()
         ));
     }
 
-    request_bodies.truncate(user_count);
+    let dataset_size = request_bodies.len();
+    
+    if !args.random_requests {
+        request_bodies.truncate(user_count);
+    }
 
     let endpoint = resolve_endpoint(&args.host, &args.endpoint);
     let requests_per_user = args.requests_per_user.unwrap_or(1);
     if requests_per_user == 0 {
         return Err(anyhow!("requests_per_user must be greater than zero"));
     }
+
+    // Print benchmark configuration summary
+    println!("=== Benchmark Configuration ===");
+    println!("Endpoint: {}", endpoint);
+    println!("Model: {}", args.model);
+    println!("Dataset: {}", args.jsonl.display());
+    println!("Dataset size: {}", dataset_size);
+    println!("Users: {}", user_count);
+    if args.random_requests {
+        println!("Mode: Random request selection (each user picks randomly from dataset)");
+    } else {
+        println!("Mode: Fixed assignment (first {} dataset entries)", user_count);
+    }
+    println!("Requests per user: {}", requests_per_user);
+    println!("Total requests: {}", user_count * requests_per_user);
+    if let Some(tokens) = args.output_tokens {
+        if let Some(vary) = args.output_vary {
+            println!("Output tokens: {} ±{}", tokens, vary);
+        } else {
+            println!("Output tokens: {}", tokens);
+        }
+    }
+    println!("Request timeout: {}s", args.request_timeout_secs);
+    println!("Max retries: {}", args.max_retries);
+    println!("Retry delay: {}ms", args.retry_delay_ms);
+    println!("===============================\n");
 
     let mode = RunMode::Finite { requests_per_user };
 
@@ -152,9 +190,14 @@ async fn main() -> Result<()> {
             .expect("non-empty request bodies"),
     )?
     .with_request_timeout(Duration::from_secs(args.request_timeout_secs))
-    .with_retry(args.max_retries, Duration::from_millis(args.retry_delay_ms));
+    .with_retry(args.max_retries, Duration::from_millis(args.retry_delay_ms))
+    .with_verbose(args.verbose);
 
-    config = config.with_per_user_bodies(request_bodies)?;
+    if args.random_requests {
+        config = config.with_random_request_pool(request_bodies)?;
+    } else {
+        config = config.with_per_user_bodies(request_bodies)?;
+    }
 
     let report = run_benchmark(config).await?;
 
@@ -281,6 +324,10 @@ fn print_summary(report: &BenchmarkReport) -> Result<()> {
     println!(
         "Token totals: prompt {} completion {}",
         report.total_prompt_tokens, report.total_completion_tokens
+    );
+    println!(
+        "Total duration: {:.2}s",
+        report.total_duration.as_secs_f64()
     );
     println!(
         "Throughput: prompt {:.2} tok/s, completion {:.2} tok/s, requests {:.2} req/s",
