@@ -1,0 +1,54 @@
+# BatchBench Configuration - Online Example
+# This example shows an online benchmark configuration with server and client
+
+mode: online
+
+online:
+  # Model for the vLLM server
+  model: "Qwen/Qwen3-0.6B"
+  # Optional: different model name for client requests (defaults to model)
+  client_model: null
+  
+  server:
+    host: "0.0.0.0"
+    port: 8000
+    tensor_parallel_size: 1
+    pipeline_parallel_size: 1
+    max_num_batched_tokens: 8192
+    gpu_memory_utilization: 0.9
+    extra_args: []
+    
+    # Health check configuration
+    wait_retries: 60
+    wait_delay_secs: 1
+    health_url: null  # Defaults to http://127.0.0.1:{port}/v1/models
+  
+  client:
+    host: null  # Defaults to http://127.0.0.1:{server.port}
+    endpoint: null
+    users: 10
+    requests_per_user: 5
+    api_key: null
+    api_key_env: null
+    request_timeout_secs: 120
+    max_retries: 3
+    retry_delay_ms: 100
+    output_tokens: 128
+    output_vary: 0.2
+    random_requests: false
+    verbose: true
+    extra_args: []
+
+# Dataset generation configuration
+generate:
+  dataset_path: /tmp/batchbench_requests.jsonl
+  count: 100
+  prefix_overlap: 0.15
+  approx_input_tokens: 512
+  tokenizer_model: "Qwen/Qwen3-0.6B"
+  token_tolerance: 50
+  huggingface_token: null  # Set if model requires authentication
+  extra_args: []
+
+# Offline section not needed for online mode
+offline: {}

@@ -141,13 +141,24 @@ def main():
     
     unit = "tokens" if use_tokens else "characters"
     
+    # Calculate statistics
+    min_val = min(lengths)
+    max_val = max(lengths)
+    mean_val = np.mean(lengths)
+    median_val = np.median(lengths)
+    std_val = np.std(lengths)
+    p5_val = np.percentile(lengths, 5)
+    p95_val = np.percentile(lengths, 95)
+    
     print(f"\nAnalyzed {len(lengths)} conversations")
     print(f"Statistics ({unit}):")
-    print(f"  Min length: {min(lengths):,} {unit}")
-    print(f"  Max length: {max(lengths):,} {unit}")
-    print(f"  Mean length: {np.mean(lengths):,.1f} {unit}")
-    print(f"  Median length: {np.median(lengths):,.1f} {unit}")
-    print(f"  Std dev: {np.std(lengths):,.1f} {unit}")
+    print(f"  Min length: {min_val:,} {unit}")
+    print(f"  Max length: {max_val:,} {unit}")
+    print(f"  Mean length: {mean_val:,.1f} {unit}")
+    print(f"  Median length: {median_val:,.1f} {unit}")
+    print(f"  Std dev: {std_val:,.1f} {unit}")
+    print(f"  P5: {p5_val:,.1f} {unit}")
+    print(f"  P95: {p95_val:,.1f} {unit}")
     
     if turn_counts:
         print(f"\nTurn statistics:")
@@ -155,6 +166,9 @@ def main():
         print(f"  Max turns: {max(turn_counts)}")
         print(f"  Mean turns: {np.mean(turn_counts):.1f}")
         print(f"  Median turns: {np.median(turn_counts):.1f}")
+        print(f"  Std dev: {np.std(turn_counts):.1f}")
+        print(f"  P5: {np.percentile(turn_counts, 5):.1f}")
+        print(f"  P95: {np.percentile(turn_counts, 95):.1f}")
     
     # Create the histogram
     fig, (ax1, ax2) = plt.subplots(2, 1, figsize=(12, 10))
@@ -168,8 +182,14 @@ def main():
                   fontsize=14, fontweight='bold')
     ax1.grid(True, alpha=0.3)
     
-    # Add statistics text
-    stats_text = f'Mean: {np.mean(lengths):,.0f}\nMedian: {np.median(lengths):,.0f}\nStd: {np.std(lengths):,.0f}'
+    # Add statistics text with all requested metrics
+    stats_text = (f'Mean: {mean_val:,.0f}\n'
+                  f'Median: {median_val:,.0f}\n'
+                  f'Std: {std_val:,.0f}\n'
+                  f'Min: {min_val:,}\n'
+                  f'Max: {max_val:,}\n'
+                  f'P5: {p5_val:,.0f}\n'
+                  f'P95: {p95_val:,.0f}')
     ax1.text(0.97, 0.97, stats_text, transform=ax1.transAxes, 
              verticalalignment='top', horizontalalignment='right',
              bbox=dict(boxstyle='round', facecolor='wheat', alpha=0.5),
@@ -183,8 +203,15 @@ def main():
         ax2.set_title('Distribution of Conversation Turns', fontsize=14, fontweight='bold')
         ax2.grid(True, alpha=0.3)
         
-        stats_text = f'Mean: {np.mean(turn_counts):.1f}\nMedian: {np.median(turn_counts):.1f}'
-        ax2.text(0.97, 0.97, stats_text, transform=ax2.transAxes,
+        # Add comprehensive statistics for turn counts
+        turn_stats_text = (f'Mean: {np.mean(turn_counts):.1f}\n'
+                          f'Median: {np.median(turn_counts):.1f}\n'
+                          f'Std: {np.std(turn_counts):.1f}\n'
+                          f'Min: {min(turn_counts)}\n'
+                          f'Max: {max(turn_counts)}\n'
+                          f'P5: {np.percentile(turn_counts, 5):.1f}\n'
+                          f'P95: {np.percentile(turn_counts, 95):.1f}')
+        ax2.text(0.97, 0.97, turn_stats_text, transform=ax2.transAxes,
                  verticalalignment='top', horizontalalignment='right',
                  bbox=dict(boxstyle='round', facecolor='wheat', alpha=0.5),
                  fontsize=10)

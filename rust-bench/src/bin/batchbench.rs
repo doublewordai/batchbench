@@ -225,55 +225,104 @@ fn load_requests(
         let value: Value = serde_json::from_str(trimmed)
             .with_context(|| format!("line {} is not valid JSON: {}", idx + 1, trimmed))?;
         
-        let text_field = value
-            .get("text")
-            .ok_or_else(|| anyhow!("line {} missing field `text`", idx + 1))?;
-
-        let messages = if let Some(text_str) = text_field.as_str() {
-            // Handle text as a string
-            vec![json!({
-                "role": "user",
-                "content": text_str,
-            })]
-        } else if let Some(text_array) = text_field.as_array() {
-            // Handle text as an array of maps with content and role fields
-            let mut msgs = Vec::new();
-            for (msg_idx, msg) in text_array.iter().enumerate() {
-                let content = msg
-                    .get("content")
-                    .and_then(|v| v.as_str())
-                    .ok_or_else(|| {
-                        anyhow!(
-                            "line {} text[{}] missing string field `content`",
-                            idx + 1,
-                            msg_idx
-                        )
-                    })?;
-                let role = msg
-                    .get("role")
-                    .and_then(|v| v.as_str())
-                    .ok_or_else(|| {
-                        anyhow!(
-                            "line {} text[{}] missing string field `role`",
-                            idx + 1,
-                            msg_idx
-                        )
-                    })?;
-                msgs.push(json!({
-                    "role": role,
-                    "content": content,
-                }));
+        // Try to parse as OpenAI Batch API format first (with "messages" field)
+        let messages = if let Some(messages_array) = value.get("messages") {
+            // OpenAI Batch API format: {"messages": [...], "model": "..."}
+            if let Some(msgs) = messages_array.as_array() {
+                // Validate and clone the messages array
+                let mut validated_msgs = Vec::new();
+                for (msg_idx, msg) in msgs.iter().enumerate() {
+                    let content = msg
+                        .get("content")
+                        .and_then(|v| v.as_str())
+                        .ok_or_else(|| {
+                            anyhow!(
+                                "line {} messages[{}] missing string field `content`",
+                                idx + 1,
+                                msg_idx
+                            )
+                        })?;
+                    let role = msg
+                        .get("role")
+                        .and_then(|v| v.as_str())
+                        .ok_or_else(|| {
+                            anyhow!(
+                                "line {} messages[{}] missing string field `role`",
+                                idx + 1,
+                                msg_idx
+                            )
+                        })?;
+                    validated_msgs.push(json!({
+                        "role": role,
+                        "content": content,
+                    }));
+                }
+                validated_msgs
+            } else {
+                return Err(anyhow!(
+                    "line {} field `messages` must be an array",
+                    idx + 1
+                ));
             }
-            msgs
+        } else if let Some(text_field) = value.get("text") {
+            // Legacy format: {"text": "..."}
+            if let Some(text_str) = text_field.as_str() {
+                // Handle text as a string
+                vec![json!({
+                    "role": "user",
+                    "content": text_str,
+                })]
+            } else if let Some(text_array) = text_field.as_array() {
+                // Handle text as an array of maps with content and role fields
+                let mut msgs = Vec::new();
+                for (msg_idx, msg) in text_array.iter().enumerate() {
+                    let content = msg
+                        .get("content")
+                        .and_then(|v| v.as_str())
+                        .ok_or_else(|| {
+                            anyhow!(
+                                "line {} text[{}] missing string field `content`",
+                                idx + 1,
+                                msg_idx
+                            )
+                        })?;
+                    let role = msg
+                        .get("role")
+                        .and_then(|v| v.as_str())
+                        .ok_or_else(|| {
+                            anyhow!(
+                                "line {} text[{}] missing string field `role`",
+                                idx + 1,
+                                msg_idx
+                            )
+                        })?;
+                    msgs.push(json!({
+                        "role": role,
+                        "content": content,
+                    }));
+                }
+                msgs
+            } else {
+                return Err(anyhow!(
+                    "line {} field `text` must be either a string or an array",
+                    idx + 1
+                ));
+            }
         } else {
             return Err(anyhow!(
-                "line {} field `text` must be either a string or an array",
+                "line {} missing required field `messages` or `text`",
                 idx + 1
             ));
         };
 
+        // Use the model from the JSONL if present, otherwise use the CLI argument
+        let model_to_use = value
+            .get("model")
+            .and_then(|v| v.as_str())
+            .unwrap_or(model);
+
         let mut body = json!({
-            "model": model,
+            "model": model_to_use,
             "messages": messages,
         });
 

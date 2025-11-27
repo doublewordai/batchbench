@@ -232,6 +232,14 @@ def parse_args(argv: List[str] | None = None) -> argparse.Namespace:
         ),
     )
     parser.add_argument(
+        "--model",
+        default=None,
+        help=(
+            "Model identifier to include in the JSONL output (optional). "
+            "If not specified, no model field will be included."
+        ),
+    )
+    parser.add_argument(
         "--dist-mode",
         choices=["fixed", "lognormal"],
         default="fixed",
@@ -378,7 +386,17 @@ def main(argv: List[str] | None = None) -> int:
 
     with output_path.open("w", encoding="utf-8") as handle:
         for prompt in prompts:
-            json.dump({"text": prompt}, handle)
+            record = {
+                "messages": [
+                    {
+                        "role": "user",
+                        "content": prompt
+                    }
+                ]
+            }
+            if args.model:
+                record["model"] = args.model
+            json.dump(record, handle)
             handle.write("\n")
 
     print(

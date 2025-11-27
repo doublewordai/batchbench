@@ -37,8 +37,11 @@ RUN set -eux; \
 ENV PATH="/opt/batchbench/.venv/bin:$PATH"
 
 # Install BatchBench entrypoint wrapper
-COPY ./run_docker.sh /usr/local/bin/batchbench-entrypoint
+COPY ./run_docker.py /usr/local/bin/batchbench-entrypoint
 RUN chmod +x /usr/local/bin/batchbench-entrypoint
+
+# Copy example config files
+COPY ./config.*.yaml /etc/batchbench/examples/
 
 ENTRYPOINT ["/usr/local/bin/batchbench-entrypoint"]
 CMD []

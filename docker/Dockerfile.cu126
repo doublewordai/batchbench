@@ -47,9 +47,28 @@ RUN set -eux; \
 # add uv venv to path for runtime
 ENV PATH="/opt/batchbench/.venv/bin:$PATH"
 
+# Install SSH server and dependencies
+RUN apt-get update && \
+apt-get install -y openssh-server && \
+apt-get clean && \
+rm -rf /var/lib/apt/lists/*
+
+# Configure SSH
+RUN mkdir -p /var/run/sshd && \
+sed -i 's/#PermitRootLogin prohibit-password/PermitRootLogin prohibit-password/' /etc/ssh/sshd_config && \
+sed -i 's@session\s*required\s*pam_loginuid.so@session optional pam_loginuid.so@g' /etc/pam.d/sshd && \
+ssh-keygen -A
+
+# Create SSH directory for root
+RUN mkdir -p /root/.ssh && \
+chmod 700 /root/.ssh
+
 # Install BatchBench entrypoint wrapper
-COPY ./docker/run_docker.sh /usr/local/bin/batchbench-entrypoint
+COPY ./docker/run_docker.py /usr/local/bin/batchbench-entrypoint
 RUN chmod +x /usr/local/bin/batchbench-entrypoint
+
+# Copy example config files
+COPY ./docker/config.*.yaml /etc/batchbench/examples/
 
 ENTRYPOINT ["/usr/local/bin/batchbench-entrypoint"]
 CMD []
