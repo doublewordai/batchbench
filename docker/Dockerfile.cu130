@@ -43,5 +43,19 @@ RUN chmod +x /usr/local/bin/batchbench-entrypoint
 # Copy example config files
 COPY ./config.*.yaml /etc/batchbench/examples/
 
+# Optional: Bake in a config file at build time
+# Use --build-arg BAKED_CONFIG=./path/to/config.yaml to include a default config
+ARG BAKED_CONFIG
+RUN if [ -n "$BAKED_CONFIG" ]; then \
+        echo "Baking config into container..."; \
+    fi
+COPY ${BAKED_CONFIG:-config.example.yaml} /etc/batchbench/.baked-config.yaml
+RUN if [ -n "$BAKED_CONFIG" ]; then \
+        cp /etc/batchbench/.baked-config.yaml /etc/batchbench/config.yaml; \
+        echo "Baked config installed to /etc/batchbench/config.yaml"; \
+    else \
+        rm /etc/batchbench/.baked-config.yaml; \
+    fi
+
 ENTRYPOINT ["/usr/local/bin/batchbench-entrypoint"]
 CMD []

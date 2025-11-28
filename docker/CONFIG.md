@@ -26,6 +26,37 @@ docker run \
   your-image
 ```
 
+### 3. Bake config into container at build time (optional)
+
+For environments where mounting files is difficult, you can bake a config file into the container image at build time:
+
+```bash
+# Build with a baked-in config
+docker build \
+  --build-arg BAKED_CONFIG=./my-config.yaml \
+  -f docker/Dockerfile.cu126 \
+  -t my-batchbench:latest \
+  .
+
+# Run without mounting - uses baked config
+docker run my-batchbench:latest
+```
+
+The baked config will be installed at `/etc/batchbench/config.yaml` in the image. You can still override it at runtime by mounting a different config file.
+
+## Configuration Priority
+
+The entrypoint script checks for config files in this order:
+
+1. Path specified by `CONFIG_FILE` environment variable
+2. `/etc/batchbench/config.yaml` (default location, may contain baked config)
+3. Error if no config found
+
+This means:
+- Mounted configs take precedence over baked configs
+- Baked configs provide a fallback when no mount is available
+- You can still use `CONFIG_FILE` env var to override both
+
 ## Configuration Structure
 
 ### Mode Selection
