@@ -6,8 +6,6 @@ mode: online
 online:
   # Model for the vLLM server
   model: "Qwen/Qwen3-0.6B"
-  # Optional: different model name for client requests (defaults to model)
-  client_model: null
   
   server:
     host: "0.0.0.0"
@@ -15,17 +13,17 @@ online:
     tensor_parallel_size: 1
     pipeline_parallel_size: 1
     max_num_batched_tokens: 8192
-    gpu_memory_utilization: 0.9
+    gpu_memory_utilization: 0.75
     extra_args: []
     
     # Health check configuration
-    wait_retries: 60
-    wait_delay_secs: 1
+    wait_retries: 10000
+    wait_delay_secs: 5
     health_url: null  # Defaults to http://127.0.0.1:{port}/v1/models
   
   client:
     host: null  # Defaults to http://127.0.0.1:{server.port}
-    endpoint: null
+    endpoint: "/v1/chat/completions"
     users: 10
     requests_per_user: 5
     api_key: null
@@ -34,19 +32,20 @@ online:
     max_retries: 3
     retry_delay_ms: 100
     output_tokens: 128
-    output_vary: 0.2
-    random_requests: false
-    verbose: true
+    output_vary: 20
+    random_requests: true
+    verbose: false
     extra_args: []
 
 # Dataset generation configuration
 generate:
   dataset_path: /tmp/batchbench_requests.jsonl
   count: 100
-  prefix_overlap: 0.15
-  approx_input_tokens: 512
+  dist_mode: "lognormal"
+  dist_median: 512
+  dist_sigma: 0.5
+  dist_max: 1024
   tokenizer_model: "Qwen/Qwen3-0.6B"
-  token_tolerance: 50
   huggingface_token: null  # Set if model requires authentication
   extra_args: []
 

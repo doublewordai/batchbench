@@ -113,8 +113,8 @@ def wait_for_local_http(url: str, pid: int, retries: int = 60, delay: int = 1) -
     
     Args:
         url: URL to check
-        pid: Process ID to monitor
-        retries: Number of retry attempts
+        pid: Process ID         retries: Number of retry attempts
+to monitor
         delay: Delay in seconds between attempts
     """
     for attempt in range(1, retries + 1):
@@ -206,6 +206,11 @@ def run_online(config: Dict[str, Any]) -> None:
             ('tokenizer_model', '--tokenizer-model'),
             ('token_tolerance', '--token-tolerance'),
             ('huggingface_token', '--huggingface-token'),
+            ('model', '--model'),
+            ('dist_mode', '--dist-mode'),
+            ('dist_median', '--dist-median'),
+            ('dist_sigma', '--dist-sigma'),
+            ('dist_max', '--dist-max'),
         ]
 
         add_args_from_dict(generate_args, generate_config, mappings)
@@ -215,19 +220,9 @@ def run_online(config: Dict[str, Any]) -> None:
         print_command(generate_args)
         
         try:
-            result = subprocess.run(
-                generate_args,
-                check=True,
-                capture_output=True,
-                text=True
-            )
-            output_lines = result.stdout.strip().split('\n')
-            if not output_lines or not output_lines[-1]:
-                die("Dataset generator did not return a path")
-            dataset_path = output_lines[-1].strip()
-            if not dataset_path:
-                die("Dataset generator returned an empty path")
-            log(f"Using dataset {dataset_path}")
+            subprocess.run(generate_args, check=True)
+            dataset_path = dataset_base
+            log(f"Generated dataset: {dataset_path}")
         except subprocess.CalledProcessError:
             die("Request dataset generation failed")
 
@@ -242,8 +237,8 @@ def run_online(config: Dict[str, Any]) -> None:
     server_port = server_config.get('port', 8000)
     
     client_config = online_config.get('client', {})
-    base_url = client_config.get('host', f'http://127.0.0.1:{server_port}')
-    readiness_url = server_config.get('health_url', f'{base_url}/v1/models')
+    base_url = client_config.get('host') or f'http://127.0.0.1:{server_port}'
+    readiness_url = server_config.get('health_url') or f'{base_url}/v1/models'
 
     # Build server arguments
     server_args = [
@@ -274,11 +269,10 @@ def run_online(config: Dict[str, Any]) -> None:
         wait_for_local_http(readiness_url, server_pid, wait_retries, wait_delay)
 
         # Build online benchmark arguments
-        client_model = online_config.get('client_model', online_model)
         online_args = [
             'python', '-m', 'batchbench.online',
             '--jsonl', dataset_path,
-            '--model', client_model,
+            '--model', online_model,
             '--host', base_url,
         ]
 
@@ -332,12 +326,4 @@ def main() -> None:
 
 
 if __name__ == '__main__':
-    try:
-        main()
-    except KeyboardInterrupt:
-        log("Interrupted by user")
-        sys.exit(130)
-    except subprocess.CalledProcessError as e:
-        die(f"Command failed with exit code {e.returncode}")
-    except Exception as e:
-        die(f"Unexpected error: {e}")
+    main()
