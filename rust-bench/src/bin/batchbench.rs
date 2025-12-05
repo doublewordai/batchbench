@@ -1,13 +1,47 @@
-use std::fs::File;
+use std::fs::{self, File};
 use std::io::{BufRead, BufReader};
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::time::Duration;
 
 use anyhow::{anyhow, Context, Result};
 use batchbench_rs::{run_benchmark, BenchmarkConfig, BenchmarkReport, RunMode};
 use clap::Parser;
 use rand::Rng;
+use serde::Serialize;
 use serde_json::{json, Value};
+
+#[derive(Debug, Serialize)]
+struct CsvResult {
+    timestamp: String,
+    model: String,
+    dataset_path: String,
+    dataset_size: usize,
+    users: usize,
+    requests_per_user: usize,
+    total_requests: u64,
+    successful_requests: u64,
+    failed_requests: u64,
+    total_prompt_tokens: u64,
+    total_completion_tokens: u64,
+    total_duration_seconds: f64,
+    requests_per_second: f64,
+    prompt_tokens_per_second: f64,
+    completion_tokens_per_second: f64,
+    latency_p50_ms: Option<f64>,
+    latency_p90_ms: Option<f64>,
+    latency_p99_ms: Option<f64>,
+    random_requests: bool,
+    output_tokens: Option<usize>,
+    output_vary: Option<usize>,
+    output_lognorm_mu: Option<f64>,
+    output_lognorm_sigma: Option<f64>,
+    output_lognorm_max: Option<usize>,
+    request_timeout_secs: u64,
+    max_retries: usize,
+    retry_delay_ms: u64,
+    host: String,
+    endpoint: String,
+}
 
 #[derive(Parser, Debug)]
 #[command(
@@ -67,6 +101,18 @@ struct Args {
     #[arg(long)]
     output_vary: Option<usize>,
 
+    /// Sample output length from log-normal distribution with this mu parameter (mean of underlying normal)
+    #[arg(long)]
+    output_lognorm_mu: Option<f64>,
+
+    /// Sample output length from log-normal distribution with this sigma parameter (std dev of underlying normal)
+    #[arg(long)]
+    output_lognorm_sigma: Option<f64>,
+
+    /// Maximum output tokens when using lognormal sampling (values above this are truncated)
+    #[arg(long)]
+    output_lognorm_max: Option<usize>,
+
     /// Enable verbose mode to print request/response details
     #[arg(long, short)]
     verbose: bool,
@@ -74,6 +120,10 @@ struct Args {
     /// Enable random request selection mode (users select random requests from entire dataset)
     #[arg(long)]
     random_requests: bool,
+
+    /// Optional path to write CSV summary output
+    #[arg(long)]
+    results_csv: Option<PathBuf>,
 }
 
 #[tokio::main]
@@ -106,6 +156,30 @@ async fn main() -> Result<()> {
             ));
         }
     }
+
+    // Validate lognormal parameters
+    let output_lognorm = match (args.output_lognorm_mu, args.output_lognorm_sigma) {
+        (Some(mu), Some(sigma)) => {
+            if sigma <= 0.0 {
+                return Err(anyhow!("output-lognorm-sigma must be greater than zero"));
+            }
+            if args.output_tokens.is_some() {
+                return Err(anyhow!("--output-lognorm-mu/--output-lognorm-sigma cannot be used with --output-tokens"));
+            }
+            Some((mu, sigma, args.output_lognorm_max))
+        }
+        (Some(_), None) => {
+            return Err(anyhow!(
+                "--output-lognorm-mu requires --output-lognorm-sigma to be set"
+            ));
+        }
+        (None, Some(_)) => {
+            return Err(anyhow!(
+                "--output-lognorm-sigma requires --output-lognorm-mu to be set"
+            ));
+        }
+        (None, None) => None,
+    };
 
     let api_key = args
         .api_key
@@ -140,12 +214,13 @@ async fn main() -> Result<()> {
     }
 
     let dataset_size = request_bodies.len();
-    
+
     if !args.random_requests {
         request_bodies.truncate(user_count);
     }
 
     let endpoint = resolve_endpoint(&args.host, &args.endpoint);
+    let endpoint_for_config = endpoint.clone(); // Clone for later use in config JSON
     let requests_per_user = args.requests_per_user.unwrap_or(1);
     if requests_per_user == 0 {
         return Err(anyhow!("requests_per_user must be greater than zero"));
@@ -161,7 +236,10 @@ async fn main() -> Result<()> {
     if args.random_requests {
         println!("Mode: Random request selection (each user picks randomly from dataset)");
     } else {
-        println!("Mode: Fixed assignment (first {} dataset entries)", user_count);
+        println!(
+            "Mode: Fixed assignment (first {} dataset entries)",
+            user_count
+        );
     }
     println!("Requests per user: {}", requests_per_user);
     println!("Total requests: {}", user_count * requests_per_user);
@@ -170,6 +248,22 @@ async fn main() -> Result<()> {
             println!("Output tokens: {} ±{}", tokens, vary);
         } else {
             println!("Output tokens: {}", tokens);
+        }
+    }
+    if let Some((mu, sigma, max)) = output_lognorm {
+        // Calculate expected mean and median for user info
+        let expected_mean = (mu + sigma * sigma / 2.0).exp();
+        let expected_median = mu.exp();
+        if let Some(max_val) = max {
+            println!(
+                "Output tokens: lognormal(μ={}, σ={}, max={}) [expected mean≈{:.0}, median≈{:.0}]",
+                mu, sigma, max_val, expected_mean, expected_median
+            );
+        } else {
+            println!(
+                "Output tokens: lognormal(μ={}, σ={}) [expected mean≈{:.0}, median≈{:.0}]",
+                mu, sigma, expected_mean, expected_median
+            );
         }
     }
     println!("Request timeout: {}s", args.request_timeout_secs);
@@ -199,9 +293,57 @@ async fn main() -> Result<()> {
         config = config.with_per_user_bodies(request_bodies)?;
     }
 
+    if let Some((mu, sigma, max)) = output_lognorm {
+        config = config.with_output_lognorm(mu, sigma, max);
+    }
+
+    let start_time = chrono::Utc::now();
     let report = run_benchmark(config).await?;
 
     print_summary(&report)?;
+
+    if let Some(csv_path) = args.results_csv.as_ref() {
+        let record = CsvResult {
+            timestamp: start_time.to_rfc3339(),
+            model: args.model.clone(),
+            dataset_path: args.jsonl.to_string_lossy().into_owned(),
+            dataset_size,
+            users: user_count,
+            requests_per_user,
+            total_requests: report.total_requests,
+            successful_requests: report.successful_requests,
+            failed_requests: report.failed_requests,
+            total_prompt_tokens: report.total_prompt_tokens,
+            total_completion_tokens: report.total_completion_tokens,
+            total_duration_seconds: report.total_duration.as_secs_f64(),
+            requests_per_second: report.requests_per_second,
+            prompt_tokens_per_second: report.prompt_tokens_per_second,
+            completion_tokens_per_second: report.completion_tokens_per_second,
+            latency_p50_ms: report.latency_p50.map(|d| d.as_secs_f64() * 1000.0),
+            latency_p90_ms: report.latency_p90.map(|d| d.as_secs_f64() * 1000.0),
+            latency_p99_ms: report.latency_p99.map(|d| d.as_secs_f64() * 1000.0),
+            random_requests: args.random_requests,
+            output_tokens: args.output_tokens,
+            output_vary: args.output_vary,
+            output_lognorm_mu: args.output_lognorm_mu,
+            output_lognorm_sigma: args.output_lognorm_sigma,
+            output_lognorm_max: args.output_lognorm_max,
+            request_timeout_secs: args.request_timeout_secs,
+            max_retries: args.max_retries,
+            retry_delay_ms: args.retry_delay_ms,
+            host: args.host.clone(),
+            endpoint: endpoint_for_config.clone(),
+        };
+
+        match write_results_csv(csv_path.as_path(), &record) {
+            Ok(_) => println!("Wrote benchmark summary to {}", csv_path.display()),
+            Err(err) => eprintln!(
+                "Failed to write benchmark summary to {}: {}",
+                csv_path.display(),
+                err
+            ),
+        }
+    }
 
     Ok(())
 }
@@ -224,7 +366,7 @@ fn load_requests(
         }
         let value: Value = serde_json::from_str(trimmed)
             .with_context(|| format!("line {} is not valid JSON: {}", idx + 1, trimmed))?;
-        
+
         // Try to parse as OpenAI Batch API format first (with "messages" field)
         let messages = if let Some(messages_array) = value.get("messages") {
             // OpenAI Batch API format: {"messages": [...], "model": "..."}
@@ -232,26 +374,20 @@ fn load_requests(
                 // Validate and clone the messages array
                 let mut validated_msgs = Vec::new();
                 for (msg_idx, msg) in msgs.iter().enumerate() {
-                    let content = msg
-                        .get("content")
-                        .and_then(|v| v.as_str())
-                        .ok_or_else(|| {
-                            anyhow!(
-                                "line {} messages[{}] missing string field `content`",
-                                idx + 1,
-                                msg_idx
-                            )
-                        })?;
-                    let role = msg
-                        .get("role")
-                        .and_then(|v| v.as_str())
-                        .ok_or_else(|| {
-                            anyhow!(
-                                "line {} messages[{}] missing string field `role`",
-                                idx + 1,
-                                msg_idx
-                            )
-                        })?;
+                    let content = msg.get("content").and_then(|v| v.as_str()).ok_or_else(|| {
+                        anyhow!(
+                            "line {} messages[{}] missing string field `content`",
+                            idx + 1,
+                            msg_idx
+                        )
+                    })?;
+                    let role = msg.get("role").and_then(|v| v.as_str()).ok_or_else(|| {
+                        anyhow!(
+                            "line {} messages[{}] missing string field `role`",
+                            idx + 1,
+                            msg_idx
+                        )
+                    })?;
                     validated_msgs.push(json!({
                         "role": role,
                         "content": content,
@@ -276,26 +412,20 @@ fn load_requests(
                 // Handle text as an array of maps with content and role fields
                 let mut msgs = Vec::new();
                 for (msg_idx, msg) in text_array.iter().enumerate() {
-                    let content = msg
-                        .get("content")
-                        .and_then(|v| v.as_str())
-                        .ok_or_else(|| {
-                            anyhow!(
-                                "line {} text[{}] missing string field `content`",
-                                idx + 1,
-                                msg_idx
-                            )
-                        })?;
-                    let role = msg
-                        .get("role")
-                        .and_then(|v| v.as_str())
-                        .ok_or_else(|| {
-                            anyhow!(
-                                "line {} text[{}] missing string field `role`",
-                                idx + 1,
-                                msg_idx
-                            )
-                        })?;
+                    let content = msg.get("content").and_then(|v| v.as_str()).ok_or_else(|| {
+                        anyhow!(
+                            "line {} text[{}] missing string field `content`",
+                            idx + 1,
+                            msg_idx
+                        )
+                    })?;
+                    let role = msg.get("role").and_then(|v| v.as_str()).ok_or_else(|| {
+                        anyhow!(
+                            "line {} text[{}] missing string field `role`",
+                            idx + 1,
+                            msg_idx
+                        )
+                    })?;
                     msgs.push(json!({
                         "role": role,
                         "content": content,
@@ -316,10 +446,7 @@ fn load_requests(
         };
 
         // Use the model from the JSONL if present, otherwise use the CLI argument
-        let model_to_use = value
-            .get("model")
-            .and_then(|v| v.as_str())
-            .unwrap_or(model);
+        let model_to_use = value.get("model").and_then(|v| v.as_str()).unwrap_or(model);
 
         let mut body = json!({
             "model": model_to_use,
@@ -397,6 +524,25 @@ fn print_summary(report: &BenchmarkReport) -> Result<()> {
         }
     }
 
+    Ok(())
+}
+
+fn write_results_csv(path: &Path, record: &CsvResult) -> Result<()> {
+    if let Some(parent) = path.parent() {
+        if !parent.as_os_str().is_empty() {
+            fs::create_dir_all(parent)
+                .with_context(|| format!("failed to create directory {}", parent.display()))?;
+        }
+    }
+
+    let mut writer = csv::Writer::from_path(path)
+        .with_context(|| format!("failed to create {}", path.display()))?;
+    writer
+        .serialize(record)
+        .with_context(|| format!("failed to serialize results to {}", path.display()))?;
+    writer
+        .flush()
+        .with_context(|| format!("failed to flush {}", path.display()))?;
     Ok(())
 }
 

@@ -31,6 +31,8 @@ online:
     pipeline_parallel_size: null
     max_num_batched_tokens: null
     gpu_memory_utilization: null
+    gpu_name: null  # Optional descriptive label recorded with results
+    gpu_count: null  # Optional integer count recorded with results
     extra_args: []  # Additional server arguments as a list
     
     # Health check settings
@@ -49,10 +51,19 @@ online:
     request_timeout_secs: null  # Request timeout in seconds
     max_retries: null  # Max retry attempts
     retry_delay_ms: null  # Retry delay in milliseconds
-    output_tokens: null  # Number of output tokens
-    output_vary: null  # Output token variation
+    output_tokens: null  # Number of output tokens (fixed)
+    output_vary: null  # Output token variation (+/- uniform)
+    output_lognorm_mu: null  # Log-normal mu parameter (mean of underlying normal)
+    output_lognorm_sigma: null  # Log-normal sigma parameter (std dev of underlying normal)
     random_requests: false  # Randomize request order
     verbose: false  # Verbose output
+    results_csv: null  # Path for CSV summary (defaults to /tmp/batchbench_results.csv)
+    
+    # Server reporting settings (handled by run_docker)
+    server_url: null  # Server URL to post results to
+    project_name: null  # Project name for reporting
+    experiment_name: null  # Experiment name for reporting
+    
     extra_args: []  # Additional client arguments as a list
 
 # Dataset generation configuration (for online mode)

@@ -33,6 +33,10 @@ RUN cd /workspace/batchbench; \
 #     uv pip install --no-cache-dir ".[offline,generate]"; \
 #     deactivate
 
+COPY /docker/install_python_libraries.sh /workspace/batchbench/install_ep_libs.sh
+RUN set -eux; \
+    bash /workspace/batchbench/install_ep_libs.sh
+
 # Copy local source files for faster development cycle
 COPY /pyproject.toml /README.md /MANIFEST.in /workspace/batchbench/
 COPY /src/ /workspace/batchbench/src/
@@ -69,20 +73,6 @@ RUN chmod +x /usr/local/bin/batchbench-entrypoint
 
 # Copy example config files
 COPY ./docker/config.*.yaml /etc/batchbench/examples/
-
-# Optional: Bake in a config file at build time
-# Use --build-arg BAKED_CONFIG=./path/to/config.yaml to include a default config
-ARG BAKED_CONFIG
-RUN if [ -n "$BAKED_CONFIG" ]; then \
-        echo "Baking config into container..."; \
-    fi
-COPY ${BAKED_CONFIG:-docker/config.example.yaml} /etc/batchbench/.baked-config.yaml
-RUN if [ -n "$BAKED_CONFIG" ]; then \
-        cp /etc/batchbench/.baked-config.yaml /etc/batchbench/config.yaml; \
-        echo "Baked config installed to /etc/batchbench/config.yaml"; \
-    else \
-        rm /etc/batchbench/.baked-config.yaml; \
-    fi
 
 ENTRYPOINT ["/usr/local/bin/batchbench-entrypoint"]
 CMD []

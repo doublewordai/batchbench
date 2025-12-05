@@ -26,6 +26,8 @@ pub struct BenchmarkConfig {
     pub retry_delay: Duration,
     pub headers: HeaderMap,
     pub verbose: bool,
+    /// Optional log-normal distribution parameters (mu, sigma, max) for sampling output token counts
+    pub output_lognorm: Option<(f64, f64, Option<usize>)>,
 }
 
 impl BenchmarkConfig {
@@ -83,6 +85,7 @@ impl BenchmarkConfig {
             retry_delay: Duration::from_millis(250),
             headers,
             verbose: false,
+            output_lognorm: None,
         })
     }
 
@@ -103,6 +106,11 @@ impl BenchmarkConfig {
 
     pub fn with_verbose(mut self, verbose: bool) -> Self {
         self.verbose = verbose;
+        self
+    }
+
+    pub fn with_output_lognorm(mut self, mu: f64, sigma: f64, max: Option<usize>) -> Self {
+        self.output_lognorm = Some((mu, sigma, max));
         self
     }
 

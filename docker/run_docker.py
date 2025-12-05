@@ -3,6 +3,8 @@
 Docker entrypoint script for batchbench - runs offline or online benchmarks.
 Configured via YAML file instead of environment variables.
 """
+import csv
+import json
 import os
 import sys
 import subprocess
@@ -10,7 +12,7 @@ import time
 import signal
 import shlex
 from datetime import datetime
-from typing import List, Optional, Dict, Any
+from typing import List, Optional, Dict, Any, Tuple
 import urllib.request
 import urllib.error
 import yaml
@@ -34,12 +36,13 @@ def print_command(args: List[str]) -> None:
     print(f'    {quoted}', file=sys.stderr)
 
 
-def load_config(config_path: str) -> Dict[str, Any]:
-    """Load configuration from YAML file."""
+def load_config(config_path: str) -> Tuple[Dict[str, Any], str]:
+    """Load configuration from YAML file and return parsed data plus raw text."""
     try:
-        with open(config_path, 'r') as f:
-            config = yaml.safe_load(f)
-        return config or {}
+        with open(config_path, 'r', encoding='utf-8') as f:
+            raw_text = f.read()
+        config = yaml.safe_load(raw_text) or {}
+        return config, raw_text
     except FileNotFoundError:
         die(f"Config file not found: {config_path}")
     except yaml.YAMLError as e:
@@ -74,6 +77,121 @@ def add_extra_args(args: List[str], extra_args: Any) -> None:
         args.extend(str(arg) for arg in extra_args)
     elif isinstance(extra_args, str):
         args.extend(shlex.split(extra_args))
+
+
+def read_results_csv(results_path: str) -> Dict[str, Any]:
+    """Load the single-row CSV summary emitted by batchbench.online."""
+    if not os.path.isfile(results_path):
+        die(f"Results CSV not found at {results_path}")
+
+    with open(results_path, newline='', encoding='utf-8') as handle:
+        reader = csv.DictReader(handle)
+        try:
+            row = next(reader)
+        except StopIteration:
+            die(f"Results CSV {results_path} is empty")
+
+    def require(field: str) -> str:
+        value = row.get(field)
+        if value is None or value == "":
+            die(f"Results CSV missing required field '{field}'")
+        return value
+
+    def parse_int(field: str, optional: bool = False) -> Optional[int]:
+        value = row.get(field)
+        if value is None or value == "":
+            if optional:
+                return None
+            die(f"Results CSV missing required integer field '{field}'")
+        try:
+            return int(value)
+        except ValueError:
+            die(f"Results CSV field '{field}' must be an integer (got '{value}')")
+
+    def parse_float(field: str, optional: bool = False) -> Optional[float]:
+        value = row.get(field)
+        if value is None or value == "":
+            if optional:
+                return None
+            die(f"Results CSV missing required float field '{field}'")
+        try:
+            return float(value)
+        except ValueError:
+            die(f"Results CSV field '{field}' must be a float (got '{value}')")
+
+    def parse_bool(field: str) -> bool:
+        value = row.get(field)
+        if value is None or value == "":
+            return False
+        lowered = value.strip().lower()
+        if lowered in ("true", "1", "yes", "y"):
+            return True
+        if lowered in ("false", "0", "no", "n"):
+            return False
+        die(f"Results CSV field '{field}' must be boolean (got '{value}')")
+
+    return {
+        'timestamp': require('timestamp'),
+        'model': require('model'),
+        'dataset_path': require('dataset_path'),
+        'dataset_size': parse_int('dataset_size'),
+        'users': parse_int('users'),
+        'requests_per_user': parse_int('requests_per_user'),
+        'total_requests': parse_int('total_requests'),
+        'successful_requests': parse_int('successful_requests'),
+        'failed_requests': parse_int('failed_requests'),
+        'total_prompt_tokens': parse_int('total_prompt_tokens'),
+        'total_completion_tokens': parse_int('total_completion_tokens'),
+        'total_duration_seconds': parse_float('total_duration_seconds'),
+        'requests_per_second': parse_float('requests_per_second'),
+        'prompt_tokens_per_second': parse_float('prompt_tokens_per_second'),
+        'completion_tokens_per_second': parse_float('completion_tokens_per_second'),
+        'latency_p50_ms': parse_float('latency_p50_ms', optional=True),
+        'latency_p90_ms': parse_float('latency_p90_ms', optional=True),
+        'latency_p99_ms': parse_float('latency_p99_ms', optional=True),
+        'random_requests': parse_bool('random_requests'),
+        'output_tokens': parse_int('output_tokens', optional=True),
+        'output_vary': parse_int('output_vary', optional=True),
+        'output_lognorm_mu': parse_float('output_lognorm_mu', optional=True),
+        'output_lognorm_sigma': parse_float('output_lognorm_sigma', optional=True),
+        'request_timeout_secs': parse_int('request_timeout_secs'),
+        'max_retries': parse_int('max_retries'),
+        'retry_delay_ms': parse_int('retry_delay_ms'),
+        'host': require('host'),
+        'endpoint': require('endpoint'),
+    }
+
+
+def post_results_to_server(server_url: str, payload: Dict[str, Any]) -> None:
+    """Send benchmark results to the configured BatchBench server."""
+    target = f"{server_url.rstrip('/')}/api/results"
+    data = json.dumps(payload).encode('utf-8')
+    request = urllib.request.Request(
+        target,
+        data=data,
+        headers={'Content-Type': 'application/json'},
+        method='POST',
+    )
+
+    try:
+        with urllib.request.urlopen(request, timeout=30) as response:
+            status = getattr(response, 'status', response.getcode())
+            body = response.read().decode('utf-8').strip()
+            log(f"Posted results to {target} (status {status})")
+            if body:
+                try:
+                    parsed = json.loads(body)
+                    if isinstance(parsed, dict) and 'config_hash' in parsed:
+                        log(f"Server returned config hash: {parsed['config_hash']}")
+                except json.JSONDecodeError:
+                    log("Server response was not valid JSON; skipping parse")
+    except urllib.error.HTTPError as exc:
+        error_body = exc.read().decode('utf-8', errors='replace') if hasattr(exc, 'read') else ''
+        log(f"Failed to post results (HTTP {exc.code}): {error_body}")
+    except urllib.error.URLError as exc:
+        log(f"Failed to reach results server: {exc}")
+    except Exception as exc:  # pragma: no cover - defensive
+        log(f"Unexpected error posting results: {exc}")
 
 
 def run_offline(config: Dict[str, Any]) -> None:
@@ -177,11 +295,12 @@ class ServerManager:
         self.cleanup()
 
 
-def run_online(config: Dict[str, Any]) -> None:
+def run_online(config: Dict[str, Any], raw_config_yaml: str) -> None:
     """Run online benchmark.
     
     Args:
         config: Full configuration dictionary
+        raw_config_yaml: Original YAML text for downstream reporting
     """
     log("Starting online benchmark")
     
@@ -233,12 +352,23 @@ def run_online(config: Dict[str, Any]) -> None:
 
     # Server configuration
     server_config = online_config.get('server', {})
+    gpu_name = server_config.get('gpu_name')
+    if gpu_name is not None:
+        gpu_name = str(gpu_name)
+    gpu_count = server_config.get('gpu_count')
+    if gpu_count is not None:
+        try:
+            gpu_count = int(gpu_count)
+        except (TypeError, ValueError):
+            die("online.server.gpu_count must be an integer when provided")
     server_host = server_config.get('host', '0.0.0.0')
     server_port = server_config.get('port', 8000)
     
     client_config = online_config.get('client', {})
     base_url = client_config.get('host') or f'http://127.0.0.1:{server_port}'
     readiness_url = server_config.get('health_url') or f'{base_url}/v1/models'
+    results_csv_path = str(client_config.get('results_csv') or '/tmp/batchbench_results.csv')
+    log(f"Benchmark CSV output will be written to: {results_csv_path}")
 
     # Build server arguments
     server_args = [
@@ -287,9 +417,12 @@ def run_online(config: Dict[str, Any]) -> None:
             ('retry_delay_ms', '--retry-delay-ms'),
             ('output_tokens', '--output-tokens'),
             ('output_vary', '--output-vary'),
+            ('output_lognorm_mu', '--output-lognorm-mu'),
+            ('output_lognorm_sigma', '--output-lognorm-sigma'),
         ]
 
         add_args_from_dict(online_args, client_config, client_mappings)
+        online_args.extend(['--results-csv', results_csv_path])
 
         # Boolean flags
         if client_config.get('random_requests', False):
@@ -303,6 +436,70 @@ def run_online(config: Dict[str, Any]) -> None:
         print_command(online_args)
         subprocess.run(online_args, check=True)
 
+    if os.path.isfile(results_csv_path):
+        log(f"Benchmark summary saved to {results_csv_path}")
+    else:
+        log(f"WARNING: expected results CSV at {results_csv_path} but it was not created")
+
+    server_url = client_config.get('server_url')
+    if server_url:
+        server_url = str(server_url)
+    if not server_url:
+        return
+
+    project_name = client_config.get('project_name')
+    experiment_name = client_config.get('experiment_name')
+    if project_name:
+        project_name = str(project_name)
+    if experiment_name:
+        experiment_name = str(experiment_name)
+    if not project_name or not experiment_name:
+        die('client.server_url requires both project_name and experiment_name')
+
+    if not os.path.isfile(results_csv_path):
+        die(f"Cannot post results because {results_csv_path} was not created")
+
+    results = read_results_csv(results_csv_path)
+    payload = {
+        'project_name': project_name,
+        'experiment_name': experiment_name,
+        'model': results['model'],
+        'dataset_path': results['dataset_path'],
+        'dataset_size': results['dataset_size'],
+        'users': results['users'],
+        'requests_per_user': results['requests_per_user'],
+        'output_tokens': results['output_tokens'],
+        'output_vary': results['output_vary'],
+        'output_lognorm_mu': results['output_lognorm_mu'],
+        'output_lognorm_sigma': results['output_lognorm_sigma'],
+        'request_timeout_secs': results['request_timeout_secs'],
+        'max_retries': results['max_retries'],
+        'retry_delay_ms': results['retry_delay_ms'],
+        'random_requests': results['random_requests'],
+        'total_requests': results['total_requests'],
+        'successful_requests': results['successful_requests'],
+        'failed_requests': results['failed_requests'],
+        'total_prompt_tokens': results['total_prompt_tokens'],
+        'total_completion_tokens': results['total_completion_tokens'],
+        'total_duration_seconds': results['total_duration_seconds'],
+        'requests_per_second': results['requests_per_second'],
+        'prompt_tokens_per_second': results['prompt_tokens_per_second'],
+        'completion_tokens_per_second': results['completion_tokens_per_second'],
+        'latency_p50_ms': results['latency_p50_ms'],
+        'latency_p90_ms': results['latency_p90_ms'],
+        'latency_p99_ms': results['latency_p99_ms'],
+        'timestamp': results['timestamp'],
+        'host': results['host'],
+        'endpoint': results['endpoint'],
+        'hardware': {
+            'gpu_name': gpu_name,
+            'gpu_count': gpu_count,
+        },
+        'full_config': config,
+        'config_yaml': raw_config_yaml,
+    }
+
+    post_results_to_server(server_url, payload)
 
 def main() -> None:
     """Main entrypoint."""
@@ -313,14 +510,14 @@ def main() -> None:
         die(f"Config file not found: {config_path}. Set CONFIG_FILE environment variable or mount config to default path.")
     
     log(f"Loading configuration from: {config_path}")
-    config = load_config(config_path)
+    config, raw_config_yaml = load_config(config_path)
     
     mode = config.get('mode', 'offline').lower()
 
     if mode == 'offline':
         run_offline(config)
     elif mode == 'online':
-        run_online(config)
+        run_online(config, raw_config_yaml)
     else:
         die(f"Unknown mode '{mode}'. Expected 'online' or 'offline'.")
 

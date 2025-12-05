@@ -14,6 +14,8 @@ online:
     pipeline_parallel_size: 1
     max_num_batched_tokens: 8192
     gpu_memory_utilization: 0.75
+    gpu_name: null  # Optional descriptive label recorded in results
+    gpu_count: null # Optional integer count recorded in results
     extra_args: []
     
     # Health check configuration
@@ -33,8 +35,17 @@ online:
     retry_delay_ms: 100
     output_tokens: 128
     output_vary: 20
+    output_lognorm_mu: null  # Use lognormal sampling instead of fixed tokens
+    output_lognorm_sigma: null
     random_requests: true
     verbose: false
+    results_csv: "/tmp/batchbench_results.csv"
+    
+    # Server reporting settings (run_docker posts CSV results when configured)
+    server_url: null  # Server URL to post results to
+    project_name: null  # Project name for reporting
+    experiment_name: null  # Experiment name for reporting
+    
     extra_args: []
 
 # Dataset generation configuration

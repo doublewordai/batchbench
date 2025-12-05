@@ -199,8 +199,9 @@ def parse_args(argv: List[str] | None = None) -> argparse.Namespace:
         type=Path,
         default=Path("outputs"),
         help=(
-            "Destination directory or base filename. Metadata (count, prefix, token "
-            "target, tokenizer) is appended automatically."
+            "Destination directory or filename. When a directory is provided, metadata "
+            "(count, prefix, token target, tokenizer, etc.) is appended automatically. "
+            "If a path ending in .jsonl is provided, that exact file path is used."
         ),
     )
     parser.add_argument(
@@ -307,6 +308,14 @@ def build_output_path(
     dist_median: float | None = None,
     dist_sigma: float | None = None,
 ) -> Path:
+    # Check if user specified an exact .jsonl filename (not a directory)
+    if base_path.suffix == ".jsonl" and not base_path.is_dir():
+        # User requested an exact filename; respect it without adding metadata.
+        directory = base_path.parent or Path(".")
+        directory.mkdir(parents=True, exist_ok=True)
+        return base_path
+
+    # Build metadata suffix for auto-generated filenames
     if dist_mode == "lognormal" and dist_median is not None:
         # For lognormal mode, use median and sigma in filename
         tokens_label = f"lognorm-med{int(dist_median)}-sig{dist_sigma:.2f}".replace(".", "p")
@@ -320,13 +329,9 @@ def build_output_path(
         f"count-{count}_tokens-{tokens_label}_prefix-{prefix_label}_tokenizer-{tokenizer_component}"
     )
 
-    if base_path.suffix == ".jsonl" and not base_path.is_dir():
-        directory = base_path.parent if base_path.parent else Path(".")
-        stem = sanitize_component(base_path.stem) or "requests"
-        filename = f"{stem}_{metadata_suffix}.jsonl"
-    else:
-        directory = base_path
-        filename = f"requests_{metadata_suffix}.jsonl"
+    # Treat base_path as a directory and generate filename with metadata
+    directory = base_path
+    filename = f"requests_{metadata_suffix}.jsonl"
 
     directory.mkdir(parents=True, exist_ok=True)
     output_path = directory / filename

@@ -95,6 +95,8 @@ online:
     pipeline_parallel_size: 1
     max_num_batched_tokens: 8192
     gpu_memory_utilization: 0.9
+    gpu_name: null              # Optional descriptive label recorded in results
+    gpu_count: null             # Optional integer count recorded in results
     extra_args: []
     
     # Health check settings
@@ -112,10 +114,19 @@ online:
     request_timeout_secs: 120     # Request timeout
     max_retries: 3                # Max retry attempts
     retry_delay_ms: 100           # Retry delay
-    output_tokens: 128            # Output token count
-    output_vary: 0.2              # Token variation
+    output_tokens: 128            # Output token count (fixed)
+    output_vary: 20               # Token variation (+/- uniform)
+    output_lognorm_mu: null       # Log-normal mu (mean of underlying normal)
+    output_lognorm_sigma: null    # Log-normal sigma (std dev of underlying normal)
     random_requests: false        # Randomize order
     verbose: true                 # Verbose output
+    results_csv: /tmp/batchbench_results.csv  # Where batchbench.online writes its summary
+    
+    # Server reporting (handled by run_docker)
+    server_url: null              # URL to post results to
+    project_name: null            # Project name for reporting
+    experiment_name: null         # Experiment name for reporting
+    
     extra_args: []
 ```
 
@@ -133,6 +144,13 @@ generate:
   extra_args: []
 ```
 
+### Result Collection & Server Reporting
+
+- `batchbench.online` now writes a single-row CSV summary when `results_csv` is set (defaults to `/tmp/batchbench_results.csv`).
+- `run_docker.py` reads that CSV after the run and, if `client.server_url` is configured, posts the payload on your behalf.
+- `client.project_name` and `client.experiment_name` are required whenever `server_url` is provided.
+- Optional GPU metadata (`server.gpu_name` and `server.gpu_count`) is forwarded verbatim in the payload so you can record hardware details without relying on auto-detection.
+
 ## Examples
 
 ### Offline Benchmark
@@ -147,6 +165,64 @@ offline:
   ocl: 256
   tensor_parallel_size: 2
   gpu_memory_utilization: 0.95
+```
+
+### Online Benchmark with Log-Normal Output Sampling
+
+Use log-normal distribution to sample realistic output lengths. The distribution is parameterized by `mu` and `sigma` of the underlying normal distribution:
+- **Median** = exp(mu)
+- **Mean** = exp(mu + sigma²/2)
+
+```yaml
+mode: online
+
+online:
+  model: "Qwen/Qwen3-0.6B"
+  
+  server:
+    port: 8000
+    tensor_parallel_size: 1
+  
+  client:
+    users: 16
+    requests_per_user: 10
+    # Log-normal: mu=5.0, sigma=0.8 → median≈148, mean≈224 tokens
+    output_lognorm_mu: 5.0
+    output_lognorm_sigma: 0.8
+    random_requests: true
+
+generate:
+  dataset_path: /tmp/requests.jsonl
+  count: 200
+```
+
+### Online Benchmark with Server Reporting
+
+Post benchmark results to a BatchBench results server:
+
+```yaml
+mode: online
+
+online:
+  model: "Qwen/Qwen3-0.6B"
+  
+  server:
+    port: 8000
+  
+  client:
+    users: 16
+    requests_per_user: 10
+    output_tokens: 128
+    results_csv: /tmp/batchbench_results.csv
+    
+    # Server reporting configuration
+    server_url: "http://results-server:5000"
+    project_name: "my-project"
+    experiment_name: "baseline-v1"
+
+generate:
+  dataset_path: /tmp/requests.jsonl
+  count: 100
 ```
 
 ### Online Benchmark with Custom Dataset

@@ -120,12 +120,33 @@ async fn dispatch_request(
     event_tx: &mpsc::UnboundedSender<WorkerEvent>,
     status_tx: &mpsc::UnboundedSender<StatusEvent>,
 ) -> Result<()> {
-    let request_body = if config.random_request_pool.is_some() {
+    let mut request_body = if config.random_request_pool.is_some() {
         config.random_request_body()?.clone()
     } else {
         config.request_body_for(user_id)?.clone()
     };
-    
+
+    // If lognormal output sampling is configured, sample and inject tokens
+    if let Some((mu, sigma, max)) = config.output_lognorm {
+        use rand_distr::{Distribution, LogNormal};
+
+        let log_normal = LogNormal::new(mu, sigma)
+            .map_err(|e| anyhow!("failed to create lognormal distribution: {}", e))?;
+        let mut rng = rand::thread_rng();
+        let sampled: f64 = log_normal.sample(&mut rng);
+        let mut tokens = (sampled.round() as usize).max(1); // Ensure at least 1 token
+        
+        // Apply max truncation if specified
+        if let Some(max_val) = max {
+            tokens = tokens.min(max_val);
+        }
+
+        if let Some(map) = request_body.as_object_mut() {
+            map.insert("max_tokens".to_string(), serde_json::json!(tokens));
+            map.insert("min_tokens".to_string(), serde_json::json!(tokens));
+        }
+    }
+
     match single_attempt(client, config, &request_body).await {
         Ok(stats) => {
             event_tx
@@ -187,12 +208,12 @@ async fn single_attempt(
     }
 
     let payload: Value = serde_json::from_slice(&bytes)?;
-    
+
     if config.verbose {
         let sanitized_response = sanitize_response(&payload);
         println!("[RESPONSE] {}", serde_json::to_string(&sanitized_response)?);
     }
-    
+
     let (prompt_tokens, completion_tokens) = extract_usage(&payload)?;
     let latency = start.elapsed();
 
@@ -220,7 +241,7 @@ fn extract_usage(payload: &Value) -> Result<(u64, u64)> {
 
 fn sanitize_request_body(body: &Value) -> Value {
     let mut sanitized = body.clone();
-    
+
     if let Some(obj) = sanitized.as_object_mut() {
         if let Some(messages) = obj.get_mut("messages") {
             if let Some(arr) = messages.as_array_mut() {
@@ -237,13 +258,13 @@ fn sanitize_request_body(body: &Value) -> Value {
             }
         }
     }
-    
+
     sanitized
 }
 
 fn sanitize_response(response: &Value) -> Value {
     let mut sanitized = response.clone();
-    
+
     if let Some(obj) = sanitized.as_object_mut() {
         if let Some(choices) = obj.get_mut("choices") {
             if let Some(arr) = choices.as_array_mut() {
@@ -264,7 +285,7 @@ fn sanitize_response(response: &Value) -> Value {
             }
         }
     }
-    
+
     sanitized
 }
 
@@ -442,8 +463,11 @@ async fn track_status(mut updates: mpsc::UnboundedReceiver<StatusEvent>, start: 
                 prompt_tokens,
                 completion_tokens,
             } => {
-                snapshot.total_prompt_tokens = snapshot.total_prompt_tokens.saturating_add(prompt_tokens);
-                snapshot.total_completion_tokens = snapshot.total_completion_tokens.saturating_add(completion_tokens);
+                snapshot.total_prompt_tokens =
+                    snapshot.total_prompt_tokens.saturating_add(prompt_tokens);
+                snapshot.total_completion_tokens = snapshot
+                    .total_completion_tokens
+                    .saturating_add(completion_tokens);
             }
             StatusEvent::Requests {
                 successes,
@@ -484,7 +508,12 @@ fn render_status(snapshot: &StatusSnapshot, start: Instant, stay: bool) {
 
     print!(
         "\r\x1b[2K{}\n\x1b[2K{}\n\x1b[2K{}\n\x1b[2K{}\n\x1b[2K{}\n\x1b[2K{}\n",
-        elapsed_line, throughput_line, prompt_tokens_line, completion_tokens_line, requests_line, failures_line
+        elapsed_line,
+        throughput_line,
+        prompt_tokens_line,
+        completion_tokens_line,
+        requests_line,
+        failures_line
     );
 
     if stay {
