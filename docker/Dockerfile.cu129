@@ -112,15 +112,4 @@ RUN mkdir -p /var/run/sshd /root/.ssh && \
     sed -i 's@session\s*required\s*pam_loginuid.so@session optional pam_loginuid.so@g' /etc/pam.d/sshd && \
     ssh-keygen -A
 
-# BatchBench source (changes frequently - last for cache efficiency)
-COPY /pyproject.toml /README.md /MANIFEST.in /workspace/batchbench/
-COPY /src/ /workspace/batchbench/src/
-
-RUN . /opt/batchbench/.venv/bin/activate && \
-    uv pip install --no-cache-dir "/workspace/batchbench[offline,generate]"
-
-COPY ./docker/run_docker.py /usr/local/bin/batchbench-entrypoint
-COPY ./docker/config.*.yaml /etc/batchbench/examples/
-RUN chmod +x /usr/local/bin/batchbench-entrypoint
-
-ENTRYPOINT ["/usr/local/bin/batchbench-entrypoint"]
+    
