@@ -1,61 +1,114 @@
-FROM pytorch/pytorch:2.9.0-cuda13.0-cudnn9-devel
+# ============================================================
+# Stage 1: NVSHMEM Builder
+# ============================================================
+FROM pytorch/pytorch:2.9.0-cuda13.0-cudnn9-devel AS deepep-builder
 
-# git installation
-RUN apt-get update \
- && apt-get install -y --no-install-recommends git curl \
+# Add rdma libraries and build dependencies
+RUN --mount=type=cache,target=/var/cache/apt,sharing=locked \
+    --mount=type=cache,target=/var/lib/apt,sharing=locked \
+    apt-get update && apt-get install -y --no-install-recommends \
+    git build-essential ninja-build cmake pkg-config wget \
+    librdmacm-dev rdma-core libfabric-dev libibverbs-dev \
+    devscripts debhelper fakeroot \
  && rm -rf /var/lib/apt/lists/*
 
-# uv installation
+# Build GDRCopy
+RUN cd /tmp && \
+    wget https://github.com/NVIDIA/gdrcopy/archive/refs/tags/v2.5.1.tar.gz && \
+    tar -xf v2.5.1.tar.gz && \
+    cd gdrcopy-2.5.1/packages/ && \
+    CUDA=/usr/local/cuda ./build-deb-packages.sh -t -k
+
+RUN --mount=type=cache,target=/var/cache/apt,sharing=locked \
+    --mount=type=cache,target=/var/lib/apt,sharing=locked \
+    apt-get update && apt-get install -y --no-install-recommends git \
+ && dpkg -i /tmp/gdrcopy-2.5.1/packages/libgdrapi_*.deb
+
+# Build NVSHMEM - Need GDRCOPY and IBGDA support for DeepEP all2all kernels
+RUN set -eux; \
+    cd /tmp; \
+    wget https://developer.nvidia.com/downloads/assets/secure/nvshmem/nvshmem_src_3.2.5-1.txz; \
+    mkdir -p nvshmem_src_3.2.5-1; \
+    tar xf nvshmem_src_3.2.5-1.txz -C nvshmem_src_3.2.5-1; \
+    cd nvshmem_src_3.2.5-1/nvshmem_src; \
+    mkdir -p build; \
+    cd build; \
+    cmake \
+        -DNVSHMEM_PREFIX=/opt/nvshmem-3.2.5 \
+        -DCMAKE_CUDA_ARCHITECTURES=90a \
+        -DNVSHMEM_MPI_SUPPORT=0 \
+        -DNVSHMEM_PMIX_SUPPORT=0 \
+        -DNVSHMEM_USE_GDRCOPY=1 \
+        -DNVSHMEM_IBGDA_SUPPORT=1 \
+        -DNVSHMEM_BUILD_TESTS=0 \
+        -DNVSHMEM_BUILD_EXAMPLES=0 \
+        -DNVSHMEM_BUILD_HYDRA_LAUNCHER=1 \
+        -DNVSHMEM_BUILD_TXZ_PACKAGE=1 \
+        -G Ninja \
+        ..; \
+        ninja; \
+        ninja install; \
+        rm -rf /tmp/nvshmem_src_3.2.5-1.txz
+
+
+
+
+# ============================================================
+# Stage 2: vLLM/Python Dependencies (slow, cache separately)
+# ============================================================
+FROM pytorch/pytorch:2.9.0-cuda13.0-cudnn9-devel AS python-deps
+
+RUN --mount=type=cache,target=/var/cache/apt,sharing=locked \
+    --mount=type=cache,target=/var/lib/apt,sharing=locked \
+    apt-get update && apt-get install -y --no-install-recommends curl
+
 RUN curl -LsSf https://astral.sh/uv/install.sh | sh \
  && ln -s /root/.local/bin/uv /usr/local/bin/uv
 
-# install vllm in a uv virtual environment (takes a long time)
-# we run it separately so that it can be cached by docker layers, and doesn't need reinstalling 
-# when we update batchbench code
-RUN cd /workspace/batchbench; \
-    uv venv /opt/batchbench/.venv; \
-    . /opt/batchbench/.venv/bin/activate; \
-    uv pip install vllm --torch-backend=auto; \
-    deactivate
+# flashinfer-cubin installs pre-compiled CUDA kernels for vLLM
+# Needed for FP8-MOE models
+RUN uv venv /opt/batchbench/.venv && \
+    . /opt/batchbench/.venv/bin/activate && \
+    uv pip install vllm --torch-backend=auto && \
+    uv pip install flashinfer-cubin 
 
-# Fetch latest commit hash from GitHub for the given branch
-ARG BATCHBENCH_COMMIT="1b0afb2"
-ARG BATCHBENCH_REPO="https://github.com/doublewordai/batchbench.git"
-ARG BATCHBENCH_REF="main"
+# ============================================================
+# Stage 3: Final Runtime Image
+# ============================================================
+FROM pytorch/pytorch:2.9.0-cuda13.0-cudnn9-devel AS runtime
 
-# clone repo
-RUN set -eux; \
-    echo "Cloning BatchBench from ${BATCHBENCH_REPO} @ ${BATCHBENCH_COMMIT}"; \
-    git clone "${BATCHBENCH_REPO}" /workspace/batchbench; \
-    cd /workspace/batchbench; \
-    git checkout "${BATCHBENCH_COMMIT}"; \
-    . /opt/batchbench/.venv/bin/activate; \
-    uv pip install --no-cache-dir ".[offline,generate]"; \
-    deactivate
+# Copy built artifacts from builder stages
+COPY --from=deepep-builder /opt/nvshmem-3.2.5 /opt/nvshmem-3.2.5
+COPY --from=deepep-builder /tmp/gdrcopy-2.5.1/packages/*.deb /tmp/gdrcopy/
+COPY --from=deepep-builder /opt/conda/lib/python3.11/site-packages/deep_ep* /opt/conda/lib/python3.11/site-packages/
+COPY --from=python-deps /opt/batchbench/.venv /opt/batchbench/.venv
+COPY --from=python-deps /root/.local/bin/uv /usr/local/bin/uv
 
-# add uv venv to path for runtime
-ENV PATH="/opt/batchbench/.venv/bin:$PATH"
+# Install minimal runtime dependencies
+RUN --mount=type=cache,target=/var/cache/apt,sharing=locked \
+    --mount=type=cache,target=/var/lib/apt,sharing=locked \
+    apt-get update && apt-get install -y --no-install-recommends \
+    librdmacm-dev rdma-core libfabric-dev libibverbs-dev \
+    git curl openssh-server librdmacm1 libibverbs1 libfabric1 \
+ && dpkg -i /tmp/gdrcopy/libgdrapi_*.deb \
+ && rm -rf /tmp/gdrcopy
 
-# Install BatchBench entrypoint wrapper
-COPY ./run_docker.py /usr/local/bin/batchbench-entrypoint
-RUN chmod +x /usr/local/bin/batchbench-entrypoint
+# Environment
+ENV NVSHMEM_HOME=/opt/nvshmem-3.2.5
+ENV LD_LIBRARY_PATH=${NVSHMEM_HOME}/lib:${LD_LIBRARY_PATH}
+ENV PATH="/opt/batchbench/.venv/bin:/opt/hydra/bin:${PATH}"
+ENV VLLM_HAS_FLASHINFER_CUBIN=1
 
-# Copy example config files
-COPY ./config.*.yaml /etc/batchbench/examples/
+# DeepEP installation - TODO: pull into the deepep-builder stage
+RUN git clone https://github.com/deepseek-ai/DeepEP /deepep && \
+    cd /deepep && \
+    NVSHMEM_DIR=/opt/nvshmem-3.2.5 python setup.py install
 
-# Optional: Bake in a config file at build time
-# Use --build-arg BAKED_CONFIG=./path/to/config.yaml to include a default config
-ARG BAKED_CONFIG
-RUN if [ -n "$BAKED_CONFIG" ]; then \
-        echo "Baking config into container..."; \
-    fi
-COPY ${BAKED_CONFIG:-config.example.yaml} /etc/batchbench/.baked-config.yaml
-RUN if [ -n "$BAKED_CONFIG" ]; then \
-        cp /etc/batchbench/.baked-config.yaml /etc/batchbench/config.yaml; \
-        echo "Baked config installed to /etc/batchbench/config.yaml"; \
-    else \
-        rm /etc/batchbench/.baked-config.yaml; \
-    fi
+# SSH configuration
+RUN mkdir -p /var/run/sshd /root/.ssh && \
+    chmod 700 /root/.ssh && \
+    sed -i 's/#PermitRootLogin prohibit-password/PermitRootLogin prohibit-password/' /etc/ssh/sshd_config && \
+    sed -i 's@session\s*required\s*pam_loginuid.so@session optional pam_loginuid.so@g' /etc/pam.d/sshd && \
+    ssh-keygen -A
 
-ENTRYPOINT ["/usr/local/bin/batchbench-entrypoint"]
-CMD []
+    
