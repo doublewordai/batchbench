@@ -1,10 +1,13 @@
+# syntax=docker/dockerfile:1
 # ============================================================
 # Stage 1: NVSHMEM Builder
 # ============================================================
-FROM pytorch/pytorch:2.9.0-cuda12.6-cudnn9-devel AS deepep-builder
+FROM pytorch/pytorch:2.8.0-cuda12.9-cudnn9-devel AS deepep-builder
 
 # Add rdma libraries and build dependencies
-RUN apt-get update && apt-get install -y --no-install-recommends \
+RUN --mount=type=cache,target=/var/cache/apt,sharing=locked \
+    --mount=type=cache,target=/var/lib/apt,sharing=locked \
+    apt-get update && apt-get install -y --no-install-recommends \
     git build-essential ninja-build cmake pkg-config wget \
     librdmacm-dev rdma-core libfabric-dev libibverbs-dev \
     devscripts debhelper fakeroot \
@@ -17,9 +20,10 @@ RUN cd /tmp && \
     cd gdrcopy-2.5.1/packages/ && \
     CUDA=/usr/local/cuda ./build-deb-packages.sh -t -k
 
-RUN apt-get update && apt-get install -y --no-install-recommends git \
- && dpkg -i /tmp/gdrcopy-2.5.1/packages/libgdrapi_*.deb \
- && rm -rf /var/lib/apt/lists/*
+RUN --mount=type=cache,target=/var/cache/apt,sharing=locked \
+    --mount=type=cache,target=/var/lib/apt,sharing=locked \
+    apt-get update && apt-get install -y --no-install-recommends git \
+ && dpkg -i /tmp/gdrcopy-2.5.1/packages/libgdrapi_*.deb
 
 # Build NVSHMEM - Need GDRCOPY and IBGDA support for DeepEP all2all kernels
 RUN set -eux; \
@@ -37,8 +41,8 @@ RUN set -eux; \
         -DNVSHMEM_PMIX_SUPPORT=0 \
         -DNVSHMEM_USE_GDRCOPY=1 \
         -DNVSHMEM_IBGDA_SUPPORT=1 \
-        -DNVSHMEM_BUILD_TESTS=1 \
-        -DNVSHMEM_BUILD_EXAMPLES=1 \
+        -DNVSHMEM_BUILD_TESTS=0 \
+        -DNVSHMEM_BUILD_EXAMPLES=0 \
         -DNVSHMEM_BUILD_HYDRA_LAUNCHER=1 \
         -DNVSHMEM_BUILD_TXZ_PACKAGE=1 \
         -G Ninja \
@@ -53,10 +57,11 @@ RUN set -eux; \
 # ============================================================
 # Stage 2: vLLM/Python Dependencies (slow, cache separately)
 # ============================================================
-FROM pytorch/pytorch:2.9.0-cuda12.6-cudnn9-devel AS python-deps
+FROM pytorch/pytorch:2.8.0-cuda12.9-cudnn9-devel AS python-deps
 
-RUN apt-get update && apt-get install -y --no-install-recommends curl \
- && rm -rf /var/lib/apt/lists/*
+RUN --mount=type=cache,target=/var/cache/apt,sharing=locked \
+    --mount=type=cache,target=/var/lib/apt,sharing=locked \
+    apt-get update && apt-get install -y --no-install-recommends curl
 
 RUN curl -LsSf https://astral.sh/uv/install.sh | sh \
  && ln -s /root/.local/bin/uv /usr/local/bin/uv
@@ -71,7 +76,7 @@ RUN uv venv /opt/batchbench/.venv && \
 # ============================================================
 # Stage 3: Final Runtime Image
 # ============================================================
-FROM pytorch/pytorch:2.9.0-cuda12.6-cudnn9-devel AS runtime
+FROM pytorch/pytorch:2.8.0-cuda12.9-cudnn9-devel AS runtime
 
 # Copy built artifacts from builder stages
 COPY --from=deepep-builder /opt/nvshmem-3.2.5 /opt/nvshmem-3.2.5
@@ -81,11 +86,13 @@ COPY --from=python-deps /opt/batchbench/.venv /opt/batchbench/.venv
 COPY --from=python-deps /root/.local/bin/uv /usr/local/bin/uv
 
 # Install minimal runtime dependencies
-RUN apt-get update && apt-get install -y --no-install-recommends \
+RUN --mount=type=cache,target=/var/cache/apt,sharing=locked \
+    --mount=type=cache,target=/var/lib/apt,sharing=locked \
+    apt-get update && apt-get install -y --no-install-recommends \
     librdmacm-dev rdma-core libfabric-dev libibverbs-dev \
     git curl openssh-server librdmacm1 libibverbs1 libfabric1 \
  && dpkg -i /tmp/gdrcopy/libgdrapi_*.deb \
- && rm -rf /tmp/gdrcopy /var/lib/apt/lists/*
+ && rm -rf /tmp/gdrcopy
 
 # Environment
 ENV NVSHMEM_HOME=/opt/nvshmem-3.2.5
