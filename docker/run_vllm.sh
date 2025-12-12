@@ -38,7 +38,7 @@ vllm serve Qwen/Qwen3-30B-A3B-Instruct-2507-FP8 \
   --enable-expert-parallel \
   --tensor-parallel-size 1 \
   --data-parallel-size 2 \
-  --all2all-backend deepep_high_throughput \
+#   --all2all-backend deepep_high_throughput \
   --compilation-mode NONE \
   --cudagraph-mode FULL
 
