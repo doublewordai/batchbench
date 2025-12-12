@@ -109,6 +109,7 @@ def assemble_prompts(
     dist_median: float | None = None,
     dist_sigma: float = 0.5,
     dist_max: int | None = None,
+    seed: int | None = None,
 ) -> Tuple[List[str], List[int]]:
     """Create prompt strings whose prefixes overlap by the requested fraction.
     
@@ -120,7 +121,7 @@ def assemble_prompts(
         raise ValueError("A tokenizer is required to detokenize random token ids.")
 
     prompts: List[str] = []
-    rng = random.Random()
+    rng = random.Random(seed)
     sequence_lengths: List[int] = []
     for _ in tqdm(range(count), desc="Sampling sequence lengths"):
         if dist_mode == "lognormal":
@@ -275,6 +276,12 @@ def parse_args(argv: List[str] | None = None) -> argparse.Namespace:
             "above this will be truncated to this maximum. (default: no maximum)"
         ),
     )
+    parser.add_argument(
+        "--seed",
+        type=int,
+        default=None,
+        help="Random seed for reproducible generation (default: None)",
+    )
     return parser.parse_args(argv)
 
 
@@ -307,6 +314,7 @@ def build_output_path(
     dist_mode: str = "fixed",
     dist_median: float | None = None,
     dist_sigma: float | None = None,
+    seed: int | None = None,
 ) -> Path:
     # Check if user specified an exact .jsonl filename (not a directory)
     if base_path.suffix == ".jsonl" and not base_path.is_dir():
@@ -325,8 +333,9 @@ def build_output_path(
     
     prefix_label = format_prefix(prefix_overlap)
     tokenizer_component = sanitize_component(tokenizer_label)
+    seed_label = f"_seed-{seed}" if seed is not None else ""
     metadata_suffix = (
-        f"count-{count}_tokens-{tokens_label}_prefix-{prefix_label}_tokenizer-{tokenizer_component}"
+        f"count-{count}_tokens-{tokens_label}_prefix-{prefix_label}_tokenizer-{tokenizer_component}{seed_label}"
     )
 
     # Treat base_path as a directory and generate filename with metadata
@@ -364,6 +373,7 @@ def main(argv: List[str] | None = None) -> int:
         dist_median=args.dist_median,
         dist_sigma=args.dist_sigma,
         dist_max=args.dist_max,
+        seed=args.seed,
     )
 
     # Print histogram for distribution visualization
@@ -379,6 +389,7 @@ def main(argv: List[str] | None = None) -> int:
         dist_mode=args.dist_mode,
         dist_median=args.dist_median,
         dist_sigma=args.dist_sigma,
+        seed=args.seed,
     )
 
     if output_path.exists():

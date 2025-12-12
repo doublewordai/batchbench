@@ -98,14 +98,16 @@ async fn run_user(
 
     match mode {
         RunMode::Finite { requests_per_user } => {
-            for _ in 0..requests_per_user {
-                dispatch_request(user_id, &client, &config, &event_tx, &status_tx).await?;
+            for request_id in 0..requests_per_user {
+                dispatch_request(user_id, request_id, &client, &config, &event_tx, &status_tx).await?;
             }
         }
         RunMode::LongRunning { duration } => {
             let deadline = Instant::now() + duration;
+            let mut request_id = 0usize;
             while Instant::now() < deadline {
-                dispatch_request(user_id, &client, &config, &event_tx, &status_tx).await?;
+                dispatch_request(user_id, request_id, &client, &config, &event_tx, &status_tx).await?;
+                request_id = request_id.wrapping_add(1);
             }
         }
     };
@@ -115,13 +117,14 @@ async fn run_user(
 
 async fn dispatch_request(
     user_id: usize,
+    request_id: usize,
     client: &Client,
     config: &BenchmarkConfig,
     event_tx: &mpsc::UnboundedSender<WorkerEvent>,
     status_tx: &mpsc::UnboundedSender<StatusEvent>,
 ) -> Result<()> {
     let mut request_body = if config.random_request_pool.is_some() {
-        config.random_request_body()?.clone()
+        config.random_request_body(user_id, request_id)?.clone()
     } else {
         config.request_body_for(user_id)?.clone()
     };
@@ -129,11 +132,24 @@ async fn dispatch_request(
     // If lognormal output sampling is configured, sample and inject tokens
     if let Some((mu, sigma, max)) = config.output_lognorm {
         use rand_distr::{Distribution, LogNormal};
+        use rand::SeedableRng;
 
         let log_normal = LogNormal::new(mu, sigma)
             .map_err(|e| anyhow!("failed to create lognormal distribution: {}", e))?;
-        let mut rng = rand::thread_rng();
-        let sampled: f64 = log_normal.sample(&mut rng);
+        
+        let sampled: f64 = if let Some(seed) = config.seed {
+            // Use seeded RNG for reproducibility
+            // Mix in user_id and request_id to ensure different requests get different samples
+            let mixed_seed = seed
+                .wrapping_add(user_id as u64)
+                .wrapping_add((request_id as u64).wrapping_mul(65537)); // Use prime multiplier for better distribution
+            let mut rng = rand::rngs::StdRng::seed_from_u64(mixed_seed);
+            log_normal.sample(&mut rng)
+        } else {
+            let mut rng = rand::thread_rng();
+            log_normal.sample(&mut rng)
+        };
+        
         let mut tokens = (sampled.round() as usize).max(1); // Ensure at least 1 token
         
         // Apply max truncation if specified

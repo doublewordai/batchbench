@@ -124,6 +124,10 @@ struct Args {
     /// Optional path to write CSV summary output
     #[arg(long)]
     results_csv: Option<PathBuf>,
+
+    /// Random seed for reproducible benchmarking (default: None)
+    #[arg(long)]
+    seed: Option<u64>,
 }
 
 #[tokio::main]
@@ -286,6 +290,10 @@ async fn main() -> Result<()> {
     .with_request_timeout(Duration::from_secs(args.request_timeout_secs))
     .with_retry(args.max_retries, Duration::from_millis(args.retry_delay_ms))
     .with_verbose(args.verbose);
+
+    if let Some(seed) = args.seed {
+        config = config.with_seed(seed);
+    }
 
     if args.random_requests {
         config = config.with_random_request_pool(request_bodies)?;
@@ -456,6 +464,8 @@ fn load_requests(
         if let Some(tokens) = output_tokens {
             let mut final_tokens = tokens;
             if let Some(vary) = output_vary {
+                // Note: We use thread_rng here as this is per-request randomization
+                // The seed parameter controls request selection and lognormal sampling
                 let mut rng = rand::thread_rng();
                 let vary_i64 = vary as i64;
                 let base_i64 = tokens as i64;

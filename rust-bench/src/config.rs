@@ -28,6 +28,8 @@ pub struct BenchmarkConfig {
     pub verbose: bool,
     /// Optional log-normal distribution parameters (mu, sigma, max) for sampling output token counts
     pub output_lognorm: Option<(f64, f64, Option<usize>)>,
+    /// Optional random seed for reproducible benchmarking
+    pub seed: Option<u64>,
 }
 
 impl BenchmarkConfig {
@@ -86,6 +88,7 @@ impl BenchmarkConfig {
             headers,
             verbose: false,
             output_lognorm: None,
+            seed: None,
         })
     }
 
@@ -111,6 +114,11 @@ impl BenchmarkConfig {
 
     pub fn with_output_lognorm(mut self, mu: f64, sigma: f64, max: Option<usize>) -> Self {
         self.output_lognorm = Some((mu, sigma, max));
+        self
+    }
+
+    pub fn with_seed(mut self, seed: u64) -> Self {
+        self.seed = Some(seed);
         self
     }
 
@@ -163,11 +171,21 @@ impl BenchmarkConfig {
         }
     }
 
-    pub fn random_request_body(&self) -> Result<&Value> {
+    pub fn random_request_body(&self, user_id: usize, request_id: usize) -> Result<&Value> {
         if let Some(pool) = &self.random_request_pool {
-            use rand::Rng;
-            let mut rng = rand::thread_rng();
-            let idx = rng.gen_range(0..pool.len());
+            use rand::{Rng, SeedableRng};
+            let idx = if let Some(seed) = self.seed {
+                // Use seeded RNG for reproducibility
+                // Mix in user_id and request_id to ensure different requests get different indices
+                let mixed_seed = seed
+                    .wrapping_add(user_id as u64)
+                    .wrapping_add((request_id as u64).wrapping_mul(65537)); // Use prime multiplier for better distribution
+                let mut rng = rand::rngs::StdRng::seed_from_u64(mixed_seed);
+                rng.gen_range(0..pool.len())
+            } else {
+                let mut rng = rand::thread_rng();
+                rng.gen_range(0..pool.len())
+            };
             Ok(&pool[idx])
         } else {
             Err(anyhow!("random request pool is not configured"))
