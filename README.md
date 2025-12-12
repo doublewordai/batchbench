@@ -1,9 +1,8 @@
 # BatchBench
 
-BatchBench bundles three benchmarking utilities behind installable Python entrypoints:
+BatchBench bundles two benchmarking utilities behind installable Python entrypoints:
 
 - `batchbench.generate` produces JSONL request corpora with controllable prefix overlap and approximate token counts.
-- `batchbench.offline` drives an offline vLLM workload to record prompt and generation throughput.
 - `batchbench.online` launches the packaged Rust binary that fans requests out to OpenAI-compatible endpoints in parallel.
 
 ## Installation
@@ -16,7 +15,6 @@ Optional extras install tool-specific dependencies:
 
 ```bash
 pip install "batchbench[generate]"   # adds transformers for prompt sizing
-pip install "batchbench[offline]"    # adds vllm for the offline benchmark
 ```
 
 ## Generating Requests
@@ -31,20 +29,6 @@ batchbench.generate \
 ```
 
 Each row in the resulting JSONL file has a `text` field. The filename embeds run metadata (count, tokens, prefix, tokenizer) to keep runs distinct.
-
-## Offline Benchmarking
-
-The offline harness requires vLLM and a compatible model checkpoint.
-
-```bash
-batchbench.offline \
-  --model facebook/opt-125m \
-  --num_reqs 2048 \
-  --icl 1024 \
-  --ocl 1
-```
-
-The command prints prompt/generation throughput statistics and writes the sampled history to a derived filename inside the directory supplied via `--throughput_dir` (default: current directory).
 
 ## Online Benchmarking
 
