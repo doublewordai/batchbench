@@ -160,7 +160,13 @@ def main():
         action="store_true",
         help="Plot output/response lengths from batch API output file instead of input conversation lengths"
     )
-    
+    parser.add_argument(
+        "--output-stats",
+        type=str,
+        default=None,
+        help="Output fitted distribution stats to JSON file (for use by harness)"
+    )
+
     args = parser.parse_args()
     
     input_path = Path(args.input_file)
@@ -253,7 +259,8 @@ def main():
     std_val = np.std(lengths)
     p5_val = np.percentile(lengths, 5)
     p95_val = np.percentile(lengths, 95)
-    
+    p99_val = np.percentile(lengths, 99)
+
     item_name = "responses" if output_mode else "conversations"
     print(f"\nAnalyzed {len(lengths)} {item_name}")
     print(f"Statistics ({unit}):")
@@ -320,6 +327,24 @@ def main():
     # For LogNormal(μ, σ): median = exp(μ), mean = exp(μ + σ²/2)
     fitted_median = np.exp(mu)
     fitted_mean = np.exp(mu + sigma**2 / 2)
+
+    # Output stats to JSON if requested
+    if args.output_stats:
+        stats_data = {
+            "dist_median": float(fitted_median),
+            "dist_sigma": float(sigma),
+            "dist_max": int(p99_val),
+            "sample_count": len(lengths),
+            "sample_median": float(median_val),
+            "sample_mean": float(mean_val),
+            "sample_min": int(min_val),
+            "sample_max": int(max_val),
+            "sample_p99": int(p99_val),
+        }
+        with open(args.output_stats, "w") as f:
+            json.dump(stats_data, f, indent=2)
+        print(f"\nWrote fitted stats to {args.output_stats}")
+
     fit_text = (f'Fitted Log-Normal:\n'
                 f'μ = {mu:.3f}\n'
                 f'σ = {sigma:.3f}\n'
