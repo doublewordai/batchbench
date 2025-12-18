@@ -1,27 +1,16 @@
-"""Utilities and CLI entrypoint for generating batchbench request payloads."""
-
-from __future__ import annotations
+"""Generate batchbench request payloads."""
 
 import argparse
 import json
 import math
-import os
 import random
 import re
 import sys
 from pathlib import Path
-from typing import Any, List, Tuple
-
 from tqdm import tqdm
+from transformers import AutoTokenizer
 
-DEFAULT_PREFIX_TEXT = (
-    "In this experiment we explore the capability of large language models "
-    "to adapt their narrative based on subtle contextual variations. The "
-    "following prompt requests creative output across a range of scenarios."
-)
-
-
-def print_histogram(sequence_lengths: List[int], num_bins: int = 20) -> None:
+def print_histogram(sequence_lengths, num_bins=20):
     """Print an ASCII histogram of token length distribution."""
     if not sequence_lengths:
         return
@@ -73,296 +62,118 @@ def print_histogram(sequence_lengths: List[int], num_bins: int = 20) -> None:
         print(f"  {bin_start:>7.0f}-{bin_end:>7.0f} │{bar} {count}", file=sys.stderr)
     print("="*70 + "\n", file=sys.stderr)
 
-
-def load_tokenizer(model_name: str, token: str | None = None):
-    """Load a Hugging Face tokenizer and configure pad token if needed."""
-    try:
-        from transformers import AutoTokenizer
-    except ImportError as exc:  # pragma: no cover
-        raise SystemExit(
-            "Approximate token sizing requires the 'transformers' package. "
-            "Install it with `pip install transformers`."
-        ) from exc
-
-    load_kwargs = {"use_fast": True}
-    if token:
-        load_kwargs["token"] = token
-    try:
-        tokenizer = AutoTokenizer.from_pretrained(model_name, **load_kwargs)
-    except Exception as exc:  # pragma: no cover
-        raise SystemExit(f"Failed to load tokenizer '{model_name}': {exc}") from exc
-
-    if tokenizer.pad_token is None and tokenizer.eos_token is not None:
-        tokenizer.pad_token = tokenizer.eos_token
-
-    return tokenizer
-
-
 def assemble_prompts(
-    count: int,
-    prefix_overlap: float,
-    *,
-    target_tokens: int | None = None,
-    tokenizer: Any | None = None,
-    tolerance: int = 5,
-    dist_mode: str = "fixed",
-    dist_median: float | None = None,
-    dist_sigma: float = 0.5,
-    dist_max: int | None = None,
-    seed: int | None = None,
-) -> Tuple[List[str], List[int]]:
-    """Create prompt strings whose prefixes overlap by the requested fraction.
-    
-    Returns:
-        Tuple of (prompts, sequence_lengths) where sequence_lengths contains
-        the token count for each prompt.
-    """
-    if tokenizer is None:
-        raise ValueError("A tokenizer is required to detokenize random token ids.")
-
-    prompts: List[str] = []
+    count,
+    prefix_overlap,
+    target_tokens,
+    tokenizer,
+    tolerance,
+    dist_mode,
+    dist_median,
+    dist_sigma,
+    dist_max,
+    seed,
+):
+    """Create prompts with specified prefix overlap."""
     rng = random.Random(seed)
-    sequence_lengths: List[int] = []
+    sequence_lengths = []
+    
     for _ in tqdm(range(count), desc="Sampling sequence lengths"):
         if dist_mode == "lognormal":
-            if dist_median is None:
-                raise ValueError("--dist-median is required when using lognormal mode")
-            
-            # Lognormal parameters: mu = ln(median), sigma = dist_sigma
             mu = math.log(dist_median)
-            # Sample from lognormal and round to nearest integer, ensure >= 1
-            sequence_length = max(1, int(round(rng.lognormvariate(mu, dist_sigma))))
-            
-            # Apply maximum truncation if specified
-            if dist_max is not None and dist_max > 0:
-                sequence_length = min(sequence_length, dist_max)
-        else:  # fixed mode (current behavior)
-            sequence_length = 1
-            if target_tokens and target_tokens > 0:
-                lower = max(1, target_tokens - (tolerance if tolerance else 0))
-                upper = target_tokens + (tolerance if tolerance else 0)
-                if lower > upper:
-                    lower = upper
-                sequence_length = rng.randint(lower, upper) if lower != upper else lower
-        sequence_lengths.append(sequence_length)
+            length = max(1, int(round(rng.lognormvariate(mu, dist_sigma))))
+            length = min(length, dist_max)
+        else:
+            lower = max(1, target_tokens - tolerance)
+            upper = target_tokens + tolerance
+            length = rng.randint(lower, upper)
+        
+        sequence_lengths.append(length)
+    
+    min_length = min(sequence_lengths)
+    prefix_length = int(min_length * prefix_overlap)
+    prefix_ids = [rng.randint(0, tokenizer.vocab_size - 1) for _ in range(prefix_length)]
 
-    prefix_ratio = max(0.0, min(prefix_overlap, 1.0))
-    min_length = min(sequence_lengths) if sequence_lengths else 0
-    prefix_length = int(math.floor(min_length * prefix_ratio)) if min_length else 0
-    if prefix_ratio > 0.0 and prefix_length == 0 and min_length > 0:
-        prefix_length = 1
-
-    prefix_ids = (
-        [rng.randint(1, 10000) for _ in range(prefix_length)] if prefix_length else []
-    )
-
-    for seq_length in tqdm(sequence_lengths, desc="Assembling prompts"):
-        token_ids = [rng.randint(1, 10000) for _ in range(seq_length)]
+    prompts = []
+    for seq_length in tqdm(sequence_lengths, desc="Generating"):
+        token_ids = [rng.randint(0, tokenizer.vocab_size - 1) for _ in range(seq_length)]
         unique_ids = token_ids[prefix_length:]
-        final_ids = prefix_ids + unique_ids
-
-        prompt_text = tokenizer.decode(
-            final_ids,
-            skip_special_tokens=True,
-            clean_up_tokenization_spaces=True,
-        )
-
-        if not prompt_text.strip():
-            try:
-                tokens = tokenizer.convert_ids_to_tokens(final_ids)
-                prompt_text = " ".join(tokens).strip()
-            except Exception:
-                prompt_text = " ".join(str(tid) for tid in final_ids)
-
-        prompts.append(prompt_text)
-
+        final_ids = prefix_ids + unique_ids        
+        prompt = tokenizer.decode(final_ids, skip_special_tokens=True, clean_up_tokenization_spaces=True)
+        prompts.append(prompt)
+    
     return prompts, sequence_lengths
 
 
-def parse_args(argv: List[str] | None = None) -> argparse.Namespace:
-    parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument(
-        "--count",
-        "-n",
-        type=int,
-        default=10,
-        help="Number of requests to generate (default: 10)",
-    )
-    parser.add_argument(
-        "--prefix-overlap",
-        type=float,
-        default=0.0,
-        help="Fraction of tokens shared as a prefix across requests (0.0-1.0, default: 0.0)",
-    )
-    parser.add_argument(
-        "--output",
-        "-o",
-        type=Path,
-        default=Path("outputs"),
-        help=(
-            "Destination directory or filename. When a directory is provided, metadata "
-            "(count, prefix, token target, tokenizer, etc.) is appended automatically. "
-            "If a path ending in .jsonl is provided, that exact file path is used."
-        ),
-    )
-    parser.add_argument(
-        "--approx-input-tokens",
-        type=int,
-        default=0,
-        help="Approximate number of tokens each prompt should contain (default: 0 = no adjustment)",
-    )
-    parser.add_argument(
-        "--tokenizer-model",
-        default=None,
-        help=(
-            "Hugging Face tokenizer identifier to use when approximating token counts. "
-            "Defaults to 'gpt2' when not specified."
-        ),
-    )
-    parser.add_argument(
-        "--token-tolerance",
-        type=int,
-        default=None,
-        help="Acceptable +/- token tolerance when approximating lengths (default: max(5, 5%% of target))",
-    )
-    parser.add_argument(
-        "--huggingface-token",
-        default=None,
-        help=(
-            "Personal access token for Hugging Face Hub (optional). If omitted, the "
-            "generator checks HUGGINGFACE_TOKEN and HUGGING_FACE_HUB_TOKEN env vars."
-        ),
-    )
-    parser.add_argument(
-        "--model",
-        default=None,
-        help=(
-            "Model identifier to include in the JSONL output (optional). "
-            "If not specified, no model field will be included."
-        ),
-    )
-    parser.add_argument(
-        "--dist-mode",
-        choices=["fixed", "lognormal"],
-        default="fixed",
-        help=(
-            "Token length sampling mode: 'fixed' (current behavior with uniform sampling "
-            "within tolerance) or 'lognormal' (sample from lognormal distribution)"
-        ),
-    )
-    parser.add_argument(
-        "--dist-median",
-        type=float,
-        default=None,
-        help="Median token count for lognormal distribution (required when dist-mode=lognormal)",
-    )
-    parser.add_argument(
-        "--dist-sigma",
-        type=float,
-        default=0.5,
-        help=(
-            "Sigma parameter for lognormal distribution (stddev in log-space). "
-            "Controls spread: larger values = more variance and heavier tail. "
-            "Example: for median=15k with ~5%% above 80k, use sigma≈1.0. "
-            "Formula: P95 = median × e^(1.645×sigma). (default: 0.5)"
-        ),
-    )
-    parser.add_argument(
-        "--dist-max",
-        type=int,
-        default=None,
-        help=(
-            "Maximum token count for lognormal distribution. Any sampled values "
-            "above this will be truncated to this maximum. (default: no maximum)"
-        ),
-    )
-    parser.add_argument(
-        "--seed",
-        type=int,
-        default=None,
-        help="Random seed for reproducible generation (default: None)",
-    )
-    return parser.parse_args(argv)
-
-
-def resolve_tolerance(target_tokens: int, explicit: int | None) -> int:
-    if target_tokens <= 0:
-        return 0
-    if explicit is not None and explicit >= 0:
-        return explicit
-    return max(5, int(target_tokens * 0.05))
-
-
-def sanitize_component(value: str | None) -> str:
-    if not value:
-        return "none"
-    cleaned = re.sub(r"[^0-9A-Za-z._-]+", "-", value).strip("-._")
-    return cleaned or "none"
-
-
-def format_prefix(prefix_overlap: float) -> str:
-    return f"{prefix_overlap:.2f}".replace(".", "p")
-
-
 def build_output_path(
-    base_path: Path,
-    *,
-    count: int,
-    prefix_overlap: float,
-    target_tokens: int | None,
-    tokenizer_label: str,
-    dist_mode: str = "fixed",
-    dist_median: float | None = None,
-    dist_sigma: float | None = None,
-    seed: int | None = None,
-) -> Path:
+    base_path,
+    count,
+    prefix_overlap,
+    target_tokens,
+    tokenizer_label,
+    dist_mode,
+    dist_median,
+    dist_sigma,
+    seed,
+):
+    """Generate output path with metadata."""
     # Check if user specified an exact .jsonl filename (not a directory)
     if base_path.suffix == ".jsonl" and not base_path.is_dir():
-        # User requested an exact filename; respect it without adding metadata.
         directory = base_path.parent or Path(".")
         directory.mkdir(parents=True, exist_ok=True)
         return base_path
-
+        
     # Build metadata suffix for auto-generated filenames
-    if dist_mode == "lognormal" and dist_median is not None:
-        # For lognormal mode, use median and sigma in filename
-        tokens_label = f"lognorm-med{int(dist_median)}-sig{dist_sigma:.2f}".replace(".", "p")
-    else:
-        # For fixed mode, use target tokens
-        tokens_label = str(target_tokens) if target_tokens and target_tokens > 0 else "none"
+    tokens_label = (f"lognorm-med{int(dist_median)}-sig{dist_sigma:.2f}".replace(".", "p") 
+                    if dist_mode == "lognormal" 
+                    else str(target_tokens)
+    )
+    prefix_label = f"{prefix_overlap:.2f}".replace(".", "p")
+    tokenizer_component = re.sub(r"[^0-9A-Za-z._-]+", "-", tokenizer_label).strip("-._") or "none"
+    metadata = f"count-{count}_tokens-{tokens_label}_prefix-{prefix_label}_tokenizer-{tokenizer_component}_seed-{seed}"
+    filename = f"requests_{metadata}.jsonl"
+    base_path.mkdir(parents=True, exist_ok=True)
+    return base_path / filename
+
+def main():
+    parser = argparse.ArgumentParser()
+    parser.add_argument("--count", "-n", type=int, default=10, help="Number of requests")
+    parser.add_argument("--prefix-overlap", type=float, default=0.0)
+    parser.add_argument("--output", "-o", type=Path, default=Path("outputs"), help="Output dir or file")
+    parser.add_argument("--approx-input-tokens", type=int, default=0, help="Target tokens per prompt")
+    parser.add_argument("--tokenizer", default="gpt2")
+    parser.add_argument("--token-tolerance", type=int, default=None)
+    parser.add_argument("--model", default=None)
+    parser.add_argument("--dist-mode", choices=["fixed", "lognormal"], default="fixed")
+    parser.add_argument("--dist-median", type=float, default=None)
+    parser.add_argument("--dist-sigma", type=float, default=0.5)
+    parser.add_argument("--dist-max", type=int, default=None)
+    parser.add_argument("--seed", type=int, default=42)
+    args = parser.parse_args()
     
-    prefix_label = format_prefix(prefix_overlap)
-    tokenizer_component = sanitize_component(tokenizer_label)
-    seed_label = f"_seed-{seed}" if seed is not None else ""
-    metadata_suffix = (
-        f"count-{count}_tokens-{tokens_label}_prefix-{prefix_label}_tokenizer-{tokenizer_component}{seed_label}"
-    )
-
-    # Treat base_path as a directory and generate filename with metadata
-    directory = base_path
-    filename = f"requests_{metadata_suffix}.jsonl"
-
-    directory.mkdir(parents=True, exist_ok=True)
-    output_path = directory / filename
-    return output_path
-
-
-def main(argv: List[str] | None = None) -> int:
-    args = parse_args(argv)
-
-    hf_token = (
-        args.huggingface_token
-        or os.getenv("HUGGINGFACE_TOKEN")
-        or os.getenv("HUGGING_FACE_HUB_TOKEN")
-    )
-
-    target_tokens = args.approx_input_tokens if args.approx_input_tokens > 0 else None
-    tokenizer_label = args.tokenizer_model or "gpt2"
-    tokenizer = load_tokenizer(tokenizer_label, hf_token)
-    tolerance = (
-        resolve_tolerance(target_tokens, args.token_tolerance) if target_tokens else 0
-    )
-
+    assert 0 <= args.prefix_overlap <= 1
+    
+    # Validate distribution mode requirements
+    if args.dist_mode == "lognormal":
+        assert args.dist_median is not None, "--dist-median required for lognormal mode"
+        assert args.dist_sigma is not None, "--dist-sigma required for lognormal mode"
+        assert args.dist_max is not None, "--dist-max required for lognormal mode"
+    else:
+        assert args.approx_input_tokens > 0, "--approx-input-tokens must be > 0 for fixed mode"
+    
+    # Load tokenizer
+    try:
+        tokenizer = AutoTokenizer.from_pretrained(args.tokenizer, trust_remote_code=True)
+        print(f"Tokenizer loaded successfully. Vocab size: {tokenizer.vocab_size}")
+    except Exception as e:
+        print(f"Error loading tokenizer: {e}", file=sys.stderr)
+        sys.exit(1)
+    
+    # Calculate tolerance
+    target_tokens = args.approx_input_tokens
+    tolerance = args.token_tolerance if args.token_tolerance is not None else max(5, int(target_tokens * 0.05))
+    
+    # Generate prompts
     prompts, sequence_lengths = assemble_prompts(
         count=args.count,
         prefix_overlap=args.prefix_overlap,
@@ -376,55 +187,38 @@ def main(argv: List[str] | None = None) -> int:
         seed=args.seed,
     )
 
-    # Print histogram for distribution visualization
-    if args.dist_mode == "lognormal" or target_tokens:
-        print_histogram(sequence_lengths)
-
+    print_histogram(sequence_lengths)
+    
+    # Build output path
     output_path = build_output_path(
         args.output,
         count=args.count,
         prefix_overlap=args.prefix_overlap,
         target_tokens=target_tokens,
-        tokenizer_label=tokenizer_label,
+        tokenizer_label=args.tokenizer,
         dist_mode=args.dist_mode,
         dist_median=args.dist_median,
         dist_sigma=args.dist_sigma,
         seed=args.seed,
     )
-
+    
     if output_path.exists():
-        print(
-            f"Output file {output_path} already exists; skipping generation.",
-            file=sys.stderr,
-        )
+        print(f"File exists: {output_path}", file=sys.stderr)
         print(output_path)
         return 0
-
-    with output_path.open("w", encoding="utf-8") as handle:
+    
+    # Write output
+    with output_path.open("w", encoding="utf-8") as f:
         for prompt in prompts:
-            record = {
-                "messages": [
-                    {
-                        "role": "user",
-                        "content": prompt
-                    }
-                ]
-            }
+            record = {"messages": [{"role": "user", "content": prompt}]}
             if args.model:
                 record["model"] = args.model
-            json.dump(record, handle)
-            handle.write("\n")
-
-    print(
-        f"Wrote {len(prompts)} request prompts to {output_path} "
-        f"with prefix overlap {args.prefix_overlap:.2f}.",
-        file=sys.stderr,
-    )
-
+            json.dump(record, f)
+            f.write("\n")
+    
     print(output_path)
-
     return 0
 
 
-if __name__ == "__main__":  # pragma: no cover
+if __name__ == "__main__":
     raise SystemExit(main())
