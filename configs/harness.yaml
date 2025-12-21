@@ -1,0 +1,111 @@
+# BatchBench Harness Configuration
+# This file configures the full end-to-end benchmarking pipeline:
+# 1. Instance provisioning via Prime Intellect
+# 2. vLLM server startup
+# 3. Synthetic data generation
+# 4. Online benchmarking
+
+# ============================================================================
+# INSTANCE CONFIGURATION (Prime Intellect)
+# ============================================================================
+# Note: Set PRIME_TEAM_ID env var if using team billing
+instance:
+  # GPU specification
+  gpu_type: H100_80GB          # Options: H100_80GB, A100_80GB, A100_40GB, etc.
+  gpu_count: 1                 # Number of GPUs
+
+  # Region preference (optional - uses best available if not specified)
+  # region: united_states      # Options: united_states, europe_west, etc.
+
+  # Security level (optional - omit to see all available)
+  security: secure_cloud     # Options: secure_cloud, community_cloud
+
+  # Docker image to use (must be available on Prime Intellect)
+  # Common images: ubuntu_22_cuda_12, cuda_12_1_pytorch_2_2, vllm_llama_8b
+  image: ubuntu_22_cuda_12
+
+  # Resources
+  disk_size_gb: 100            # Disk size in GB
+
+  # Timeouts
+  provision_timeout: 600       # Max seconds to wait for instance to be ready
+
+  # Instance naming
+  name_prefix: batchbench      # Prefix for instance name
+
+# ============================================================================
+# VLLM SERVER CONFIGURATION
+# ============================================================================
+vllm:
+  model: Qwen/Qwen3-30B-A3B-Instruct-2507-FP8
+
+  # Server startup timeout (seconds)
+  startup_timeout: 600
+
+  # vLLM serve arguments
+  args:
+    port: 8000
+    host: 0.0.0.0
+    max-model-len: 131072
+    gpu-memory-utilization: 0.9
+    trust-remote-code: true
+    # tensor-parallel-size: 1
+    # enable-expert-parallel: false
+
+  # Environment variables for vLLM
+  env:
+    HF_HOME: /data
+    # VLLM_ATTENTION_BACKEND: FLASHINFER
+    # VLLM_HAS_FLASHINFER_CUBIN: "1"
+    # VLLM_USE_FLASHINFER_MOE_FP8: "1"
+
+# ============================================================================
+# SYNTHETIC DATA GENERATION
+# ============================================================================
+generate:
+  output: data/synthetic.jsonl
+  count: 10000
+  seed: 42
+  prefix_overlap: 0.0
+
+  # Distribution mode: "lognormal" or "fixed"
+  dist_mode: lognormal
+
+  # Lognormal distribution parameters (used when dist_mode: lognormal)
+  dist_median: 1000
+  dist_sigma: 1.68
+  dist_max: 128000
+
+  # Fixed distribution parameters (used when dist_mode: fixed)
+  # approx_input_tokens: 512
+  # token_tolerance: 50
+
+  # Tokenizer (defaults to model from vllm section if not specified)
+  # tokenizer_model: Qwen/Qwen3-30B-A3B-Instruct-2507-FP8
+
+# ============================================================================
+# ONLINE BENCHMARK CONFIGURATION
+# ============================================================================
+benchmark:
+  # Load configuration
+  users: 32
+  requests_per_user: 10
+  random_requests: true
+  seed: 42
+
+  # Output token distribution (lognormal)
+  output_lognorm_mu: 6
+  output_lognorm_sigma: 0.7
+  output_lognorm_max: 2000
+
+  # Alternative: fixed output tokens
+  # output_tokens: 300
+  # output_vary: 200
+
+  # Timeouts and retries
+  request_timeout_secs: 10000
+  max_retries: 2
+  retry_delay_ms: 250
+
+  # Results output (optional)
+  # results_csv: results/benchmark.csv

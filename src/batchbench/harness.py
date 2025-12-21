@@ -1,339 +1,393 @@
-"""Minimal benchmarking harness: start server, generate data, run benchmark, record results."""
+#!/usr/bin/env python3
+"""
+BatchBench Harness - Automated benchmarking orchestration via Prime Intellect.
 
-from __future__ import annotations
+This script:
+1. Provisions a GPU instance via Prime Intellect API
+2. Connects via SSH
+3. Runs nvidia-smi (for now - later: vLLM, generation, benchmarking)
+"""
 
 import argparse
-import json
 import os
-import signal
-import subprocess
 import sys
-import threading
 import time
-import urllib.request
-import urllib.error
 from pathlib import Path
 
 import yaml
 
+try:
+    import requests
+except ImportError:
+    print("ERROR: 'requests' library required. Install with: pip install requests")
+    sys.exit(1)
 
-RUNS_DIR = Path("runs")
-
-
-def ensure_source_data(config: dict) -> Path:
-    """Download or verify source dataset exists. Returns path to the data."""
-    source = config.get("source", {})
-    source_type = source.get("type", "local")
-    path = Path(source.get("path", "data/source.jsonl"))
-
-    if path.exists():
-        print(f"Source data already exists: {path}")
-        return path
-
-    if source_type == "local":
-        raise RuntimeError(f"Source file not found: {path}")
-
-    if source_type == "wildchat":
-        # Ensure pip and required packages are installed
-        subprocess.call([sys.executable, "-m", "ensurepip", "--upgrade"], stderr=subprocess.DEVNULL)
-        subprocess.check_call([sys.executable, "-m", "pip", "install", "-q", "datasets", "tqdm", "matplotlib"])
-
-        # Call the existing download script
-        cmd = [
-            sys.executable, "examples/wildchat/download_wildchat.py",
-            "--output", str(path),
-            "--num-samples", str(source.get("num_samples", 50000)),
-            "--seed", str(source.get("seed", 42)),
-        ]
-        if source.get("min_turns"):
-            cmd.extend(["--min-turns", str(source["min_turns"])])
-        if source.get("max_turns"):
-            cmd.extend(["--max-turns", str(source["max_turns"])])
-
-        print(f"Downloading source data: {' '.join(cmd)}")
-        result = subprocess.run(cmd)
-        if result.returncode != 0:
-            raise RuntimeError("Source data download failed")
-        return path
-
-    raise RuntimeError(f"Unknown source type: {source_type}")
+try:
+    import paramiko
+except ImportError:
+    print("ERROR: 'paramiko' library required. Install with: pip install paramiko")
+    sys.exit(1)
 
 
-def fit_distribution(source_path: Path, stats_path: Path, plot_path: Path, source_config: dict) -> dict:
-    """Fit lognormal distribution to source data token lengths."""
-    # Call the existing plot_conversation_lengths script with --output-stats
-    cmd = [
-        sys.executable, "examples/wildchat/plot_conversation_lengths.py",
-        str(source_path),
-        "--output-stats", str(stats_path),
-        "--output", str(plot_path),
-    ]
-
-    # Pass through tokenization options from source config
-    if source_config.get("tokenizer"):
-        cmd.extend(["--tokenizer", source_config["tokenizer"]])
-    if source_config.get("use_chars"):
-        cmd.append("--use-chars")
-    if source_config.get("no_chat_template"):
-        cmd.append("--no-chat-template")
-    if source_config.get("bins"):
-        cmd.extend(["--bins", str(source_config["bins"])])
-
-    print(f"Fitting distribution: {' '.join(cmd)}")
-    result = subprocess.run(cmd)
-    if result.returncode != 0:
-        raise RuntimeError("Distribution fitting failed")
-
-    # Parse the JSON output
-    with open(stats_path) as f:
-        stats = json.load(f)
-
-    print(f"  Fitted median: {stats['dist_median']:.0f}")
-    print(f"  Fitted sigma: {stats['dist_sigma']:.3f}")
-    print(f"  P99 (max): {stats['dist_max']}")
-
-    return stats
+# Prime Intellect API base URL
+PI_API_BASE = "https://api.primeintellect.ai/api/v1"
 
 
-def load_config(path: Path) -> dict:
-    """Load YAML config file."""
-    with open(path) as f:
+def load_config(config_path: str) -> dict:
+    """Load YAML configuration file."""
+    with open(config_path, "r") as f:
         return yaml.safe_load(f)
 
 
-def start_server(config: dict, log_file: Path, verbose: bool = False) -> subprocess.Popen:
-    """Start vLLM server and wait for it to be healthy."""
-    server = config["server"]
+def get_api_key() -> str:
+    """Get Prime Intellect API key from environment."""
+    api_key = os.environ.get("PRIME_API_KEY")
+    if not api_key:
+        # Try reading from prime CLI config
+        config_path = Path.home() / ".config" / "prime" / "config.toml"
+        if config_path.exists():
+            with open(config_path) as f:
+                for line in f:
+                    if "api_key" in line:
+                        # Extract value from TOML line like: api_key = "xxx"
+                        api_key = line.split("=", 1)[1].strip().strip('"\'')
+                        break
+    if not api_key:
+        raise RuntimeError(
+            "PRIME_API_KEY environment variable not set.\n"
+            "Set it with: export PRIME_API_KEY=your_api_key\n"
+            "Or authenticate with: prime login"
+        )
+    return api_key
 
-    cmd = ["vllm", "serve", server["model"]]
-    for key, value in server.get("args", {}).items():
-        if isinstance(value, bool):
-            if value:
-                cmd.append(f"--{key}")
-            # If False, skip the flag entirely
-        else:
-            cmd.extend([f"--{key}", str(value)])
 
-    env = os.environ.copy()
-    env.update({k: str(v) for k, v in server.get("env", {}).items()})
+def get_ssh_key_path() -> Path:
+    """Get SSH private key path."""
+    # Check environment variable first (should be a path to the key file)
+    ssh_key_path = os.environ.get("PRIME_SSH_KEY_PATH")
+    if ssh_key_path:
+        path = Path(ssh_key_path)
+        if path.exists():
+            return path
+        raise RuntimeError(f"SSH key not found at: {ssh_key_path}")
 
-    print(f"Starting server: {' '.join(cmd)}")
-    if server.get("env"):
-        print(f"Environment: {server['env']}")
+    # Try common locations
+    for key_name in ["id_ed25519", "id_rsa"]:
+        key_path = Path.home() / ".ssh" / key_name
+        if key_path.exists():
+            return key_path
 
-    log_handle = open(log_file, "w")
+    raise RuntimeError(
+        "SSH private key not found. Set PRIME_SSH_KEY_PATH environment variable\n"
+        "or ensure ~/.ssh/id_ed25519 or ~/.ssh/id_rsa exists."
+    )
+
+
+class PrimeIntellectClient:
+    """Client for Prime Intellect API."""
+
+    def __init__(self, api_key: str):
+        self.api_key = api_key
+        self.headers = {
+            "Authorization": f"Bearer {api_key}",
+            "Content-Type": "application/json",
+        }
+
+    def _request(self, method: str, endpoint: str, **kwargs) -> dict:
+        """Make an API request."""
+        url = f"{PI_API_BASE}{endpoint}"
+        resp = requests.request(method, url, headers=self.headers, **kwargs)
+        if not resp.ok:
+            raise RuntimeError(f"API error {resp.status_code}: {resp.text}")
+        return resp.json() if resp.text else {}
+
+    def check_availability(
+        self,
+        gpu_type: str,
+        gpu_count: int = 1,
+        region: str | None = None,
+        security: str | None = None,
+    ) -> list[dict]:
+        """Check GPU availability."""
+        params = {
+            "gpu_type": gpu_type,
+            "gpu_count": gpu_count,
+        }
+        if region:
+            params["regions"] = region
+        if security:
+            params["security"] = security
+
+        print(f"  API params: {params}")
+        result = self._request("GET", "/availability/gpus", params=params)
+        print(f"  API response: {result.get('totalCount', 0)} items found")
+        return result.get("items", [])
+
+    def create_pod(
+        self,
+        gpu_config: dict,
+        name: str,
+        image: str,
+        team_id: str | None = None,
+        disk_size_gb: int = 100,
+    ) -> dict:
+        """Create a new pod instance.
+
+        gpu_config should be an item from check_availability() response.
+        """
+        payload = {
+            "pod": {
+                "cloudId": gpu_config.get("cloudId"),
+                "gpuCount": gpu_config.get("gpuCount", 1),
+                "gpuType": gpu_config.get("gpuType"),
+                "socket": gpu_config.get("socket"),
+                "dataCenterId": gpu_config.get("dataCenterId"),
+                "name": name,
+                "image": image,
+                "diskSize": disk_size_gb,
+            },
+            "provider": {
+                "type": gpu_config.get("provider"),
+            },
+        }
+        if team_id:
+            payload["team"] = {"teamId": team_id}
+        return self._request("POST", "/pods/", json=payload)
+
+    def get_pod(self, pod_id: str) -> dict:
+        """Get pod details."""
+        return self._request("GET", f"/pods/{pod_id}")
+
+    def list_pods(self) -> list[dict]:
+        """List all pods."""
+        result = self._request("GET", "/pods/")
+        return result.get("data", [])
+
+    def terminate_pod(self, pod_id: str) -> None:
+        """Terminate a pod."""
+        self._request("DELETE", f"/pods/{pod_id}")
+
+    def wait_for_pod_ready(
+        self, pod_id: str, timeout: int = 600, poll_interval: int = 10
+    ) -> dict:
+        """Wait for pod to be ready."""
+        start = time.time()
+        while time.time() - start < timeout:
+            pod = self.get_pod(pod_id)
+            status = pod.get("status", "").lower()
+            print(f"  Pod status: {status}")
+
+            if status == "active":
+                return pod
+            elif status in ("stopped", "error", "terminated"):
+                raise RuntimeError(f"Pod entered {status} state")
+
+            time.sleep(poll_interval)
+
+        raise TimeoutError(f"Pod not ready after {timeout}s")
+
+
+def ssh_run_command(
+    host: str,
+    port: int,
+    username: str,
+    key_path: Path,
+    command: str,
+    timeout: int = 60,
+) -> tuple[str, str, int]:
+    """Run a command over SSH and return (stdout, stderr, exit_code)."""
+    client = paramiko.SSHClient()
+    client.set_missing_host_key_policy(paramiko.AutoAddPolicy())
+
+    try:
+        key = paramiko.Ed25519Key.from_private_key_file(str(key_path))
+    except paramiko.ssh_exception.SSHException:
+        try:
+            key = paramiko.RSAKey.from_private_key_file(str(key_path))
+        except paramiko.ssh_exception.SSHException:
+            raise RuntimeError(f"Could not load SSH key from {key_path}")
+
+    client.connect(
+        hostname=host,
+        port=port,
+        username=username,
+        pkey=key,
+        timeout=timeout,
+    )
+
+    _, stdout, stderr = client.exec_command(command, timeout=timeout)
+    exit_code = stdout.channel.recv_exit_status()
+    stdout_text = stdout.read().decode()
+    stderr_text = stderr.read().decode()
+
+    client.close()
+    return stdout_text, stderr_text, exit_code
+
+
+def run_harness(config_path: str, verbose: bool = False) -> None:
+    """Main harness execution."""
+    print(f"Loading config from: {config_path}")
+    config = load_config(config_path)
 
     if verbose:
-        # Tee output to both terminal and log file
-        proc = subprocess.Popen(
-            cmd,
-            env=env,
-            stdout=subprocess.PIPE,
-            stderr=subprocess.STDOUT,
-            start_new_session=True,
-            text=True,
-        )
+        print(f"Config: {config}")
 
-        def tee_output():
-            for line in proc.stdout:
-                sys.stdout.write(line)
-                sys.stdout.flush()
-                log_handle.write(line)
-                log_handle.flush()
+    instance_cfg = config.get("instance", {})
+    team_id = os.environ.get("PRIME_TEAM_ID")
+    gpu_type = instance_cfg.get("gpu_type", "H100_80GB")
+    gpu_count = instance_cfg.get("gpu_count", 1)
+    region = instance_cfg.get("region")
+    security = instance_cfg.get("security")
+    image = instance_cfg.get("image", "ubuntu_22_cuda_12")
+    disk_size = instance_cfg.get("disk_size_gb", 100)
+    provision_timeout = instance_cfg.get("provision_timeout", 600)
+    name_prefix = instance_cfg.get("name_prefix", "batchbench")
 
-        tee_thread = threading.Thread(target=tee_output, daemon=True)
-        tee_thread.start()
-    else:
-        proc = subprocess.Popen(
-            cmd,
-            env=env,
-            stdout=log_handle,
-            stderr=subprocess.STDOUT,
-            start_new_session=True,
-        )
+    # Initialize client
+    print("Authenticating with Prime Intellect...")
+    api_key = get_api_key()
+    client = PrimeIntellectClient(api_key)
+    if team_id:
+        print(f"  Using team: {team_id}")
 
-    # Wait for health
-    port = server.get("args", {}).get("port", 8000)
-    url = f"http://127.0.0.1:{port}/health"
-    timeout = server.get("startup_timeout", 600)
+    # Check availability
+    print(f"Checking availability for {gpu_count}x {gpu_type}...")
+    available = client.check_availability(
+        gpu_type=gpu_type,
+        gpu_count=gpu_count,
+        region=region,
+        security=security,
+    )
 
-    print(f"Waiting for server (timeout: {timeout}s)...")
-    start = time.time()
-    while time.time() - start < timeout:
-        if proc.poll() is not None:
-            raise RuntimeError(f"Server exited with code {proc.returncode}")
+    if not available:
+        print(f"ERROR: No {gpu_type} GPUs available")
+        print("Check availability at: https://app.primeintellect.ai/dashboard/create-cluster")
+        sys.exit(1)
+
+
+    # Select first available option
+    selected = available[0]
+    provider = selected.get("provider", "unknown")
+    price = selected.get("prices", {}).get("onDemand", "N/A")
+
+    print(f"Found available GPU:")
+    print(f"  Provider: {provider}")
+    print(f"  Cloud ID: {selected.get('cloudId')}")
+    print(f"  GPU Type: {selected.get('gpuType')}")
+    print(f"  Socket: {selected.get('socket')}")
+    print(f"  Price: ${price}/hr")
+
+    # Generate instance name
+    instance_name = f"{name_prefix}-{int(time.time())}"
+
+    # Create pod
+    print(f"\nCreating pod '{instance_name}'...")
+    pod = client.create_pod(
+        gpu_config=selected,
+        name=instance_name,
+        image=image,
+        team_id=team_id,
+        disk_size_gb=disk_size,
+    )
+
+    pod_id = pod.get("id")
+    print(f"Pod created with ID: {pod_id}")
+
+    # Wait for pod to be ready
+    print(f"\nWaiting for pod to be ready (timeout: {provision_timeout}s)...")
+    try:
+        pod = client.wait_for_pod_ready(pod_id, timeout=provision_timeout)
+    except (TimeoutError, RuntimeError) as e:
+        print(f"ERROR: {e}")
+        print("Cleaning up...")
         try:
-            with urllib.request.urlopen(url, timeout=5) as resp:
-                if resp.status == 200:
-                    print(f"Server ready after {time.time() - start:.1f}s")
-                    return proc
-        except (urllib.error.URLError, urllib.error.HTTPError):
+            client.terminate_pod(pod_id)
+        except Exception:
             pass
-        time.sleep(2)
+        sys.exit(1)
 
-    proc.terminate()
-    raise RuntimeError(f"Server failed to start within {timeout}s")
+    # Extract SSH connection info from sshConnection (format: "user@host -p port")
+    ssh_conn = pod.get("sshConnection", "")
+    user_host, _, port_str = ssh_conn.partition(" -p ")
+    ssh_user, ssh_host = user_host.split("@", 1)
+    ssh_port = int(port_str)
 
+    if not ssh_host:
+        print("ERROR: Could not determine SSH host from pod info")
+        print(f"Pod info: {pod}")
+        sys.exit(1)
 
-def stop_server(proc: subprocess.Popen) -> None:
-    """Stop the vLLM server."""
-    print("Stopping server...")
+    print(f"\nPod is ready!")
+    print(f"  SSH: {ssh_user}@{ssh_host}:{ssh_port}")
+
+    # Get SSH key
+    ssh_key_path = get_ssh_key_path()
+    print(f"  Using SSH key: {ssh_key_path}")
+
+    # Wait a moment for SSH to be fully ready
+    print("\nWaiting for SSH to be ready...")
+    time.sleep(10)
+
+    # Run nvidia-smi
+    print("\nRunning nvidia-smi...")
     try:
-        os.killpg(os.getpgid(proc.pid), signal.SIGTERM)
-        proc.wait(timeout=30)
-    except (ProcessLookupError, OSError):
-        pass
-    except subprocess.TimeoutExpired:
-        os.killpg(os.getpgid(proc.pid), signal.SIGKILL)
-    print("Server stopped")
+        stdout, stderr, exit_code = ssh_run_command(
+            host=ssh_host,
+            port=ssh_port,
+            username=ssh_user,
+            key_path=ssh_key_path,
+            command="nvidia-smi",
+            timeout=60,
+        )
+
+        if exit_code == 0:
+            print("\n" + "=" * 60)
+            print("nvidia-smi output:")
+            print("=" * 60)
+            print(stdout)
+        else:
+            print(f"nvidia-smi failed with exit code {exit_code}")
+            if stderr:
+                print(f"stderr: {stderr}")
+
+    except Exception as e:
+        print(f"SSH command failed: {e}")
+
+    # Print summary
+    print("\n" + "=" * 60)
+    print("Instance Summary")
+    print("=" * 60)
+    print(f"Pod ID: {pod_id}")
+    print(f"Name: {instance_name}")
+    print(f"SSH: ssh {ssh_user}@{ssh_host} -p {ssh_port}")
+    print(f"\nTo terminate: prime pods terminate {pod_id}")
+    print("Or via API: DELETE /api/v1/pods/{pod_id}")
 
 
-def generate_dataset(config: dict, output_path: Path, model: str) -> None:
-    """Generate synthetic dataset."""
-    dataset = config["dataset"]
+def main():
+    parser = argparse.ArgumentParser(
+        description="BatchBench Harness - Automated GPU instance provisioning and benchmarking"
+    )
+    parser.add_argument(
+        "config",
+        nargs="?",
+        default="configs/harness.yaml",
+        help="Path to config file (default: configs/harness.yaml)",
+    )
+    parser.add_argument(
+        "-v", "--verbose",
+        action="store_true",
+        help="Enable verbose output",
+    )
 
-    args = [
-        sys.executable, "-m", "batchbench.generate",
-        "--output", str(output_path),
-        "--count", str(dataset["count"]),
-        "--tokenizer-model", model,
-        "--model", model,
-    ]
+    args = parser.parse_args()
 
-    if dataset.get("dist_mode") == "lognormal":
-        args.extend([
-            "--dist-mode", "lognormal",
-            "--dist-median", str(dataset["dist_median"]),
-            "--dist-sigma", str(dataset.get("dist_sigma", 0.5)),
-        ])
-        if dataset.get("dist_max"):
-            args.extend(["--dist-max", str(dataset["dist_max"])])
-    else:
-        args.extend([
-            "--dist-mode", "fixed",
-            "--approx-input-tokens", str(dataset.get("approx_input_tokens", 512)),
-        ])
+    if not Path(args.config).exists():
+        print(f"ERROR: Config file not found: {args.config}")
+        sys.exit(1)
 
-    if dataset.get("prefix_overlap"):
-        args.extend(["--prefix-overlap", str(dataset["prefix_overlap"])])
-    if dataset.get("seed") is not None:
-        args.extend(["--seed", str(dataset["seed"])])
-
-    print(f"Generating dataset: {dataset['count']} requests")
-    result = subprocess.run(args)
-    if result.returncode != 0:
-        raise RuntimeError("Dataset generation failed")
-
-
-def run_benchmark(config: dict, dataset_path: Path, results_path: Path, model: str) -> None:
-    """Run the online benchmark."""
-    bench = config["benchmark"]
-    server = config["server"]
-    port = server.get("args", {}).get("port", 8000)
-
-    # Get path to bundled binary
-    from importlib import resources
-    resource = resources.files("batchbench").joinpath("bin", "batchbench")
-
-    with resources.as_file(resource) as binary:
-        cmd = [
-            str(binary),
-            "--jsonl", str(dataset_path),
-            "--model", model,
-            "--host", f"http://127.0.0.1:{port}",
-            "--results-csv", str(results_path),
-        ]
-
-        for key, value in bench.items():
-            if key.startswith("_"):
-                continue
-            flag = f"--{key.replace('_', '-')}"
-            if isinstance(value, bool):
-                if value:
-                    cmd.append(flag)
-            else:
-                cmd.extend([flag, str(value)])
-
-        print(f"Running benchmark: {bench.get('users', 1)} users, {bench.get('requests_per_user', 1)} req/user")
-        result = subprocess.run(cmd)
-        if result.returncode != 0:
-            raise RuntimeError("Benchmark failed")
-
-
-def run(config_path: Path, name: str, verbose: bool = False) -> Path:
-    """Execute a complete benchmark run."""
-    config = load_config(config_path)
-    model = config["server"]["model"]
-
-    # Create run directory first (needed for stats output)
-    run_dir = RUNS_DIR / name
-    if run_dir.exists():
-        raise RuntimeError(f"Run directory already exists: {run_dir}")
-    run_dir.mkdir(parents=True)
-
-    # Auto-fit distribution if source section exists and fit_from_source is true
-    dataset = config.get("dataset", {})
-    source_config = config.get("source", {})
-    if source_config and dataset.get("fit_from_source"):
-        source_path = ensure_source_data(config)
-        stats_path = run_dir / "fitted_stats.json"
-        plot_path = run_dir / "source_distribution.png"
-        fitted = fit_distribution(source_path, stats_path, plot_path, source_config)
-
-        # Update config with fitted values
-        config["dataset"]["dist_median"] = fitted["dist_median"]
-        config["dataset"]["dist_sigma"] = fitted["dist_sigma"]
-        config["dataset"]["dist_max"] = fitted["dist_max"]
-
-        # Ensure dist_mode is lognormal when fitting
-        if config["dataset"].get("dist_mode") != "lognormal":
-            print("Setting dist_mode to lognormal (fit_from_source requires it)")
-            config["dataset"]["dist_mode"] = "lognormal"
-
-    # Save config (includes fitted values if auto-fitted)
-    with open(run_dir / "config.yaml", "w") as f:
-        yaml.dump(config, f, default_flow_style=False)
-
-    dataset_path = run_dir / "dataset.jsonl"
-    results_path = run_dir / "results.csv"
-    log_path = run_dir / "server.log"
-
-    proc = None
-    try:
-        proc = start_server(config, log_path, verbose=verbose)
-        generate_dataset(config, dataset_path, model)
-        run_benchmark(config, dataset_path, results_path, model)
-        print(f"\nRun complete: {run_dir}")
-    except KeyboardInterrupt:
-        print("\nInterrupted")
-    finally:
-        if proc:
-            stop_server(proc)
-
-    return run_dir
-
-
-def main(argv: list[str] | None = None) -> int:
-    parser = argparse.ArgumentParser(description="Benchmarking harness")
-    sub = parser.add_subparsers(dest="command", required=True)
-
-    run_parser = sub.add_parser("run", help="Run a benchmark")
-    run_parser.add_argument("config", type=Path, help="Path to config YAML")
-    run_parser.add_argument("--name", required=True, help="Name for this run")
-    run_parser.add_argument("--verbose", "-v", action="store_true", help="Show server output in terminal")
-
-    args = parser.parse_args(argv)
-
-    if args.command == "run":
-        try:
-            run(args.config, args.name, verbose=args.verbose)
-            return 0
-        except Exception as e:
-            print(f"Error: {e}", file=sys.stderr)
-            return 1
-
-    return 0
+    run_harness(args.config, verbose=args.verbose)
 
 
 if __name__ == "__main__":
-    sys.exit(main())
+    main()

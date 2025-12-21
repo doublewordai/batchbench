@@ -16,10 +16,12 @@ dependencies = ["pyyaml>=6.0"]
 
 [project.optional-dependencies]
 generate = ["transformers>=4.39.0","datasets==4.4.1"]
+harness = ["requests>=2.28.0", "paramiko>=3.0.0"]
 
 [project.scripts]
 'batchbench.generate' = "batchbench.generate:main"
 'batchbench.online' = "batchbench.online:main"
+'batchbench.harness' = "batchbench.harness:main"
 
 [tool.setuptools]
 package-dir = {"" = "src"}
