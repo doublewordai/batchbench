@@ -14,19 +14,9 @@ import sys
 import time
 from pathlib import Path
 
+import paramiko
+import requests
 import yaml
-
-try:
-    import requests
-except ImportError:
-    print("ERROR: 'requests' library required. Install with: pip install requests")
-    sys.exit(1)
-
-try:
-    import paramiko
-except ImportError:
-    print("ERROR: 'paramiko' library required. Install with: pip install paramiko")
-    sys.exit(1)
 
 
 # Prime Intellect API base URL
@@ -37,50 +27,6 @@ def load_config(config_path: str) -> dict:
     """Load YAML configuration file."""
     with open(config_path, "r") as f:
         return yaml.safe_load(f)
-
-
-def get_api_key() -> str:
-    """Get Prime Intellect API key from environment."""
-    api_key = os.environ.get("PRIME_API_KEY")
-    if not api_key:
-        # Try reading from prime CLI config
-        config_path = Path.home() / ".config" / "prime" / "config.toml"
-        if config_path.exists():
-            with open(config_path) as f:
-                for line in f:
-                    if "api_key" in line:
-                        # Extract value from TOML line like: api_key = "xxx"
-                        api_key = line.split("=", 1)[1].strip().strip('"\'')
-                        break
-    if not api_key:
-        raise RuntimeError(
-            "PRIME_API_KEY environment variable not set.\n"
-            "Set it with: export PRIME_API_KEY=your_api_key\n"
-            "Or authenticate with: prime login"
-        )
-    return api_key
-
-
-def get_ssh_key_path() -> Path:
-    """Get SSH private key path."""
-    # Check environment variable first (should be a path to the key file)
-    ssh_key_path = os.environ.get("PRIME_SSH_KEY_PATH")
-    if ssh_key_path:
-        path = Path(ssh_key_path)
-        if path.exists():
-            return path
-        raise RuntimeError(f"SSH key not found at: {ssh_key_path}")
-
-    # Try common locations
-    for key_name in ["id_ed25519", "id_rsa"]:
-        key_path = Path.home() / ".ssh" / key_name
-        if key_path.exists():
-            return key_path
-
-    raise RuntimeError(
-        "SSH private key not found. Set PRIME_SSH_KEY_PATH environment variable\n"
-        "or ensure ~/.ssh/id_ed25519 or ~/.ssh/id_rsa exists."
-    )
 
 
 class PrimeIntellectClient:
@@ -138,13 +84,13 @@ class PrimeIntellectClient:
         payload = {
             "pod": {
                 "cloudId": gpu_config.get("cloudId"),
-                "gpuCount": gpu_config.get("gpuCount", 1),
                 "gpuType": gpu_config.get("gpuType"),
                 "socket": gpu_config.get("socket"),
-                "dataCenterId": gpu_config.get("dataCenterId"),
+                "gpuCount": gpu_config.get("gpuCount", 1),
                 "name": name,
-                "image": image,
                 "diskSize": disk_size_gb,
+                "image": image,
+                "dataCenterId": gpu_config.get("dataCenter"),
             },
             "provider": {
                 "type": gpu_config.get("provider"),
@@ -157,11 +103,6 @@ class PrimeIntellectClient:
     def get_pod(self, pod_id: str) -> dict:
         """Get pod details."""
         return self._request("GET", f"/pods/{pod_id}")
-
-    def list_pods(self) -> list[dict]:
-        """List all pods."""
-        result = self._request("GET", "/pods/")
-        return result.get("data", [])
 
     def terminate_pod(self, pod_id: str) -> None:
         """Terminate a pod."""
@@ -207,13 +148,7 @@ def ssh_run_command(
         except paramiko.ssh_exception.SSHException:
             raise RuntimeError(f"Could not load SSH key from {key_path}")
 
-    client.connect(
-        hostname=host,
-        port=port,
-        username=username,
-        pkey=key,
-        timeout=timeout,
-    )
+    client.connect(hostname=host, port=port, username=username, pkey=key, timeout=timeout)
 
     _, stdout, stderr = client.exec_command(command, timeout=timeout)
     exit_code = stdout.channel.recv_exit_status()
@@ -224,14 +159,10 @@ def ssh_run_command(
     return stdout_text, stderr_text, exit_code
 
 
-def run_harness(config_path: str, verbose: bool = False) -> None:
+def run_harness(config_path: str) -> None:
     """Main harness execution."""
     print(f"Loading config from: {config_path}")
     config = load_config(config_path)
-
-    if verbose:
-        print(f"Config: {config}")
-
     instance_cfg = config.get("instance", {})
     team_id = os.environ.get("PRIME_TEAM_ID")
     gpu_type = instance_cfg.get("gpu_type", "H100_80GB")
@@ -245,10 +176,7 @@ def run_harness(config_path: str, verbose: bool = False) -> None:
 
     # Initialize client
     print("Authenticating with Prime Intellect...")
-    api_key = get_api_key()
-    client = PrimeIntellectClient(api_key)
-    if team_id:
-        print(f"  Using team: {team_id}")
+    client = PrimeIntellectClient(os.environ.get("PRIME_API_KEY"))
 
     # Check availability
     print(f"Checking availability for {gpu_count}x {gpu_type}...")
@@ -258,7 +186,6 @@ def run_harness(config_path: str, verbose: bool = False) -> None:
         region=region,
         security=security,
     )
-
     if not available:
         print(f"ERROR: No {gpu_type} GPUs available")
         print("Check availability at: https://app.primeintellect.ai/dashboard/create-cluster")
@@ -266,10 +193,9 @@ def run_harness(config_path: str, verbose: bool = False) -> None:
 
 
     # Select first available option
-    selected = available[0]
+    selected = available[-1]
     provider = selected.get("provider", "unknown")
     price = selected.get("prices", {}).get("onDemand", "N/A")
-
     print(f"Found available GPU:")
     print(f"  Provider: {provider}")
     print(f"  Cloud ID: {selected.get('cloudId')}")
@@ -277,10 +203,8 @@ def run_harness(config_path: str, verbose: bool = False) -> None:
     print(f"  Socket: {selected.get('socket')}")
     print(f"  Price: ${price}/hr")
 
-    # Generate instance name
-    instance_name = f"{name_prefix}-{int(time.time())}"
-
     # Create pod
+    instance_name = f"{name_prefix}-{int(time.time())}"
     print(f"\nCreating pod '{instance_name}'...")
     pod = client.create_pod(
         gpu_config=selected,
@@ -306,23 +230,14 @@ def run_harness(config_path: str, verbose: bool = False) -> None:
             pass
         sys.exit(1)
 
+    print(f"\nPod is ready!")
+
     # Extract SSH connection info from sshConnection (format: "user@host -p port")
     ssh_conn = pod.get("sshConnection", "")
     user_host, _, port_str = ssh_conn.partition(" -p ")
     ssh_user, ssh_host = user_host.split("@", 1)
-    ssh_port = int(port_str)
-
-    if not ssh_host:
-        print("ERROR: Could not determine SSH host from pod info")
-        print(f"Pod info: {pod}")
-        sys.exit(1)
-
-    print(f"\nPod is ready!")
-    print(f"  SSH: {ssh_user}@{ssh_host}:{ssh_port}")
-
-    # Get SSH key
-    ssh_key_path = get_ssh_key_path()
-    print(f"  Using SSH key: {ssh_key_path}")
+    ssh_port = int(port_str) if port_str else 22
+    ssh_key_path = Path(os.environ.get("PRIME_SSH_KEY_PATH"))
 
     # Wait a moment for SSH to be fully ready
     print("\nWaiting for SSH to be ready...")
@@ -337,7 +252,6 @@ def run_harness(config_path: str, verbose: bool = False) -> None:
             username=ssh_user,
             key_path=ssh_key_path,
             command="nvidia-smi",
-            timeout=60,
         )
 
         if exit_code == 0:
@@ -365,28 +279,15 @@ def run_harness(config_path: str, verbose: bool = False) -> None:
 
 
 def main():
-    parser = argparse.ArgumentParser(
-        description="BatchBench Harness - Automated GPU instance provisioning and benchmarking"
-    )
-    parser.add_argument(
-        "config",
-        nargs="?",
-        default="configs/harness.yaml",
-        help="Path to config file (default: configs/harness.yaml)",
-    )
-    parser.add_argument(
-        "-v", "--verbose",
-        action="store_true",
-        help="Enable verbose output",
-    )
-
+    parser = argparse.ArgumentParser(description="BatchBench Harness - Automated GPU instance provisioning and benchmarking")
+    parser.add_argument("config", nargs="?", default="configs/harness.yaml", help="Path to config file (default: configs/harness.yaml)")
     args = parser.parse_args()
 
     if not Path(args.config).exists():
         print(f"ERROR: Config file not found: {args.config}")
         sys.exit(1)
-
-    run_harness(args.config, verbose=args.verbose)
+    
+    run_harness(args.config)
 
 
 if __name__ == "__main__":
