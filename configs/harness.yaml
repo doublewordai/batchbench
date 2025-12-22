@@ -33,6 +33,9 @@ instance:
   # Instance naming
   name_prefix: batchbench      # Prefix for instance name
 
+  # Docker image to pull and run
+  docker_image: tytn/batchbench:cu126
+
 # ============================================================================
 # VLLM SERVER CONFIGURATION
 # ============================================================================

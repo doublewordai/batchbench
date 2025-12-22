@@ -5,7 +5,8 @@ BatchBench Harness - Automated benchmarking orchestration via Prime Intellect.
 This script:
 1. Provisions a GPU instance via Prime Intellect API
 2. Connects via SSH
-3. Runs nvidia-smi (for now - later: vLLM, generation, benchmarking)
+3. Pulls the batchbench Docker image
+4. Runs the container, clones repo, and runs nvidia-smi
 """
 
 import argparse
@@ -128,38 +129,72 @@ class PrimeIntellectClient:
         raise TimeoutError(f"Pod not ready after {timeout}s")
 
 
-def ssh_run_command(
-    host: str,
-    port: int,
-    username: str,
-    key_path: Path,
-    command: str,
-    timeout: int = 60,
-) -> tuple[str, str, int]:
-    """Run a command over SSH and return (stdout, stderr, exit_code)."""
-    client = paramiko.SSHClient()
-    client.set_missing_host_key_policy(paramiko.AutoAddPolicy())
+class SSHSession:
+    """Persistent SSH session for running multiple commands."""
 
-    try:
-        key = paramiko.Ed25519Key.from_private_key_file(str(key_path))
-    except paramiko.ssh_exception.SSHException:
+    def __init__(self, host: str, port: int, username: str, key_path: Path):
+        self.client = paramiko.SSHClient()
+        self.client.set_missing_host_key_policy(paramiko.AutoAddPolicy())
+
+        # Try different key formats
         try:
-            key = paramiko.RSAKey.from_private_key_file(str(key_path))
+            key = paramiko.Ed25519Key.from_private_key_file(str(key_path))
         except paramiko.ssh_exception.SSHException:
-            raise RuntimeError(f"Could not load SSH key from {key_path}")
+            try:
+                key = paramiko.RSAKey.from_private_key_file(str(key_path))
+            except paramiko.ssh_exception.SSHException:
+                raise RuntimeError(f"Could not load SSH key from {key_path}")
 
-    client.connect(hostname=host, port=port, username=username, pkey=key, timeout=timeout)
+        self.client.connect(hostname=host, port=port, username=username, pkey=key)
 
-    _, stdout, stderr = client.exec_command(command, timeout=timeout)
-    exit_code = stdout.channel.recv_exit_status()
-    stdout_text = stdout.read().decode()
-    stderr_text = stderr.read().decode()
+    def run(self, command: str, timeout: int = 60, stream: bool = False) -> tuple[str, str, int]:
+        """Run a command and return (stdout, stderr, exit_code).
 
-    client.close()
-    return stdout_text, stderr_text, exit_code
+        If stream=True, prints output in real-time as it arrives.
+        """
+        _, stdout, stderr = self.client.exec_command(command, timeout=timeout)
+        channel = stdout.channel
+
+        if stream:
+            # Stream both stdout and stderr in real-time
+            stdout_lines = []
+            stderr_lines = []
+            while not channel.exit_status_ready():
+                if channel.recv_ready():
+                    chunk = channel.recv(1024).decode()
+                    print(chunk, end="", flush=True)
+                    stdout_lines.append(chunk)
+                if channel.recv_stderr_ready():
+                    chunk = channel.recv_stderr(1024).decode()
+                    print(chunk, end="", flush=True)
+                    stderr_lines.append(chunk)
+                time.sleep(0.1)
+            # Get any remaining output
+            while channel.recv_ready():
+                chunk = channel.recv(1024).decode()
+                print(chunk, end="", flush=True)
+                stdout_lines.append(chunk)
+            while channel.recv_stderr_ready():
+                chunk = channel.recv_stderr(1024).decode()
+                print(chunk, end="", flush=True)
+                stderr_lines.append(chunk)
+            exit_code = channel.recv_exit_status()
+            return "".join(stdout_lines), "".join(stderr_lines), exit_code
+        else:
+            exit_code = channel.recv_exit_status()
+            return stdout.read().decode(), stderr.read().decode(), exit_code
+
+    def close(self):
+        self.client.close()
+
+    def __enter__(self):
+        return self
+
+    def __exit__(self, *args):
+        self.close()
 
 
-def run_harness(config_path: str) -> None:
+def run_harness(config_path: str, verbose: bool = False) -> None:
     """Main harness execution."""
     print(f"Loading config from: {config_path}")
     config = load_config(config_path)
@@ -173,6 +208,7 @@ def run_harness(config_path: str) -> None:
     disk_size = instance_cfg.get("disk_size_gb", 100)
     provision_timeout = instance_cfg.get("provision_timeout", 600)
     name_prefix = instance_cfg.get("name_prefix", "batchbench")
+    docker_image = instance_cfg.get("docker_image", "tytn/batchbench:cu126")
 
     # Initialize client
     print("Authenticating with Prime Intellect...")
@@ -192,8 +228,12 @@ def run_harness(config_path: str) -> None:
         sys.exit(1)
 
 
-    # Select first available option
-    selected = available[-1]
+    # Select cheapest non-runpod GPU
+    non_runpod = [opt for opt in available if opt.get("provider") != "runpod"]
+    if not non_runpod:
+        print("ERROR: No non-runpod GPUs available")
+        sys.exit(1)
+    selected = min(non_runpod, key=lambda x: float(x.get("prices", {}).get("onDemand", 999)))
     provider = selected.get("provider", "unknown")
     price = selected.get("prices", {}).get("onDemand", "N/A")
     print(f"Found available GPU:")
@@ -243,29 +283,46 @@ def run_harness(config_path: str) -> None:
     print("\nWaiting for SSH to be ready...")
     time.sleep(10)
 
-    # Run nvidia-smi
-    print("\nRunning nvidia-smi...")
+    # Connect and run commands
+    print("\nConnecting via SSH...")
     try:
-        stdout, stderr, exit_code = ssh_run_command(
-            host=ssh_host,
-            port=ssh_port,
-            username=ssh_user,
-            key_path=ssh_key_path,
-            command="nvidia-smi",
-        )
+        with SSHSession(ssh_host, ssh_port, ssh_user, ssh_key_path) as ssh:
+            # Determine docker command (with or without sudo)
+            _, _, rc = ssh.run("docker info > /dev/null 2>&1")
+            docker_cmd = "docker" if rc == 0 else "sudo docker"
 
-        if exit_code == 0:
-            print("\n" + "=" * 60)
-            print("nvidia-smi output:")
-            print("=" * 60)
-            print(stdout)
-        else:
-            print(f"nvidia-smi failed with exit code {exit_code}")
-            if stderr:
-                print(f"stderr: {stderr}")
+            # Pull Docker image
+            print(f"\nPulling Docker image {docker_image}...")
+            stdout, stderr, exit_code = ssh.run(
+                f"{docker_cmd} pull {docker_image}",
+                timeout=600,
+                stream=verbose,
+            )
+            if exit_code != 0:
+                print(f"Docker pull failed: {stderr}")
+                sys.exit(1)
+            print("Docker image pulled successfully")
+
+            # Run container: clone repo and run nvidia-smi
+            print("\nRunning container...")
+            repo_url = "https://github.com/doublewordai/batchbench.git"
+            stdout, stderr, exit_code = ssh.run(
+                f'{docker_cmd} run --rm --gpus all {docker_image} bash -c "echo Successfully inside batchbench container! && git clone {repo_url} && nvidia-smi"',
+                stream=verbose,
+            )
+
+            if exit_code == 0:
+                print("\n" + "=" * 60)
+                print("Container output:")
+                print("=" * 60)
+                print(stdout)
+            else:
+                print(f"Container run failed with exit code {exit_code}")
+                if stderr:
+                    print(f"stderr: {stderr}")
 
     except Exception as e:
-        print(f"SSH command failed: {e}")
+        print(f"SSH failed: {e}")
 
     # Print summary
     print("\n" + "=" * 60)
@@ -281,13 +338,14 @@ def run_harness(config_path: str) -> None:
 def main():
     parser = argparse.ArgumentParser(description="BatchBench Harness - Automated GPU instance provisioning and benchmarking")
     parser.add_argument("config", nargs="?", default="configs/harness.yaml", help="Path to config file (default: configs/harness.yaml)")
+    parser.add_argument("-v", "--verbose", action="store_true", help="Show detailed output (e.g., Docker build logs)")
     args = parser.parse_args()
 
     if not Path(args.config).exists():
         print(f"ERROR: Config file not found: {args.config}")
         sys.exit(1)
-    
-    run_harness(args.config)
+
+    run_harness(args.config, verbose=args.verbose)
 
 
 if __name__ == "__main__":
