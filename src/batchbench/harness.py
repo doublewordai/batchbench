@@ -201,6 +201,141 @@ class SSHSession:
         self.close()
 
 
+def run_synthetic_generation(
+    docker_exec: callable,
+    config: dict,
+    verbose: bool = False,
+) -> str:
+    """Generate synthetic data inside the container. Returns the output file path."""
+    gen_cfg = config.get("generate", {})
+
+    output = gen_cfg.get("output", "data/synthetic.jsonl")
+    count = gen_cfg.get("count", 1000)
+    seed = gen_cfg.get("seed", 42)
+    prefix_overlap = gen_cfg.get("prefix_overlap", 0.0)
+    dist_mode = gen_cfg.get("dist_mode", "lognormal")
+
+    tokenizer = gen_cfg.get("tokenizer")
+    if not tokenizer:
+        print("ERROR: No tokenizer specified in generate config")
+        sys.exit(1)
+
+    # Build command arguments
+    cmd_args = [
+        f"--count {count}",
+        f"--output {output}",
+        f"--seed {seed}",
+        f"--prefix-overlap {prefix_overlap}",
+        f"--tokenizer {tokenizer}",
+        f"--dist-mode {dist_mode}",
+    ]
+
+    if dist_mode == "lognormal":
+        cmd_args.append(f"--dist-median {gen_cfg.get('dist_median', 1000)}")
+        cmd_args.append(f"--dist-sigma {gen_cfg.get('dist_sigma', 0.5)}")
+        cmd_args.append(f"--dist-max {gen_cfg.get('dist_max', 128000)}")
+    else:
+        cmd_args.append(f"--approx-input-tokens {gen_cfg.get('approx_input_tokens', 512)}")
+        if gen_cfg.get("token_tolerance"):
+            cmd_args.append(f"--token-tolerance {gen_cfg['token_tolerance']}")
+
+    generate_cmd = "python -m batchbench.generate " + " ".join(cmd_args)
+
+    full_cmd = (
+        "source /opt/batchbench/.venv/bin/activate && "
+        f"cd batchbench && {generate_cmd}"
+    )
+
+    print(f"\nGenerating synthetic data ({count} samples)...")
+    if verbose:
+        print(f"Command: {generate_cmd}")
+
+    stdout, stderr, exit_code = docker_exec(full_cmd, timeout=600, stream=True)
+    if exit_code != 0:
+        print(f"Synthetic generation failed: {stderr}")
+        sys.exit(1)
+
+    print("Synthetic data generation complete")
+    return output
+
+
+def run_benchmark(
+    docker_exec: callable,
+    config: dict,
+    synthetic_data_path: str,
+    verbose: bool = False,
+) -> None:
+    """Run the online benchmark inside the container."""
+    bench_cfg = config.get("benchmark", {})
+    vllm_cfg = config.get("vllm", {})
+    vllm_args = vllm_cfg.get("args") or {}
+
+    model = vllm_cfg.get("model")
+    if not model:
+        print("ERROR: No model specified in vllm config")
+        sys.exit(1)
+
+    port = vllm_args.get("port", 8000)
+    host = f"http://localhost:{port}"
+
+    # Build command arguments
+    cmd_args = [
+        f"--jsonl {synthetic_data_path}",
+        f"--model {model}",
+        f"--host {host}",
+        f"--users {bench_cfg.get('users', 32)}",
+        f"--requests-per-user {bench_cfg.get('requests_per_user', 10)}",
+    ]
+
+    if bench_cfg.get("request_timeout_secs"):
+        cmd_args.append(f"--request-timeout-secs {bench_cfg['request_timeout_secs']}")
+
+    if bench_cfg.get("random_requests", True):
+        cmd_args.append("--random-requests")
+
+    if bench_cfg.get("seed"):
+        cmd_args.append(f"--seed {bench_cfg['seed']}")
+
+    if bench_cfg.get("max_retries"):
+        cmd_args.append(f"--max-retries {bench_cfg['max_retries']}")
+
+    if bench_cfg.get("retry_delay_ms"):
+        cmd_args.append(f"--retry-delay-ms {bench_cfg['retry_delay_ms']}")
+
+    # Output token distribution - lognormal or fixed
+    if bench_cfg.get("output_lognorm_mu"):
+        cmd_args.append(f"--output-lognorm-mu {bench_cfg['output_lognorm_mu']}")
+        cmd_args.append(f"--output-lognorm-sigma {bench_cfg.get('output_lognorm_sigma', 0.5)}")
+        cmd_args.append(f"--output-lognorm-max {bench_cfg.get('output_lognorm_max', 2000)}")
+    elif bench_cfg.get("output_tokens"):
+        cmd_args.append(f"--output-tokens {bench_cfg['output_tokens']}")
+        if bench_cfg.get("output_vary"):
+            cmd_args.append(f"--output-vary {bench_cfg['output_vary']}")
+
+    if bench_cfg.get("results_csv"):
+        cmd_args.append(f"--results-csv {bench_cfg['results_csv']}")
+
+    benchmark_cmd = "python -m batchbench.online " + " ".join(cmd_args)
+
+    full_cmd = (
+        "source /opt/batchbench/.venv/bin/activate && "
+        f"cd batchbench && {benchmark_cmd}"
+    )
+
+    print(f"\nRunning online benchmark...")
+    print(f"  Users: {bench_cfg.get('users', 32)}")
+    print(f"  Requests per user: {bench_cfg.get('requests_per_user', 10)}")
+    if verbose:
+        print(f"Command: {benchmark_cmd}")
+
+    stdout, stderr, exit_code = docker_exec(full_cmd, timeout=3600, stream=True)
+    if exit_code != 0:
+        print(f"Benchmark failed: {stderr}")
+        sys.exit(1)
+
+    print("\nBenchmark complete!")
+
+
 def start_vllm_server(
     docker_exec: callable,
     config: dict,
@@ -440,6 +575,12 @@ def run_harness(config_path: str, verbose: bool = False) -> None:
 
             # Start vLLM server
             start_vllm_server(docker_exec, config, verbose)
+
+            # Generate synthetic data
+            synthetic_data_path = run_synthetic_generation(docker_exec, config, verbose)
+
+            # Run benchmark
+            run_benchmark(docker_exec, config, synthetic_data_path, verbose)
 
     except Exception as e:
         print(f"SSH failed: {e}")

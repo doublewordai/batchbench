@@ -82,8 +82,8 @@ generate:
   # approx_input_tokens: 512
   # token_tolerance: 50
 
-  # Tokenizer (defaults to model from vllm section if not specified)
-  # tokenizer_model: Qwen/Qwen3-30B-A3B-Instruct-2507-FP8
+  # Tokenizer for generating synthetic prompts
+  tokenizer: Qwen/Qwen3-30B-A3B-Instruct-2507
 
 # ============================================================================
 # ONLINE BENCHMARK CONFIGURATION
@@ -105,9 +105,9 @@ benchmark:
   # output_vary: 200
 
   # Timeouts and retries
-  request_timeout_secs: 10000
-  max_retries: 2
-  retry_delay_ms: 250
+  # request_timeout_secs: 10000
+  # max_retries: 2
+  # retry_delay_ms: 250
 
   # Results output (optional)
   # results_csv: results/benchmark.csv
