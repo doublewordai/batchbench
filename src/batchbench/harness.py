@@ -55,84 +55,47 @@ class PrimeIntellectClient:
             raise RuntimeError(f"API error {resp.status_code}: {resp.text}")
         return resp.json() if resp.text else {}
 
-    def check_availability(
-        self,
-        gpu_type: str,
-        gpu_count: int = 1,
-        region: str | None = None,
-        security: str | None = None,
-    ) -> list[dict]:
-        """Check GPU availability."""
-        params = {
-            "gpu_type": gpu_type,
-            "gpu_count": gpu_count,
-        }
-        if region:
-            params["regions"] = region
-        if security:
-            params["security"] = security
-
+    def check_availability(self, **params) -> list[dict]:
         print(f"  API params: {params}")
         result = self._request("GET", "/availability/gpus", params=params)
         print(f"  API response: {result.get('totalCount', 0)} items found")
         return result.get("items", [])
 
-    def create_pod(
-        self,
-        gpu_config: dict,
-        name: str,
-        image: str,
-        team_id: str | None = None,
-        disk_size_gb: int = 100,
-    ) -> dict:
-        """Create a new pod instance.
-
-        gpu_config should be an item from check_availability() response.
-        """
+    def create_pod(self, gpu_config: dict,name: str, team_id: str, **pod_params) -> dict:
         payload = {
             "pod": {
-                "cloudId": gpu_config.get("cloudId"),
-                "gpuType": gpu_config.get("gpuType"),
-                "socket": gpu_config.get("socket"),
-                "gpuCount": gpu_config.get("gpuCount", 1),
+                "cloudId": gpu_config["cloudId"],
+                "gpuType": gpu_config["gpuType"],
+                "socket": gpu_config["socket"],
+                "gpuCount": gpu_config["gpuCount"],
+                "dataCenterId": gpu_config["dataCenter"],
                 "name": name,
-                "diskSize": disk_size_gb,
-                "image": image,
-                "dataCenterId": gpu_config.get("dataCenter"),
+                **pod_params,
             },
             "provider": {
-                "type": gpu_config.get("provider"),
+                "type": gpu_config["provider"],
             },
+            "team": {"teamId": team_id},
         }
-        if team_id:
-            payload["team"] = {"teamId": team_id}
         return self._request("POST", "/pods/", json=payload)
 
     def get_pod(self, pod_id: str) -> dict:
-        """Get pod details."""
         return self._request("GET", f"/pods/{pod_id}")
 
     def terminate_pod(self, pod_id: str) -> None:
-        """Terminate a pod."""
         self._request("DELETE", f"/pods/{pod_id}")
 
-    def wait_for_pod_ready(
-        self, pod_id: str, timeout: int = 600, poll_interval: int = 10
-    ) -> dict:
-        """Wait for pod to be ready."""
+    def wait_for_pod_ready(self, pod_id: str, timeout: int = 600, poll_interval: int = 10) -> dict:
         start = time.time()
         while time.time() - start < timeout:
             pod = self.get_pod(pod_id)
             status = pod.get("status", "").lower()
             print(f"  Pod status: {status}")
-
             if status == "active":
                 return pod
             elif status in ("stopped", "error", "terminated"):
                 raise RuntimeError(f"Pod entered {status} state")
-
             time.sleep(poll_interval)
-
         raise TimeoutError(f"Pod not ready after {timeout}s")
 
 
@@ -201,56 +164,49 @@ class SSHSession:
         self.close()
 
 
-def run_synthetic_generation(
-    docker_exec: callable,
-    config: dict,
-    verbose: bool = False,
-) -> str:
+class ContainerSession:
+    """Represents a running Docker container that we can exec commands into."""
+
+    def __init__(self, ssh: SSHSession, docker_cmd: str, container_name: str):
+        self.ssh = ssh
+        self.docker_cmd = docker_cmd
+        self.container_name = container_name
+
+    def exec(self, cmd: str, timeout: int = 300, stream: bool = False) -> tuple[str, str, int]:
+        """Execute a command inside the container."""
+        return self.ssh.run(
+            f'{self.docker_cmd} exec {self.container_name} bash -c "{cmd}"',
+            timeout=timeout,
+            stream=stream,
+        )
+
+
+def build_cli_command(base: str, args: dict) -> str:
+    cmd_args = []
+    for arg, value in args.items():
+        if isinstance(value, bool) and value:
+            cmd_args.append(f"--{arg}")
+        elif not isinstance(value, bool):
+            cmd_args.append(f"--{arg} {value}")
+    return base + " " + " ".join(cmd_args)
+
+
+def run_synthetic_generation(container: ContainerSession, config: dict, verbose: bool = False) -> str:
     """Generate synthetic data inside the container. Returns the output file path."""
-    gen_cfg = config.get("generate", {})
+    gen_cfg = config["generate"]
+    output = gen_cfg.get("output", "data/output.jsonl")
 
-    output = gen_cfg.get("output", "data/synthetic.jsonl")
-    count = gen_cfg.get("count", 1000)
-    seed = gen_cfg.get("seed", 42)
-    prefix_overlap = gen_cfg.get("prefix_overlap", 0.0)
-    dist_mode = gen_cfg.get("dist_mode", "lognormal")
-
-    tokenizer = gen_cfg.get("tokenizer")
-    if not tokenizer:
-        print("ERROR: No tokenizer specified in generate config")
-        sys.exit(1)
-
-    # Build command arguments
-    cmd_args = [
-        f"--count {count}",
-        f"--output {output}",
-        f"--seed {seed}",
-        f"--prefix-overlap {prefix_overlap}",
-        f"--tokenizer {tokenizer}",
-        f"--dist-mode {dist_mode}",
-    ]
-
-    if dist_mode == "lognormal":
-        cmd_args.append(f"--dist-median {gen_cfg.get('dist_median', 1000)}")
-        cmd_args.append(f"--dist-sigma {gen_cfg.get('dist_sigma', 0.5)}")
-        cmd_args.append(f"--dist-max {gen_cfg.get('dist_max', 128000)}")
-    else:
-        cmd_args.append(f"--approx-input-tokens {gen_cfg.get('approx_input_tokens', 512)}")
-        if gen_cfg.get("token_tolerance"):
-            cmd_args.append(f"--token-tolerance {gen_cfg['token_tolerance']}")
-
-    generate_cmd = "python -m batchbench.generate " + " ".join(cmd_args)
-
+    generate_cmd = build_cli_command("python -m batchbench.generate", gen_cfg)
     full_cmd = (
         "source /opt/batchbench/.venv/bin/activate && "
         f"cd batchbench && {generate_cmd}"
     )
 
-    print(f"\nGenerating synthetic data ({count} samples)...")
+    print(f"\nGenerating synthetic data...")
     if verbose:
         print(f"Command: {generate_cmd}")
 
-    stdout, stderr, exit_code = docker_exec(full_cmd, timeout=600, stream=True)
+    stdout, stderr, exit_code = container.exec(full_cmd, timeout=600, stream=True)
     if exit_code != 0:
         print(f"Synthetic generation failed: {stderr}")
         sys.exit(1)
@@ -259,63 +215,19 @@ def run_synthetic_generation(
     return output
 
 
-def run_benchmark(
-    docker_exec: callable,
-    config: dict,
-    synthetic_data_path: str,
-    verbose: bool = False,
-) -> None:
+def run_benchmark(container: ContainerSession, config: dict, synthetic_data_path: str, verbose: bool = False) -> None:
     """Run the online benchmark inside the container."""
-    bench_cfg = config.get("benchmark", {})
-    vllm_cfg = config.get("vllm", {})
+    bench_cfg = config["benchmark"]
+    vllm_cfg = config["vllm"]
     vllm_args = vllm_cfg.get("args") or {}
 
-    model = vllm_cfg.get("model")
-    if not model:
-        print("ERROR: No model specified in vllm config")
-        sys.exit(1)
-
+    model = vllm_cfg["model"]
     port = vllm_args.get("port", 8000)
     host = f"http://localhost:{port}"
 
-    # Build command arguments
-    cmd_args = [
-        f"--jsonl {synthetic_data_path}",
-        f"--model {model}",
-        f"--host {host}",
-        f"--users {bench_cfg.get('users', 32)}",
-        f"--requests-per-user {bench_cfg.get('requests_per_user', 10)}",
-    ]
-
-    if bench_cfg.get("request_timeout_secs"):
-        cmd_args.append(f"--request-timeout-secs {bench_cfg['request_timeout_secs']}")
-
-    if bench_cfg.get("random_requests", True):
-        cmd_args.append("--random-requests")
-
-    if bench_cfg.get("seed"):
-        cmd_args.append(f"--seed {bench_cfg['seed']}")
-
-    if bench_cfg.get("max_retries"):
-        cmd_args.append(f"--max-retries {bench_cfg['max_retries']}")
-
-    if bench_cfg.get("retry_delay_ms"):
-        cmd_args.append(f"--retry-delay-ms {bench_cfg['retry_delay_ms']}")
-
-    # Output token distribution - lognormal or fixed
-    if bench_cfg.get("output_lognorm_mu"):
-        cmd_args.append(f"--output-lognorm-mu {bench_cfg['output_lognorm_mu']}")
-        cmd_args.append(f"--output-lognorm-sigma {bench_cfg.get('output_lognorm_sigma', 0.5)}")
-        cmd_args.append(f"--output-lognorm-max {bench_cfg.get('output_lognorm_max', 2000)}")
-    elif bench_cfg.get("output_tokens"):
-        cmd_args.append(f"--output-tokens {bench_cfg['output_tokens']}")
-        if bench_cfg.get("output_vary"):
-            cmd_args.append(f"--output-vary {bench_cfg['output_vary']}")
-
-    if bench_cfg.get("results_csv"):
-        cmd_args.append(f"--results-csv {bench_cfg['results_csv']}")
-
-    benchmark_cmd = "python -m batchbench.online " + " ".join(cmd_args)
+    # Merge benchmark config with derived values
+    args = {"jsonl": synthetic_data_path, "model": model, "host": host, **bench_cfg}
+    benchmark_cmd = build_cli_command("python -m batchbench.online", args)
 
     full_cmd = (
         "source /opt/batchbench/.venv/bin/activate && "
@@ -324,11 +236,11 @@ def run_benchmark(
 
     print(f"\nRunning online benchmark...")
     print(f"  Users: {bench_cfg.get('users', 32)}")
-    print(f"  Requests per user: {bench_cfg.get('requests_per_user', 10)}")
+    print(f"  Requests-per-user: {bench_cfg.get('requests-per-user', 10)}")
     if verbose:
         print(f"Command: {benchmark_cmd}")
 
-    stdout, stderr, exit_code = docker_exec(full_cmd, timeout=3600, stream=True)
+    stdout, stderr, exit_code = container.exec(full_cmd, timeout=3600, stream=True)
     if exit_code != 0:
         print(f"Benchmark failed: {stderr}")
         sys.exit(1)
@@ -336,63 +248,18 @@ def run_benchmark(
     print("\nBenchmark complete!")
 
 
-def start_vllm_server(
-    docker_exec: callable,
-    config: dict,
-    verbose: bool = False,
-) -> None:
-    """Start vLLM server inside the container and wait for it to be ready."""
-    vllm_cfg = config.get("vllm", {})
-    model = vllm_cfg.get("model")
-    if not model:
-        print("ERROR: No model specified in vllm config")
-        sys.exit(1)
-
-    vllm_args = vllm_cfg.get("args") or {}
-    vllm_env = vllm_cfg.get("env") or {}
-    startup_timeout = vllm_cfg.get("startup_timeout", 600)
-    port = vllm_args.get("port", 8000)
-
-    # Build environment variable exports
-    env_exports = " ".join(f"{k}={v}" for k, v in vllm_env.items())
-
-    # Build vllm serve command arguments
-    vllm_cmd_args = [f"--model {model}"]
-    for arg, value in vllm_args.items():
-        if isinstance(value, bool):
-            if value:
-                vllm_cmd_args.append(f"--{arg}")
-        else:
-            vllm_cmd_args.append(f"--{arg} {value}")
-
-    vllm_serve_cmd = "vllm serve " + " ".join(vllm_cmd_args)
-
-    # Full command: activate venv, set env vars, run vllm in background
-    start_server_cmd = (
-        "source /opt/batchbench/.venv/bin/activate && "
-        f"{env_exports} nohup {vllm_serve_cmd} > /tmp/vllm.log 2>&1 &"
-    )
-
-    print(f"\nStarting vLLM server with model: {model}")
-    if verbose:
-        print(f"Command: {vllm_serve_cmd}")
-    stdout, stderr, exit_code = docker_exec(start_server_cmd)
-    if exit_code != 0:
-        print(f"Failed to start vLLM server: {stderr}")
-        sys.exit(1)
-    print("vLLM server process started")
-
-    # Poll for server readiness while streaming logs
-    print(f"\nWaiting for vLLM server to be ready (timeout: {startup_timeout}s)...")
+def wait_for_vllm_ready(container: ContainerSession, port: int, timeout: int) -> None:
+    print(f"\nWaiting for vLLM server to be ready (timeout: {timeout}s)...")
     print("-" * 60)
+
     health_url = f"http://localhost:{port}/health"
     poll_interval = 5
     start_time = time.time()
     last_log_line = 0
 
-    while time.time() - start_time < startup_timeout:
+    while time.time() - start_time < timeout:
         # Fetch and print new log lines
-        stdout, _, _ = docker_exec(
+        stdout, _, _ = container.exec(
             f"tail -n +{last_log_line + 1} /tmp/vllm.log 2>/dev/null",
             timeout=10,
         )
@@ -401,7 +268,7 @@ def start_vllm_server(
             last_log_line += stdout.count("\n")
 
         # Check health endpoint
-        stdout, stderr, exit_code = docker_exec(
+        stdout, _, exit_code = container.exec(
             f"curl -s -o /dev/null -w '%{{http_code}}' {health_url}",
             timeout=10,
         )
@@ -413,52 +280,66 @@ def start_vllm_server(
         time.sleep(poll_interval)
 
     print("-" * 60)
-    print(f"ERROR: vLLM server not ready after {startup_timeout}s")
+    print(f"ERROR: vLLM server not ready after {timeout}s")
     sys.exit(1)
 
 
-def run_harness(config_path: str, verbose: bool = False) -> None:
-    """Main harness execution."""
-    print(f"Loading config from: {config_path}")
-    config = load_config(config_path)
-    instance_cfg = config.get("instance", {})
-    team_id = os.environ.get("PRIME_TEAM_ID")
-    gpu_type = instance_cfg.get("gpu_type", "H100_80GB")
-    gpu_count = instance_cfg.get("gpu_count", 1)
-    region = instance_cfg.get("region")
-    security = instance_cfg.get("security")
-    image = instance_cfg.get("image", "ubuntu_22_cuda_12")
-    disk_size = instance_cfg.get("disk_size_gb", 100)
-    provision_timeout = instance_cfg.get("provision_timeout", 600)
-    name_prefix = instance_cfg.get("name_prefix", "batchbench")
-    docker_image = instance_cfg.get("docker_image", "tytn/batchbench:cu126")
+def start_vllm_server(container: ContainerSession, config: dict, verbose: bool = False) -> None:
+    """Start vLLM server inside the container and wait for it to be ready."""
+    vllm_cfg = config["vllm"]
+    model = vllm_cfg["model"]
+    args = vllm_cfg.get("args") or {}
+    env = vllm_cfg.get("env") or {}
+    startup_timeout = vllm_cfg.get("startup_timeout", 600)
+    port = args.get("port", 8000)
 
-    # Initialize client
-    print("Authenticating with Prime Intellect...")
-    client = PrimeIntellectClient(os.environ.get("PRIME_API_KEY"))
-
-    # Check availability
-    print(f"Checking availability for {gpu_count}x {gpu_type}...")
-    available = client.check_availability(
-        gpu_type=gpu_type,
-        gpu_count=gpu_count,
-        region=region,
-        security=security,
+    vllm_cmd = build_cli_command(f"vllm serve {model}", args)
+    env_exports = " ".join(f"{k}={v}" for k, v in env.items())
+    full_cmd = (
+        "source /opt/batchbench/.venv/bin/activate && "
+        f"{env_exports} nohup {vllm_cmd} > /tmp/vllm.log 2>&1 &"
     )
+
+    print(f"\nStarting vLLM server with model: {model}")
+    if verbose:
+        print(f"Command: {vllm_cmd}")
+
+    stdout, stderr, exit_code = container.exec(full_cmd)
+    if exit_code != 0:
+        print(f"Failed to start vLLM server: {stderr}")
+        sys.exit(1)
+    print("vLLM server process started")
+
+    wait_for_vllm_ready(container, port, startup_timeout)
+
+
+def provision_instance(config: dict) -> dict:
+    instance_cfg = config["instance"]
+    availability_params = instance_cfg["availability"]
+    create_params = instance_cfg["create"]
+    name_prefix = instance_cfg.get("name_prefix", "batchbench")
+    provision_timeout = instance_cfg.get("provision_timeout", 600)
+    team_id = os.environ["PRIME_TEAM_ID"]
+
+    client = PrimeIntellectClient(os.environ["PRIME_API_KEY"])
+
+    gpu_type = availability_params["gpu_type"]
+    gpu_count = availability_params["gpu_count"]
+    print(f"Checking availability for {gpu_count}x {gpu_type}...")
+    available = client.check_availability(**availability_params)
     if not available:
         print(f"ERROR: No {gpu_type} GPUs available")
         print("Check availability at: https://app.primeintellect.ai/dashboard/create-cluster")
         sys.exit(1)
 
-
     # Select cheapest non-runpod GPU
-    non_runpod = [opt for opt in available if opt.get("provider") != "runpod"]
+    non_runpod = [opt for opt in available if opt["provider"] != "runpod"]
     if not non_runpod:
         print("ERROR: No non-runpod GPUs available")
         sys.exit(1)
-    selected = min(non_runpod, key=lambda x: float(x.get("prices", {}).get("onDemand", 999)))
-    provider = selected.get("provider", "unknown")
-    price = selected.get("prices", {}).get("onDemand", "N/A")
+    selected = min(non_runpod, key=lambda x: float(x["prices"]["onDemand"]))
+    provider = selected["provider"]
+    price = selected["prices"]["onDemand"]
     print(f"Found available GPU:")
     print(f"  Provider: {provider}")
     print(f"  Cloud ID: {selected.get('cloudId')}")
@@ -469,18 +350,10 @@ def run_harness(config_path: str, verbose: bool = False) -> None:
     # Create pod
     instance_name = f"{name_prefix}-{int(time.time())}"
     print(f"\nCreating pod '{instance_name}'...")
-    pod = client.create_pod(
-        gpu_config=selected,
-        name=instance_name,
-        image=image,
-        team_id=team_id,
-        disk_size_gb=disk_size,
-    )
+    pod = client.create_pod(gpu_config=selected, name=instance_name, team_id=team_id, **create_params)
 
     pod_id = pod.get("id")
     print(f"Pod created with ID: {pod_id}")
-
-    # Wait for pod to be ready
     print(f"\nWaiting for pod to be ready (timeout: {provision_timeout}s)...")
     try:
         pod = client.wait_for_pod_ready(pod_id, timeout=provision_timeout)
@@ -493,94 +366,110 @@ def run_harness(config_path: str, verbose: bool = False) -> None:
             pass
         sys.exit(1)
 
-    print(f"\nPod is ready!")
+    print("\nPod is ready!")
 
     # Extract SSH connection info from sshConnection (format: "user@host -p port")
     ssh_conn = pod.get("sshConnection", "")
     user_host, _, port_str = ssh_conn.partition(" -p ")
     ssh_user, ssh_host = user_host.split("@", 1)
     ssh_port = int(port_str) if port_str else 22
+
+    return {
+        "pod_id": pod_id,
+        "instance_name": instance_name,
+        "ssh_user": ssh_user,
+        "ssh_host": ssh_host,
+        "ssh_port": ssh_port,
+    }
+
+
+def setup_environment(ssh: SSHSession, config: dict, verbose: bool = False) -> ContainerSession:
+    """Set up the container environment."""
+    instance_cfg = config["instance"]
+    docker_image = instance_cfg["docker_image"]
+
+    # Determine docker command (with or without sudo)
+    _, _, rc = ssh.run("docker info > /dev/null 2>&1")
+    docker_cmd = "docker" if rc == 0 else "sudo docker"
+
+    # Pull Docker image
+    print(f"\nPulling Docker image {docker_image}...")
+    stdout, stderr, exit_code = ssh.run(
+        f"{docker_cmd} pull {docker_image}",
+        timeout=600,
+        stream=verbose,
+    )
+    if exit_code != 0:
+        print(f"Docker pull failed: {stderr}")
+        sys.exit(1)
+    print("Docker image pulled successfully")
+
+    # Start container in detached mode
+    print(f"\nStarting container '{CONTAINER_NAME}'...")
+    docker_run_cmd = (
+        f"{docker_cmd} run -d "
+        f"--name {CONTAINER_NAME} "
+        f"--gpus all "
+        f"{docker_image} "
+        f"sleep infinity"
+    )
+    stdout, stderr, exit_code = ssh.run(docker_run_cmd, stream=verbose)
+    if exit_code != 0:
+        print(f"Failed to start container: {stderr}")
+        sys.exit(1)
+    print("Container started successfully")
+
+    container = ContainerSession(ssh, docker_cmd, CONTAINER_NAME)
+
+    # Clone batchbench repo
+    print("\nCloning batchbench repository...")
+    repo_url = "https://github.com/doublewordai/batchbench.git"
+    stdout, stderr, exit_code = container.exec(f"git clone {repo_url}", stream=verbose)
+    if exit_code != 0:
+        print(f"Git clone failed: {stderr}")
+        sys.exit(1)
+    print("Repository cloned successfully")
+
+    # Install dependencies
+    print("\nInstalling dependencies...")
+    install_cmd = (
+        "source /opt/batchbench/.venv/bin/activate && "
+        "cd batchbench && "
+        "uv pip install -e ."
+    )
+    stdout, stderr, exit_code = container.exec(install_cmd, timeout=300, stream=verbose)
+    if exit_code != 0:
+        print(f"Dependency installation failed: {stderr}")
+        print(f"stdout: {stdout}")
+        sys.exit(1)
+    print("Dependencies installed successfully")
+
+    return container
+
+
+def run_harness(config_path: str, verbose: bool = False) -> None:
+    """Main harness execution."""
+    print(f"Loading config from: {config_path}")
+    config = load_config(config_path)
+
+    instance_info = provision_instance(config)
+    pod_id = instance_info["pod_id"]
+    instance_name = instance_info["instance_name"]
+    ssh_user = instance_info["ssh_user"]
+    ssh_host = instance_info["ssh_host"]
+    ssh_port = instance_info["ssh_port"]
     ssh_key_path = Path(os.environ.get("PRIME_SSH_KEY_PATH"))
 
-    # Wait a moment for SSH to be fully ready
     print("\nWaiting for SSH to be ready...")
     time.sleep(10)
 
-    # Connect and run commands
     print("\nConnecting via SSH...")
     try:
         with SSHSession(ssh_host, ssh_port, ssh_user, ssh_key_path) as ssh:
-            # Determine docker command (with or without sudo)
-            _, _, rc = ssh.run("docker info > /dev/null 2>&1")
-            docker_cmd = "docker" if rc == 0 else "sudo docker"
-
-            # Pull Docker image
-            print(f"\nPulling Docker image {docker_image}...")
-            stdout, stderr, exit_code = ssh.run(
-                f"{docker_cmd} pull {docker_image}",
-                timeout=600,
-                stream=verbose,
-            )
-            if exit_code != 0:
-                print(f"Docker pull failed: {stderr}")
-                sys.exit(1)
-            print("Docker image pulled successfully")
-
-            # Start container in detached mode
-            print(f"\nStarting container '{CONTAINER_NAME}'...")
-            docker_run_cmd = (
-                f"{docker_cmd} run -d "
-                f"--name {CONTAINER_NAME} "
-                f"--gpus all "
-                f"{docker_image} "
-                f"sleep infinity"
-            )
-            stdout, stderr, exit_code = ssh.run(docker_run_cmd, stream=verbose)
-            if exit_code != 0:
-                print(f"Failed to start container: {stderr}")
-                sys.exit(1)
-            print("Container started successfully")
-
-            # Helper to run commands inside the container
-            def docker_exec(cmd: str, timeout: int = 300, stream: bool = False) -> tuple[str, str, int]:
-                """Execute a command inside the running container."""
-                return ssh.run(
-                    f'{docker_cmd} exec {CONTAINER_NAME} bash -c "{cmd}"',
-                    timeout=timeout,
-                    stream=stream,
-                )
-
-            # Clone batchbench repo
-            print("\nCloning batchbench repository...")
-            repo_url = "https://github.com/doublewordai/batchbench.git"
-            stdout, stderr, exit_code = docker_exec(f"git clone {repo_url}", stream=verbose)
-            if exit_code != 0:
-                print(f"Git clone failed: {stderr}")
-                sys.exit(1)
-            print("Repository cloned successfully")
-
-            # Install dependencies with uv
-            print("\nInstalling dependencies...")
-            install_cmd = (
-                "source /opt/batchbench/.venv/bin/activate && "
-                "cd batchbench && "
-                "uv pip install -e ."
-            )
-            stdout, stderr, exit_code = docker_exec(install_cmd, timeout=300, stream=verbose)
-            if exit_code != 0:
-                print(f"Dependency installation failed: {stderr}")
-                print(f"stdout: {stdout}")
-                sys.exit(1)
-            print("Dependencies installed successfully")
-
-            # Start vLLM server
-            start_vllm_server(docker_exec, config, verbose)
-
-            # Generate synthetic data
-            synthetic_data_path = run_synthetic_generation(docker_exec, config, verbose)
-
-            # Run benchmark
-            run_benchmark(docker_exec, config, synthetic_data_path, verbose)
+            container = setup_environment(ssh, config, verbose)
+            start_vllm_server(container, config, verbose)
+            synthetic_data_path = run_synthetic_generation(container, config, verbose)
+            run_benchmark(container, config, synthetic_data_path, verbose)
 
     except Exception as e:
         print(f"SSH failed: {e}")

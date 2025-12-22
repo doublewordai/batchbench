@@ -10,31 +10,25 @@
 # ============================================================================
 # Note: Set PRIME_TEAM_ID env var if using team billing
 instance:
-  # GPU specification
-  gpu_type: H100_80GB          # Options: H100_80GB, A100_80GB, A100_40GB, etc.
-  gpu_count: 1                 # Number of GPUs
-
-  # Region preference (optional - uses best available if not specified)
-  # region: united_states      # Options: united_states, europe_west, etc.
-
-  # Security level (optional - omit to see all available)
-  security: secure_cloud     # Options: secure_cloud, community_cloud
-
-  # Docker image to use (must be available on Prime Intellect)
-  # Common images: ubuntu_22_cuda_12, cuda_12_1_pytorch_2_2, vllm_llama_8b
-  image: ubuntu_22_cuda_12
-
-  # Resources
-  disk_size_gb: 100            # Disk size in GB
-
-  # Timeouts
-  provision_timeout: 600       # Max seconds to wait for instance to be ready
-
-  # Instance naming
-  name_prefix: batchbench      # Prefix for instance name
-
-  # Docker image to pull and run
+  # Harness-level config (not passed to API)
+  name_prefix: batchbench
   docker_image: tytn/batchbench:cu126
+  provision_timeout: 600
+
+  # Passed directly to check_availability API
+  availability:
+    gpu_type: H100_80GB
+    gpu_count: 1
+    security: secure_cloud
+    # regions:
+    #   - united_states
+    #   - south_america
+    # socket: PCIe
+
+  # Passed to create_pod API
+  create:
+    image: ubuntu_22_cuda_12
+    diskSize: 100
 
 # ============================================================================
 # VLLM SERVER CONFIGURATION
@@ -65,25 +59,17 @@ vllm:
 # SYNTHETIC DATA GENERATION
 # ============================================================================
 generate:
-  output: data/synthetic.jsonl
+  output: data/output.jsonl
   count: 10000
   seed: 42
-  prefix_overlap: 0.0
-
-  # Distribution mode: "lognormal" or "fixed"
-  dist_mode: lognormal
-
-  # Lognormal distribution parameters (used when dist_mode: lognormal)
-  dist_median: 1000
-  dist_sigma: 1.68
-  dist_max: 128000
-
-  # Fixed distribution parameters (used when dist_mode: fixed)
-  # approx_input_tokens: 512
-  # token_tolerance: 50
-
-  # Tokenizer for generating synthetic prompts
+  prefix-overlap: 0.0
   tokenizer: Qwen/Qwen3-30B-A3B-Instruct-2507
+  dist-mode: lognormal
+  dist-median: 1000
+  dist-sigma: 1.68
+  dist-max: 128000
+  # approx-input-tokens: 512
+  # token-tolerance: 50
 
 # ============================================================================
 # ONLINE BENCHMARK CONFIGURATION
@@ -91,23 +77,23 @@ generate:
 benchmark:
   # Load configuration
   users: 32
-  requests_per_user: 10
-  random_requests: true
+  requests-per-user: 10
+  random-requests: true
   seed: 42
 
   # Output token distribution (lognormal)
-  output_lognorm_mu: 6
-  output_lognorm_sigma: 0.7
-  output_lognorm_max: 2000
+  output-lognorm-mu: 6
+  output-lognorm-sigma: 0.7
+  output-lognorm-max: 2000
 
   # Alternative: fixed output tokens
-  # output_tokens: 300
-  # output_vary: 200
+  # output-tokens: 300
+  # output-vary: 200
 
   # Timeouts and retries
-  # request_timeout_secs: 10000
-  # max_retries: 2
-  # retry_delay_ms: 250
+  # request-timeout-secs: 10000
+  # max-retries: 2
+  # retry-delay-ms: 250
 
   # Results output (optional)
-  # results_csv: results/benchmark.csv
+  # results-csv: results/benchmark.csv
