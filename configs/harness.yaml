@@ -1,21 +1,10 @@
-# BatchBench Harness Configuration
-# This file configures the full end-to-end benchmarking pipeline:
-# 1. Instance provisioning via Prime Intellect
-# 2. vLLM server startup
-# 3. Synthetic data generation
-# 4. Online benchmarking
-
-# ============================================================================
-# INSTANCE CONFIGURATION (Prime Intellect)
-# ============================================================================
-# Note: Set PRIME_TEAM_ID env var if using team billing
 instance:
   # Harness-level config (not passed to API)
   name-prefix: batchbench
   docker-image: tytn/batchbench:cu126
   provision-timeout: 600
 
-  # Passed directly to check_availability API
+  # Passed directly to API via check_availability 
   availability:
     gpu-type: H100_80GB
     gpu-count: 1
@@ -30,13 +19,9 @@ instance:
     image: ubuntu_22_cuda_12
     diskSize: 100
 
-# ============================================================================
-# VLLM SERVER CONFIGURATION
-# ============================================================================
+
 vllm:
   model: Qwen/Qwen3-30B-A3B-Instruct-2507-FP8
-
-  # Server startup timeout (seconds)
   startup-timeout: 600
 
   # vLLM serve arguments
@@ -55,9 +40,7 @@ vllm:
     # VLLM_HAS_FLASHINFER_CUBIN: "1"
     # VLLM_USE_FLASHINFER_MOE_FP8: "1"
 
-# ============================================================================
-# SYNTHETIC DATA GENERATION
-# ============================================================================
+
 generate:
   output: data/output.jsonl
   count: 10000
@@ -71,9 +54,7 @@ generate:
   # approx-input-tokens: 512
   # token-tolerance: 50
 
-# ============================================================================
-# ONLINE BENCHMARK CONFIGURATION
-# ============================================================================
+
 benchmark:
   # Load configuration
   users: 32

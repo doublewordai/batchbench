@@ -235,8 +235,6 @@ def run_benchmark(container: ContainerSession, config: dict, synthetic_data_path
     )
 
     print(f"\nRunning online benchmark...")
-    print(f"  Users: {bench_cfg.get('users', 32)}")
-    print(f"  Requests-per-user: {bench_cfg.get('requests-per-user', 10)}")
     if verbose:
         print(f"Command: {benchmark_cmd}")
 
@@ -452,20 +450,14 @@ def run_harness(config_path: str, verbose: bool = False) -> None:
     print(f"Loading config from: {config_path}")
     config = load_config(config_path)
 
-    instance_info = provision_instance(config)
-    pod_id = instance_info["pod_id"]
-    instance_name = instance_info["instance_name"]
-    ssh_user = instance_info["ssh_user"]
-    ssh_host = instance_info["ssh_host"]
-    ssh_port = instance_info["ssh_port"]
-    ssh_key_path = Path(os.environ.get("PRIME_SSH_KEY_PATH"))
+    instance = provision_instance(config)
 
     print("\nWaiting for SSH to be ready...")
     time.sleep(10)
 
     print("\nConnecting via SSH...")
     try:
-        with SSHSession(ssh_host, ssh_port, ssh_user, ssh_key_path) as ssh:
+        with SSHSession(instance["ssh_host"], instance["ssh_port"], instance["ssh_user"], Path(os.environ["PRIME_SSH_KEY_PATH"])) as ssh:
             container = setup_environment(ssh, config, verbose)
             start_vllm_server(container, config, verbose)
             synthetic_data_path = run_synthetic_generation(container, config, verbose)
@@ -478,11 +470,11 @@ def run_harness(config_path: str, verbose: bool = False) -> None:
     print("\n" + "=" * 60)
     print("Instance Summary")
     print("=" * 60)
-    print(f"Pod ID: {pod_id}")
-    print(f"Name: {instance_name}")
-    print(f"SSH: ssh {ssh_user}@{ssh_host} -p {ssh_port}")
-    print(f"\nTo terminate: prime pods terminate {pod_id}")
-    print("Or via API: DELETE /api/v1/pods/{pod_id}")
+    print(f"Pod ID: {instance['pod_id']}")
+    print(f"Name: {instance['instance_name']}")
+    print(f"SSH: ssh {instance['ssh_user']}@{instance['ssh_host']} -p {instance['ssh_port']}")
+    print(f"\nTo terminate: prime pods terminate {instance['pod_id']}")
+    print(f"Or via API: DELETE /api/v1/pods/{instance['pod_id']}")
 
 
 def main():
