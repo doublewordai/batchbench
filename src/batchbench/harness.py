@@ -290,7 +290,7 @@ def start_vllm_server(container: ContainerSession, config: dict, verbose: bool =
     model = vllm_cfg["model"]
     args = vllm_cfg.get("args") or {}
     env = vllm_cfg.get("env") or {}
-    startup_timeout = vllm_cfg.get("startup_timeout", 600)
+    startup_timeout = vllm_cfg.get("startup-timeout", 600)
     port = args.get("port", 8000)
 
     vllm_cmd = build_cli_command(f"vllm serve {model}", args)
@@ -317,14 +317,14 @@ def provision_instance(config: dict) -> dict:
     instance_cfg = config["instance"]
     availability_params = instance_cfg["availability"]
     create_params = instance_cfg["create"]
-    name_prefix = instance_cfg.get("name_prefix", "batchbench")
-    provision_timeout = instance_cfg.get("provision_timeout", 600)
+    name_prefix = instance_cfg.get("name-prefix", "batchbench")
+    provision_timeout = instance_cfg.get("provision-timeout", 600)
     team_id = os.environ["PRIME_TEAM_ID"]
 
     client = PrimeIntellectClient(os.environ["PRIME_API_KEY"])
 
-    gpu_type = availability_params["gpu_type"]
-    gpu_count = availability_params["gpu_count"]
+    gpu_type = availability_params["gpu-type"]
+    gpu_count = availability_params["gpu-count"]
     print(f"Checking availability for {gpu_count}x {gpu_type}...")
     available = client.check_availability(**availability_params)
     if not available:
@@ -386,7 +386,7 @@ def provision_instance(config: dict) -> dict:
 def setup_environment(ssh: SSHSession, config: dict, verbose: bool = False) -> ContainerSession:
     """Set up the container environment."""
     instance_cfg = config["instance"]
-    docker_image = instance_cfg["docker_image"]
+    docker_image = instance_cfg["docker-image"]
 
     # Determine docker command (with or without sudo)
     _, _, rc = ssh.run("docker info > /dev/null 2>&1")

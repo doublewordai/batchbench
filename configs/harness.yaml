@@ -11,14 +11,14 @@
 # Note: Set PRIME_TEAM_ID env var if using team billing
 instance:
   # Harness-level config (not passed to API)
-  name_prefix: batchbench
-  docker_image: tytn/batchbench:cu126
-  provision_timeout: 600
+  name-prefix: batchbench
+  docker-image: tytn/batchbench:cu126
+  provision-timeout: 600
 
   # Passed directly to check_availability API
   availability:
-    gpu_type: H100_80GB
-    gpu_count: 1
+    gpu-type: H100_80GB
+    gpu-count: 1
     security: secure_cloud
     # regions:
     #   - united_states
@@ -37,7 +37,7 @@ vllm:
   model: Qwen/Qwen3-30B-A3B-Instruct-2507-FP8
 
   # Server startup timeout (seconds)
-  startup_timeout: 600
+  startup-timeout: 600
 
   # vLLM serve arguments
   args:
