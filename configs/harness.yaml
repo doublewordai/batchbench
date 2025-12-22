@@ -56,8 +56,7 @@ vllm:
     # enable-expert-parallel: false
 
   # Environment variables for vLLM
-  env:
-    HF_HOME: /data
+  # env:
     # VLLM_ATTENTION_BACKEND: FLASHINFER
     # VLLM_HAS_FLASHINFER_CUBIN: "1"
     # VLLM_USE_FLASHINFER_MOE_FP8: "1"

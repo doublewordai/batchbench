@@ -5,8 +5,11 @@ BatchBench Harness - Automated benchmarking orchestration via Prime Intellect.
 This script:
 1. Provisions a GPU instance via Prime Intellect API
 2. Connects via SSH
-3. Pulls the batchbench Docker image
-4. Runs the container, clones repo, and runs nvidia-smi
+3. Pulls the batchbench Docker image and starts container
+4. Sets up environment (venv, dependencies)
+5. Starts vLLM server and waits for readiness
+6. Generates synthetic data
+7. Runs online benchmark
 """
 
 import argparse
@@ -18,6 +21,10 @@ from pathlib import Path
 import paramiko
 import requests
 import yaml
+
+
+# Container name used for docker exec commands
+CONTAINER_NAME = "batchbench-run"
 
 
 # Prime Intellect API base URL
@@ -194,6 +201,87 @@ class SSHSession:
         self.close()
 
 
+def start_vllm_server(
+    docker_exec: callable,
+    config: dict,
+    verbose: bool = False,
+) -> None:
+    """Start vLLM server inside the container and wait for it to be ready."""
+    vllm_cfg = config.get("vllm", {})
+    model = vllm_cfg.get("model")
+    if not model:
+        print("ERROR: No model specified in vllm config")
+        sys.exit(1)
+
+    vllm_args = vllm_cfg.get("args") or {}
+    vllm_env = vllm_cfg.get("env") or {}
+    startup_timeout = vllm_cfg.get("startup_timeout", 600)
+    port = vllm_args.get("port", 8000)
+
+    # Build environment variable exports
+    env_exports = " ".join(f"{k}={v}" for k, v in vllm_env.items())
+
+    # Build vllm serve command arguments
+    vllm_cmd_args = [f"--model {model}"]
+    for arg, value in vllm_args.items():
+        if isinstance(value, bool):
+            if value:
+                vllm_cmd_args.append(f"--{arg}")
+        else:
+            vllm_cmd_args.append(f"--{arg} {value}")
+
+    vllm_serve_cmd = "vllm serve " + " ".join(vllm_cmd_args)
+
+    # Full command: activate venv, set env vars, run vllm in background
+    start_server_cmd = (
+        "source /opt/batchbench/.venv/bin/activate && "
+        f"{env_exports} nohup {vllm_serve_cmd} > /tmp/vllm.log 2>&1 &"
+    )
+
+    print(f"\nStarting vLLM server with model: {model}")
+    if verbose:
+        print(f"Command: {vllm_serve_cmd}")
+    stdout, stderr, exit_code = docker_exec(start_server_cmd)
+    if exit_code != 0:
+        print(f"Failed to start vLLM server: {stderr}")
+        sys.exit(1)
+    print("vLLM server process started")
+
+    # Poll for server readiness while streaming logs
+    print(f"\nWaiting for vLLM server to be ready (timeout: {startup_timeout}s)...")
+    print("-" * 60)
+    health_url = f"http://localhost:{port}/health"
+    poll_interval = 5
+    start_time = time.time()
+    last_log_line = 0
+
+    while time.time() - start_time < startup_timeout:
+        # Fetch and print new log lines
+        stdout, _, _ = docker_exec(
+            f"tail -n +{last_log_line + 1} /tmp/vllm.log 2>/dev/null",
+            timeout=10,
+        )
+        if stdout.strip():
+            print(stdout, end="", flush=True)
+            last_log_line += stdout.count("\n")
+
+        # Check health endpoint
+        stdout, stderr, exit_code = docker_exec(
+            f"curl -s -o /dev/null -w '%{{http_code}}' {health_url}",
+            timeout=10,
+        )
+        if exit_code == 0 and stdout.strip() == "200":
+            print("-" * 60)
+            print("vLLM server is ready!")
+            return
+
+        time.sleep(poll_interval)
+
+    print("-" * 60)
+    print(f"ERROR: vLLM server not ready after {startup_timeout}s")
+    sys.exit(1)
+
+
 def run_harness(config_path: str, verbose: bool = False) -> None:
     """Main harness execution."""
     print(f"Loading config from: {config_path}")
@@ -303,23 +391,55 @@ def run_harness(config_path: str, verbose: bool = False) -> None:
                 sys.exit(1)
             print("Docker image pulled successfully")
 
-            # Run container: clone repo and run nvidia-smi
-            print("\nRunning container...")
-            repo_url = "https://github.com/doublewordai/batchbench.git"
-            stdout, stderr, exit_code = ssh.run(
-                f'{docker_cmd} run --rm --gpus all {docker_image} bash -c "echo Successfully inside batchbench container! && git clone {repo_url} && nvidia-smi"',
-                stream=verbose,
+            # Start container in detached mode
+            print(f"\nStarting container '{CONTAINER_NAME}'...")
+            docker_run_cmd = (
+                f"{docker_cmd} run -d "
+                f"--name {CONTAINER_NAME} "
+                f"--gpus all "
+                f"{docker_image} "
+                f"sleep infinity"
             )
+            stdout, stderr, exit_code = ssh.run(docker_run_cmd, stream=verbose)
+            if exit_code != 0:
+                print(f"Failed to start container: {stderr}")
+                sys.exit(1)
+            print("Container started successfully")
 
-            if exit_code == 0:
-                print("\n" + "=" * 60)
-                print("Container output:")
-                print("=" * 60)
-                print(stdout)
-            else:
-                print(f"Container run failed with exit code {exit_code}")
-                if stderr:
-                    print(f"stderr: {stderr}")
+            # Helper to run commands inside the container
+            def docker_exec(cmd: str, timeout: int = 300, stream: bool = False) -> tuple[str, str, int]:
+                """Execute a command inside the running container."""
+                return ssh.run(
+                    f'{docker_cmd} exec {CONTAINER_NAME} bash -c "{cmd}"',
+                    timeout=timeout,
+                    stream=stream,
+                )
+
+            # Clone batchbench repo
+            print("\nCloning batchbench repository...")
+            repo_url = "https://github.com/doublewordai/batchbench.git"
+            stdout, stderr, exit_code = docker_exec(f"git clone {repo_url}", stream=verbose)
+            if exit_code != 0:
+                print(f"Git clone failed: {stderr}")
+                sys.exit(1)
+            print("Repository cloned successfully")
+
+            # Install dependencies with uv
+            print("\nInstalling dependencies...")
+            install_cmd = (
+                "source /opt/batchbench/.venv/bin/activate && "
+                "cd batchbench && "
+                "uv pip install -e ."
+            )
+            stdout, stderr, exit_code = docker_exec(install_cmd, timeout=300, stream=verbose)
+            if exit_code != 0:
+                print(f"Dependency installation failed: {stderr}")
+                print(f"stdout: {stdout}")
+                sys.exit(1)
+            print("Dependencies installed successfully")
+
+            # Start vLLM server
+            start_vllm_server(docker_exec, config, verbose)
 
     except Exception as e:
         print(f"SSH failed: {e}")
