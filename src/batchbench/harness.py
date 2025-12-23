@@ -282,7 +282,7 @@ class RemoteEnvironment:
         )
         return exit_code == 0
 
-    def setup(self, config: dict, verbose: bool = False) -> None:
+    def setup(self, config: dict) -> None:
         """Pull image, start container, clone repo, install dependencies."""
         docker_image = config["instance"]["docker-image"]
 
@@ -292,7 +292,7 @@ class RemoteEnvironment:
             stdout, stderr, exit_code = self.ssh.run(
                 f"{self._docker_cmd} pull {docker_image}",
                 timeout=600,
-                stream=verbose,
+                stream=True,
             )
             if exit_code != 0:
                 print(f"Docker pull failed: {stderr}")
@@ -307,7 +307,7 @@ class RemoteEnvironment:
                 f"{docker_image} "
                 f"sleep infinity"
             )
-            stdout, stderr, exit_code = self.ssh.run(docker_run_cmd, stream=verbose)
+            stdout, stderr, exit_code = self.ssh.run(docker_run_cmd, stream=True)
             if exit_code != 0:
                 print(f"Failed to start container: {stderr}")
                 sys.exit(1)
@@ -317,7 +317,7 @@ class RemoteEnvironment:
         if not self._is_repo_cloned():
             print("\nCloning batchbench repository...")
             repo_url = "https://github.com/doublewordai/batchbench.git"
-            stdout, stderr, exit_code = self.exec(f"git clone {repo_url}", stream=verbose)
+            stdout, stderr, exit_code = self.exec(f"git clone {repo_url}", stream=True)
             if exit_code != 0:
                 print(f"Git clone failed: {stderr}")
                 sys.exit(1)
@@ -331,7 +331,7 @@ class RemoteEnvironment:
                 "cd batchbench && "
                 "uv pip install -e ."
             )
-            stdout, stderr, exit_code = self.exec(install_cmd, timeout=300, stream=verbose)
+            stdout, stderr, exit_code = self.exec(install_cmd, timeout=300, stream=True)
             if exit_code != 0:
                 print(f"Dependency installation failed: {stderr}")
                 print(f"stdout: {stdout}")
@@ -368,7 +368,7 @@ def build_cli_command(base: str, args: dict) -> str:
     return base + " " + " ".join(cmd_args)
 
 
-def run_synthetic_generation(env: RemoteEnvironment, config: dict, verbose: bool = False) -> str:
+def run_synthetic_generation(env: RemoteEnvironment, config: dict) -> str:
     """Generate synthetic data inside the container. Returns the output file path."""
     gen_cfg = config["generate"]
     output = gen_cfg.get("output", "data/output.jsonl")
@@ -380,9 +380,6 @@ def run_synthetic_generation(env: RemoteEnvironment, config: dict, verbose: bool
     )
 
     print(f"\nGenerating synthetic data...")
-    if verbose:
-        print(f"Command: {generate_cmd}")
-
     stdout, stderr, exit_code = env.exec(full_cmd, timeout=600, stream=True)
     if exit_code != 0:
         print(f"Synthetic generation failed: {stderr}")
@@ -392,7 +389,7 @@ def run_synthetic_generation(env: RemoteEnvironment, config: dict, verbose: bool
     return output
 
 
-def run_benchmark(env: RemoteEnvironment, config: dict, synthetic_data_path: str, verbose: bool = False) -> None:
+def run_benchmark(env: RemoteEnvironment, config: dict, synthetic_data_path: str) -> None:
     """Run the online benchmark inside the container."""
     bench_cfg = config["benchmark"]
     vllm_cfg = config["vllm"]
@@ -412,9 +409,6 @@ def run_benchmark(env: RemoteEnvironment, config: dict, synthetic_data_path: str
     )
 
     print(f"\nRunning online benchmark...")
-    if verbose:
-        print(f"Command: {benchmark_cmd}")
-
     stdout, stderr, exit_code = env.exec(full_cmd, timeout=3600, stream=True)
     if exit_code != 0:
         print(f"Benchmark failed: {stderr}")
@@ -459,7 +453,7 @@ def wait_for_vllm_ready(env: RemoteEnvironment, port: int, timeout: int) -> None
     sys.exit(1)
 
 
-def start_vllm_server(env: RemoteEnvironment, config: dict, verbose: bool = False) -> None:
+def start_vllm_server(env: RemoteEnvironment, config: dict) -> None:
     """Start vLLM server inside the container and wait for it to be ready."""
     vllm_cfg = config["vllm"]
     model = vllm_cfg["model"]
@@ -476,9 +470,6 @@ def start_vllm_server(env: RemoteEnvironment, config: dict, verbose: bool = Fals
     )
 
     print(f"\nStarting vLLM server with model: {model}")
-    if verbose:
-        print(f"Command: {vllm_cmd}")
-
     stdout, stderr, exit_code = env.exec(full_cmd)
     if exit_code != 0:
         print(f"Failed to start vLLM server: {stderr}")
@@ -488,7 +479,7 @@ def start_vllm_server(env: RemoteEnvironment, config: dict, verbose: bool = Fals
     wait_for_vllm_ready(env, port, startup_timeout)
 
 
-def run_harness(config_path: str, verbose: bool = False, resume_pod_id: str = None) -> None:
+def run_harness(config_path: str, resume_pod_id: str = None) -> None:
     """Main harness execution."""
     print(f"Loading config from: {config_path}")
     config = load_config(config_path)
@@ -507,11 +498,11 @@ def run_harness(config_path: str, verbose: bool = False, resume_pod_id: str = No
     try:
         with RemoteEnvironment(instance, ssh_key_path) as env:
             if not env.is_ready():
-                env.setup(config, verbose)
+                env.setup(config)
 
-            start_vllm_server(env, config, verbose)
-            synthetic_data_path = run_synthetic_generation(env, config, verbose)
-            run_benchmark(env, config, synthetic_data_path, verbose)
+            start_vllm_server(env, config)
+            synthetic_data_path = run_synthetic_generation(env, config)
+            run_benchmark(env, config, synthetic_data_path)
 
     except Exception as e:
         print(f"Error: {e}")
@@ -528,7 +519,6 @@ def run_harness(config_path: str, verbose: bool = False, resume_pod_id: str = No
 def main():
     parser = argparse.ArgumentParser(description="BatchBench Harness - Automated GPU instance provisioning and benchmarking")
     parser.add_argument("config", nargs="?", default="configs/harness.yaml", help="Path to config file")
-    parser.add_argument("-v", "--verbose", action="store_true")
     parser.add_argument("--resume", type=str, metavar="POD_ID", help="Resume with existing pod")
     args = parser.parse_args()
 
@@ -536,7 +526,7 @@ def main():
         print(f"ERROR: Config file not found: {args.config}")
         sys.exit(1)
 
-    run_harness(args.config, verbose=args.verbose, resume_pod_id=args.resume)
+    run_harness(args.config, resume_pod_id=args.resume)
 
 
 if __name__ == "__main__":
