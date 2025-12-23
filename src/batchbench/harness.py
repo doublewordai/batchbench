@@ -242,18 +242,11 @@ class RemoteEnvironment:
     """Manages the remote execution environment (SSH + container)."""
 
     def __init__(self, instance: Instance, ssh_key_path: Path):
-        self.instance = instance
-        self.ssh_key_path = ssh_key_path
-        self.ssh: SSHSession = None
-        self._docker_cmd: str = None
-
-    def connect(self) -> None:
-        """Establish SSH connection and detect docker command."""
         self.ssh = SSHSession(
-            self.instance.ssh_host,
-            self.instance.ssh_port,
-            self.instance.ssh_user,
-            self.ssh_key_path,
+            instance.ssh_host,
+            instance.ssh_port,
+            instance.ssh_user,
+            ssh_key_path,
         )
         # Detect docker command (with or without sudo)
         _, _, rc = self.ssh.run("docker info > /dev/null 2>&1")
@@ -359,7 +352,6 @@ class RemoteEnvironment:
             self.ssh.close()
 
     def __enter__(self) -> "RemoteEnvironment":
-        self.connect()
         return self
 
     def __exit__(self, *args) -> None:
