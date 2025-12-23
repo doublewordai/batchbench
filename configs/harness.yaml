@@ -2,10 +2,10 @@ instance:
   docker-image: tytn/batchbench:cu126
   provision-timeout: 600
 
-  # Passed directly to API via check_availability 
+  # Passed directly to API via check_availability
   availability:
-    gpu-type: H100_80GB
-    gpu-count: 1
+    gpu_type: H100_80GB
+    gpu_count: 1
     security: secure_cloud
     # regions:
     #   - united_states

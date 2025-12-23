@@ -193,8 +193,8 @@ class Instance:
         client = PrimeIntellectClient(os.environ["PRIME_API_KEY"])
 
         # Check availability
-        gpu_type = availability_params["gpu-type"]
-        gpu_count = availability_params["gpu-count"]
+        gpu_type = availability_params["gpu_type"]
+        gpu_count = availability_params["gpu_count"]
         print(f"Checking availability for {gpu_count}x {gpu_type}...")
         available = client.check_availability(**availability_params)
         if not available:
