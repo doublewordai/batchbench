@@ -466,7 +466,6 @@ def run_harness(config_path: str, verbose: bool = False) -> None:
     print(f"Name: {instance['instance_name']}")
     print(f"SSH: ssh {instance['ssh_user']}@{instance['ssh_host']} -p {instance['ssh_port']}")
     print(f"\nTo terminate: prime pods terminate {instance['pod_id']}")
-    print(f"Or via API: DELETE /api/v1/pods/{instance['pod_id']}")
 
 
 def main():
