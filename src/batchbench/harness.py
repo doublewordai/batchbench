@@ -148,12 +148,6 @@ class SSHSession:
     def close(self):
         self.client.close()
 
-    def __enter__(self):
-        return self
-
-    def __exit__(self, *args):
-        self.close()
-
 
 class Instance:
     def __init__(self, pod_id: str, client: PrimeIntellectClient, timeout: int = 600):
@@ -269,17 +263,12 @@ class RemoteEnvironment:
 
     def _is_repo_cloned(self) -> bool:
         """Check if batchbench repo was cloned."""
-        _, _, exit_code = self.ssh.run(
-            f"{self._docker_cmd} exec {CONTAINER_NAME} test -d batchbench"
-        )
+        _, _, exit_code = self.exec("test -d batchbench")
         return exit_code == 0
 
     def _is_package_installed(self) -> bool:
         """Check if batchbench package was installed."""
-        _, _, exit_code = self.ssh.run(
-            f"{self._docker_cmd} exec {CONTAINER_NAME} "
-            f"/opt/batchbench/.venv/bin/pip show batchbench"
-        )
+        _, _, exit_code = self.exec("/opt/batchbench/.venv/bin/pip show batchbench")
         return exit_code == 0
 
     def setup(self, config: dict) -> None:
@@ -329,7 +318,7 @@ class RemoteEnvironment:
             install_cmd = (
                 "source /opt/batchbench/.venv/bin/activate && "
                 "cd batchbench && "
-                "uv pip install -e ."
+                "uv pip install -e '.[generate]'"
             )
             stdout, stderr, exit_code = self.exec(install_cmd, timeout=300, stream=True)
             if exit_code != 0:
