@@ -60,7 +60,7 @@ class PrimeIntellectClient:
         print(f"  API response: {result.get('totalCount', 0)} items found")
         return result.get("items", [])
 
-    def create_pod(self, gpu_config: dict,name: str, team_id: str, **pod_params) -> dict:
+    def create_pod(self, gpu_config: dict, team_id: str, **pod_params) -> dict:
         payload = {
             "pod": {
                 "cloudId": gpu_config["cloudId"],
@@ -68,7 +68,6 @@ class PrimeIntellectClient:
                 "socket": gpu_config["socket"],
                 "gpuCount": gpu_config["gpuCount"],
                 "dataCenterId": gpu_config["dataCenter"],
-                "name": name,
                 **pod_params,
             },
             "provider": {
@@ -156,21 +155,215 @@ class SSHSession:
         self.close()
 
 
-class ContainerSession:
-    """Represents a running Docker container that we can exec commands into."""
+class Instance:
+    def __init__(self, pod_id: str, client: PrimeIntellectClient, timeout: int = 600):
+        """Wait for pod to be ready and extract SSH connection info."""
+        self._client = client
+        self.pod_id = pod_id
 
-    def __init__(self, ssh: SSHSession, docker_cmd: str, container_name: str):
-        self.ssh = ssh
-        self.docker_cmd = docker_cmd
-        self.container_name = container_name
+        print(f"Waiting for pod to be ready (timeout: {timeout}s)...")
+        try:
+            pod = client.wait_for_pod_ready(pod_id, timeout=timeout)
+        except (TimeoutError, RuntimeError) as e:
+            print(f"ERROR: {e}")
+            raise
+
+        print("Pod is ready!")
+        ssh_conn = pod.get("sshConnection", "")
+        user_host, _, port_str = ssh_conn.partition(" -p ")
+        self.ssh_user, self.ssh_host = user_host.split("@", 1)
+        self.ssh_port = int(port_str) if port_str else 22
+
+    @classmethod
+    def from_pod_id(cls, pod_id: str) -> "Instance":
+        """Resume with an existing pod by ID."""
+        client = PrimeIntellectClient(os.environ["PRIME_API_KEY"])
+        print(f"Resuming pod: {pod_id}")
+        return cls(pod_id, client, timeout=60)  # Short timeout - should already be active
+
+    @classmethod
+    def provision(cls, config: dict) -> "Instance":
+        """Provision a new GPU instance via Prime Intellect API."""
+        instance_cfg = config["instance"]
+        availability_params = instance_cfg["availability"]
+        create_params = instance_cfg["create"]
+        provision_timeout = instance_cfg.get("provision-timeout", 600)
+        team_id = os.environ["PRIME_TEAM_ID"]
+
+        client = PrimeIntellectClient(os.environ["PRIME_API_KEY"])
+
+        # Check availability
+        gpu_type = availability_params["gpu-type"]
+        gpu_count = availability_params["gpu-count"]
+        print(f"Checking availability for {gpu_count}x {gpu_type}...")
+        available = client.check_availability(**availability_params)
+        if not available:
+            print(f"ERROR: No {gpu_type} GPUs available")
+            print("Check availability at: https://app.primeintellect.ai/dashboard/create-cluster")
+            sys.exit(1)
+
+        # Select cheapest non-runpod GPU
+        non_runpod = [opt for opt in available if opt["provider"] != "runpod"]
+        if not non_runpod:
+            print("ERROR: No non-runpod GPUs available")
+            sys.exit(1)
+        selected = min(non_runpod, key=lambda x: float(x["prices"]["onDemand"]))
+        provider = selected["provider"]
+        price = selected["prices"]["onDemand"]
+        print(f"Found available GPU:")
+        print(f"  Provider: {provider}")
+        print(f"  Cloud ID: {selected.get('cloudId')}")
+        print(f"  GPU Type: {selected.get('gpuType')}")
+        print(f"  Socket: {selected.get('socket')}")
+        print(f"  Price: ${price}/hr")
+
+        # Create pod
+        print("\nCreating pod...")
+        pod = client.create_pod(gpu_config=selected, team_id=team_id, **create_params)
+        pod_id = pod.get("id")
+        print(f"Pod created with ID: {pod_id}")
+
+        try:
+            return cls(pod_id, client, timeout=provision_timeout)
+        except (TimeoutError, RuntimeError):
+            print("Cleaning up...")
+            try:
+                client.terminate_pod(pod_id)
+            except Exception:
+                pass
+            sys.exit(1)
+
+    def terminate(self):
+        """Terminate this instance."""
+        self._client.terminate_pod(self.pod_id)
+
+
+class RemoteEnvironment:
+    """Manages the remote execution environment (SSH + container)."""
+
+    def __init__(self, instance: Instance, ssh_key_path: Path):
+        self.instance = instance
+        self.ssh_key_path = ssh_key_path
+        self.ssh: SSHSession = None
+        self._docker_cmd: str = None
+
+    def connect(self) -> None:
+        """Establish SSH connection and detect docker command."""
+        self.ssh = SSHSession(
+            self.instance.ssh_host,
+            self.instance.ssh_port,
+            self.instance.ssh_user,
+            self.ssh_key_path,
+        )
+        # Detect docker command (with or without sudo)
+        _, _, rc = self.ssh.run("docker info > /dev/null 2>&1")
+        self._docker_cmd = "docker" if rc == 0 else "sudo docker"
+
+    def is_ready(self) -> bool:
+        """Check if environment is fully set up."""
+        return (
+            self._is_container_running()
+            and self._is_repo_cloned()
+            and self._is_package_installed()
+        )
+
+    def _is_container_running(self) -> bool:
+        """Check if container exists and is running."""
+        stdout, _, exit_code = self.ssh.run(
+            f"{self._docker_cmd} inspect -f '{{{{.State.Running}}}}' {CONTAINER_NAME}"
+        )
+        return exit_code == 0 and stdout.strip() == "true"
+
+    def _is_repo_cloned(self) -> bool:
+        """Check if batchbench repo was cloned."""
+        _, _, exit_code = self.ssh.run(
+            f"{self._docker_cmd} exec {CONTAINER_NAME} test -d batchbench"
+        )
+        return exit_code == 0
+
+    def _is_package_installed(self) -> bool:
+        """Check if batchbench package was installed."""
+        _, _, exit_code = self.ssh.run(
+            f"{self._docker_cmd} exec {CONTAINER_NAME} "
+            f"/opt/batchbench/.venv/bin/pip show batchbench"
+        )
+        return exit_code == 0
+
+    def setup(self, config: dict, verbose: bool = False) -> None:
+        """Pull image, start container, clone repo, install dependencies."""
+        docker_image = config["instance"]["docker-image"]
+
+        # Pull and start container (skip if already running)
+        if not self._is_container_running():
+            print(f"\nPulling Docker image {docker_image}...")
+            stdout, stderr, exit_code = self.ssh.run(
+                f"{self._docker_cmd} pull {docker_image}",
+                timeout=600,
+                stream=verbose,
+            )
+            if exit_code != 0:
+                print(f"Docker pull failed: {stderr}")
+                sys.exit(1)
+            print("Docker image pulled successfully")
+
+            print(f"\nStarting container '{CONTAINER_NAME}'...")
+            docker_run_cmd = (
+                f"{self._docker_cmd} run -d "
+                f"--name {CONTAINER_NAME} "
+                f"--gpus all "
+                f"{docker_image} "
+                f"sleep infinity"
+            )
+            stdout, stderr, exit_code = self.ssh.run(docker_run_cmd, stream=verbose)
+            if exit_code != 0:
+                print(f"Failed to start container: {stderr}")
+                sys.exit(1)
+            print("Container started successfully")
+
+        # Clone batchbench repo (skip if already cloned)
+        if not self._is_repo_cloned():
+            print("\nCloning batchbench repository...")
+            repo_url = "https://github.com/doublewordai/batchbench.git"
+            stdout, stderr, exit_code = self.exec(f"git clone {repo_url}", stream=verbose)
+            if exit_code != 0:
+                print(f"Git clone failed: {stderr}")
+                sys.exit(1)
+            print("Repository cloned successfully")
+
+        # Install dependencies (skip if already installed)
+        if not self._is_package_installed():
+            print("\nInstalling dependencies...")
+            install_cmd = (
+                "source /opt/batchbench/.venv/bin/activate && "
+                "cd batchbench && "
+                "uv pip install -e ."
+            )
+            stdout, stderr, exit_code = self.exec(install_cmd, timeout=300, stream=verbose)
+            if exit_code != 0:
+                print(f"Dependency installation failed: {stderr}")
+                print(f"stdout: {stdout}")
+                sys.exit(1)
+            print("Dependencies installed successfully")
 
     def exec(self, cmd: str, timeout: int = 300, stream: bool = False) -> tuple[str, str, int]:
         """Execute a command inside the container."""
         return self.ssh.run(
-            f'{self.docker_cmd} exec {self.container_name} bash -c "{cmd}"',
+            f'{self._docker_cmd} exec {CONTAINER_NAME} bash -c "{cmd}"',
             timeout=timeout,
             stream=stream,
         )
+
+    def close(self) -> None:
+        """Close SSH connection."""
+        if self.ssh:
+            self.ssh.close()
+
+    def __enter__(self) -> "RemoteEnvironment":
+        self.connect()
+        return self
+
+    def __exit__(self, *args) -> None:
+        self.close()
 
 
 def build_cli_command(base: str, args: dict) -> str:
@@ -183,7 +376,7 @@ def build_cli_command(base: str, args: dict) -> str:
     return base + " " + " ".join(cmd_args)
 
 
-def run_synthetic_generation(container: ContainerSession, config: dict, verbose: bool = False) -> str:
+def run_synthetic_generation(env: RemoteEnvironment, config: dict, verbose: bool = False) -> str:
     """Generate synthetic data inside the container. Returns the output file path."""
     gen_cfg = config["generate"]
     output = gen_cfg.get("output", "data/output.jsonl")
@@ -198,7 +391,7 @@ def run_synthetic_generation(container: ContainerSession, config: dict, verbose:
     if verbose:
         print(f"Command: {generate_cmd}")
 
-    stdout, stderr, exit_code = container.exec(full_cmd, timeout=600, stream=True)
+    stdout, stderr, exit_code = env.exec(full_cmd, timeout=600, stream=True)
     if exit_code != 0:
         print(f"Synthetic generation failed: {stderr}")
         sys.exit(1)
@@ -207,7 +400,7 @@ def run_synthetic_generation(container: ContainerSession, config: dict, verbose:
     return output
 
 
-def run_benchmark(container: ContainerSession, config: dict, synthetic_data_path: str, verbose: bool = False) -> None:
+def run_benchmark(env: RemoteEnvironment, config: dict, synthetic_data_path: str, verbose: bool = False) -> None:
     """Run the online benchmark inside the container."""
     bench_cfg = config["benchmark"]
     vllm_cfg = config["vllm"]
@@ -230,7 +423,7 @@ def run_benchmark(container: ContainerSession, config: dict, synthetic_data_path
     if verbose:
         print(f"Command: {benchmark_cmd}")
 
-    stdout, stderr, exit_code = container.exec(full_cmd, timeout=3600, stream=True)
+    stdout, stderr, exit_code = env.exec(full_cmd, timeout=3600, stream=True)
     if exit_code != 0:
         print(f"Benchmark failed: {stderr}")
         sys.exit(1)
@@ -238,7 +431,7 @@ def run_benchmark(container: ContainerSession, config: dict, synthetic_data_path
     print("\nBenchmark complete!")
 
 
-def wait_for_vllm_ready(container: ContainerSession, port: int, timeout: int) -> None:
+def wait_for_vllm_ready(env: RemoteEnvironment, port: int, timeout: int) -> None:
     print(f"\nWaiting for vLLM server to be ready (timeout: {timeout}s)...")
     print("-" * 60)
 
@@ -249,7 +442,7 @@ def wait_for_vllm_ready(container: ContainerSession, port: int, timeout: int) ->
 
     while time.time() - start_time < timeout:
         # Fetch and print new log lines
-        stdout, _, _ = container.exec(
+        stdout, _, _ = env.exec(
             f"tail -n +{last_log_line + 1} /tmp/vllm.log 2>/dev/null",
             timeout=10,
         )
@@ -258,7 +451,7 @@ def wait_for_vllm_ready(container: ContainerSession, port: int, timeout: int) ->
             last_log_line += stdout.count("\n")
 
         # Check health endpoint
-        stdout, _, exit_code = container.exec(
+        stdout, _, exit_code = env.exec(
             f"curl -s -o /dev/null -w '%{{http_code}}' {health_url}",
             timeout=10,
         )
@@ -274,17 +467,17 @@ def wait_for_vllm_ready(container: ContainerSession, port: int, timeout: int) ->
     sys.exit(1)
 
 
-def start_vllm_server(container: ContainerSession, config: dict, verbose: bool = False) -> None:
+def start_vllm_server(env: RemoteEnvironment, config: dict, verbose: bool = False) -> None:
     """Start vLLM server inside the container and wait for it to be ready."""
     vllm_cfg = config["vllm"]
     model = vllm_cfg["model"]
     args = vllm_cfg.get("args") or {}
-    env = vllm_cfg.get("env") or {}
+    vllm_env = vllm_cfg.get("env") or {}
     startup_timeout = vllm_cfg.get("startup-timeout", 600)
     port = args.get("port", 8000)
 
     vllm_cmd = build_cli_command(f"vllm serve {model}", args)
-    env_exports = " ".join(f"{k}={v}" for k, v in env.items())
+    env_exports = " ".join(f"{k}={v}" for k, v in vllm_env.items())
     full_cmd = (
         "source /opt/batchbench/.venv/bin/activate && "
         f"{env_exports} nohup {vllm_cmd} > /tmp/vllm.log 2>&1 &"
@@ -294,191 +487,64 @@ def start_vllm_server(container: ContainerSession, config: dict, verbose: bool =
     if verbose:
         print(f"Command: {vllm_cmd}")
 
-    stdout, stderr, exit_code = container.exec(full_cmd)
+    stdout, stderr, exit_code = env.exec(full_cmd)
     if exit_code != 0:
         print(f"Failed to start vLLM server: {stderr}")
         sys.exit(1)
     print("vLLM server process started")
 
-    wait_for_vllm_ready(container, port, startup_timeout)
+    wait_for_vllm_ready(env, port, startup_timeout)
 
 
-def provision_instance(config: dict) -> dict:
-    instance_cfg = config["instance"]
-    availability_params = instance_cfg["availability"]
-    create_params = instance_cfg["create"]
-    name_prefix = instance_cfg.get("name-prefix", "batchbench")
-    provision_timeout = instance_cfg.get("provision-timeout", 600)
-    team_id = os.environ["PRIME_TEAM_ID"]
-
-    client = PrimeIntellectClient(os.environ["PRIME_API_KEY"])
-
-    gpu_type = availability_params["gpu-type"]
-    gpu_count = availability_params["gpu-count"]
-    print(f"Checking availability for {gpu_count}x {gpu_type}...")
-    available = client.check_availability(**availability_params)
-    if not available:
-        print(f"ERROR: No {gpu_type} GPUs available")
-        print("Check availability at: https://app.primeintellect.ai/dashboard/create-cluster")
-        sys.exit(1)
-
-    # Select cheapest non-runpod GPU
-    non_runpod = [opt for opt in available if opt["provider"] != "runpod"]
-    if not non_runpod:
-        print("ERROR: No non-runpod GPUs available")
-        sys.exit(1)
-    selected = min(non_runpod, key=lambda x: float(x["prices"]["onDemand"]))
-    provider = selected["provider"]
-    price = selected["prices"]["onDemand"]
-    print(f"Found available GPU:")
-    print(f"  Provider: {provider}")
-    print(f"  Cloud ID: {selected.get('cloudId')}")
-    print(f"  GPU Type: {selected.get('gpuType')}")
-    print(f"  Socket: {selected.get('socket')}")
-    print(f"  Price: ${price}/hr")
-
-    # Create pod
-    instance_name = f"{name_prefix}-{int(time.time())}"
-    print(f"\nCreating pod '{instance_name}'...")
-    pod = client.create_pod(gpu_config=selected, name=instance_name, team_id=team_id, **create_params)
-
-    pod_id = pod.get("id")
-    print(f"Pod created with ID: {pod_id}")
-    print(f"\nWaiting for pod to be ready (timeout: {provision_timeout}s)...")
-    try:
-        pod = client.wait_for_pod_ready(pod_id, timeout=provision_timeout)
-    except (TimeoutError, RuntimeError) as e:
-        print(f"ERROR: {e}")
-        print("Cleaning up...")
-        try:
-            client.terminate_pod(pod_id)
-        except Exception:
-            pass
-        sys.exit(1)
-
-    print("\nPod is ready!")
-
-    # Extract SSH connection info from sshConnection (format: "user@host -p port")
-    ssh_conn = pod.get("sshConnection", "")
-    user_host, _, port_str = ssh_conn.partition(" -p ")
-    ssh_user, ssh_host = user_host.split("@", 1)
-    ssh_port = int(port_str) if port_str else 22
-
-    return {
-        "pod_id": pod_id,
-        "instance_name": instance_name,
-        "ssh_user": ssh_user,
-        "ssh_host": ssh_host,
-        "ssh_port": ssh_port,
-    }
-
-
-def setup_environment(ssh: SSHSession, config: dict, verbose: bool = False) -> ContainerSession:
-    """Set up the container environment."""
-    instance_cfg = config["instance"]
-    docker_image = instance_cfg["docker-image"]
-
-    # Determine docker command (with or without sudo)
-    _, _, rc = ssh.run("docker info > /dev/null 2>&1")
-    docker_cmd = "docker" if rc == 0 else "sudo docker"
-
-    # Pull Docker image
-    print(f"\nPulling Docker image {docker_image}...")
-    stdout, stderr, exit_code = ssh.run(
-        f"{docker_cmd} pull {docker_image}",
-        timeout=600,
-        stream=verbose,
-    )
-    if exit_code != 0:
-        print(f"Docker pull failed: {stderr}")
-        sys.exit(1)
-    print("Docker image pulled successfully")
-
-    # Start container in detached mode
-    print(f"\nStarting container '{CONTAINER_NAME}'...")
-    docker_run_cmd = (
-        f"{docker_cmd} run -d "
-        f"--name {CONTAINER_NAME} "
-        f"--gpus all "
-        f"{docker_image} "
-        f"sleep infinity"
-    )
-    stdout, stderr, exit_code = ssh.run(docker_run_cmd, stream=verbose)
-    if exit_code != 0:
-        print(f"Failed to start container: {stderr}")
-        sys.exit(1)
-    print("Container started successfully")
-
-    container = ContainerSession(ssh, docker_cmd, CONTAINER_NAME)
-
-    # Clone batchbench repo
-    print("\nCloning batchbench repository...")
-    repo_url = "https://github.com/doublewordai/batchbench.git"
-    stdout, stderr, exit_code = container.exec(f"git clone {repo_url}", stream=verbose)
-    if exit_code != 0:
-        print(f"Git clone failed: {stderr}")
-        sys.exit(1)
-    print("Repository cloned successfully")
-
-    # Install dependencies
-    print("\nInstalling dependencies...")
-    install_cmd = (
-        "source /opt/batchbench/.venv/bin/activate && "
-        "cd batchbench && "
-        "uv pip install -e ."
-    )
-    stdout, stderr, exit_code = container.exec(install_cmd, timeout=300, stream=verbose)
-    if exit_code != 0:
-        print(f"Dependency installation failed: {stderr}")
-        print(f"stdout: {stdout}")
-        sys.exit(1)
-    print("Dependencies installed successfully")
-
-    return container
-
-
-def run_harness(config_path: str, verbose: bool = False) -> None:
+def run_harness(config_path: str, verbose: bool = False, resume_pod_id: str = None) -> None:
     """Main harness execution."""
     print(f"Loading config from: {config_path}")
     config = load_config(config_path)
+    ssh_key_path = Path(os.environ["PRIME_SSH_KEY_PATH"])
 
-    instance = provision_instance(config)
+    # Step 1: Get instance (provision new or reuse existing)
+    if resume_pod_id:
+        instance = Instance.from_pod_id(resume_pod_id)
+    else:
+        instance = Instance.provision(config)
+        print("Waiting for SSH to be ready...")
+        time.sleep(10)
 
-    print("\nWaiting for SSH to be ready...")
-    time.sleep(10)
-
+    # Step 2: Connect and run pipeline
     print("\nConnecting via SSH...")
     try:
-        with SSHSession(instance["ssh_host"], instance["ssh_port"], instance["ssh_user"], Path(os.environ["PRIME_SSH_KEY_PATH"])) as ssh:
-            container = setup_environment(ssh, config, verbose)
-            start_vllm_server(container, config, verbose)
-            synthetic_data_path = run_synthetic_generation(container, config, verbose)
-            run_benchmark(container, config, synthetic_data_path, verbose)
+        with RemoteEnvironment(instance, ssh_key_path) as env:
+            if not env.is_ready():
+                env.setup(config, verbose)
+
+            start_vllm_server(env, config, verbose)
+            synthetic_data_path = run_synthetic_generation(env, config, verbose)
+            run_benchmark(env, config, synthetic_data_path, verbose)
 
     except Exception as e:
-        print(f"SSH failed: {e}")
+        print(f"Error: {e}")
 
     # Print summary
     print("\n" + "=" * 60)
     print("Instance Summary")
     print("=" * 60)
-    print(f"Pod ID: {instance['pod_id']}")
-    print(f"Name: {instance['instance_name']}")
-    print(f"SSH: ssh {instance['ssh_user']}@{instance['ssh_host']} -p {instance['ssh_port']}")
-    print(f"\nTo terminate: prime pods terminate {instance['pod_id']}")
+    print(f"Pod ID: {instance.pod_id}")
+    print(f"SSH: ssh {instance.ssh_user}@{instance.ssh_host} -p {instance.ssh_port}")
+    print(f"\nTo terminate: prime pods terminate {instance.pod_id}")
 
 
 def main():
     parser = argparse.ArgumentParser(description="BatchBench Harness - Automated GPU instance provisioning and benchmarking")
-    parser.add_argument("config", nargs="?", default="configs/harness.yaml", help="Path to config file (default: configs/harness.yaml)")
-    parser.add_argument("-v", "--verbose", action="store_true", help="Show detailed output (e.g., Docker build logs)")
+    parser.add_argument("config", nargs="?", default="configs/harness.yaml", help="Path to config file")
+    parser.add_argument("-v", "--verbose", action="store_true")
+    parser.add_argument("--resume", type=str, metavar="POD_ID", help="Resume with existing pod")
     args = parser.parse_args()
 
     if not Path(args.config).exists():
         print(f"ERROR: Config file not found: {args.config}")
         sys.exit(1)
 
-    run_harness(args.config, verbose=args.verbose)
+    run_harness(args.config, verbose=args.verbose, resume_pod_id=args.resume)
 
 
 if __name__ == "__main__":

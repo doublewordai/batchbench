@@ -1,6 +1,4 @@
 instance:
-  # Harness-level config (not passed to API)
-  name-prefix: batchbench
   docker-image: tytn/batchbench:cu126
   provision-timeout: 600
 
