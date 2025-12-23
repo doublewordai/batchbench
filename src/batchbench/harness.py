@@ -1,6 +1,5 @@
-#!/usr/bin/env python3
 """
-BatchBench Harness - Automated benchmarking orchestration via Prime Intellect.
+Automated benchmarking orchestration via Prime Intellect.
 
 This script:
 1. Provisions a GPU instance via Prime Intellect API
@@ -125,34 +124,27 @@ class SSHSession:
         _, stdout, stderr = self.client.exec_command(command, timeout=timeout)
         channel = stdout.channel
 
-        if stream:
-            # Stream both stdout and stderr in real-time
-            stdout_lines = []
-            stderr_lines = []
-            while not channel.exit_status_ready():
-                if channel.recv_ready():
-                    chunk = channel.recv(1024).decode()
-                    print(chunk, end="", flush=True)
-                    stdout_lines.append(chunk)
-                if channel.recv_stderr_ready():
-                    chunk = channel.recv_stderr(1024).decode()
-                    print(chunk, end="", flush=True)
-                    stderr_lines.append(chunk)
-                time.sleep(0.1)
-            # Get any remaining output
-            while channel.recv_ready():
-                chunk = channel.recv(1024).decode()
-                print(chunk, end="", flush=True)
-                stdout_lines.append(chunk)
-            while channel.recv_stderr_ready():
-                chunk = channel.recv_stderr(1024).decode()
-                print(chunk, end="", flush=True)
-                stderr_lines.append(chunk)
-            exit_code = channel.recv_exit_status()
-            return "".join(stdout_lines), "".join(stderr_lines), exit_code
-        else:
+        if not stream:
             exit_code = channel.recv_exit_status()
             return stdout.read().decode(), stderr.read().decode(), exit_code
+
+        stdout_chunks, stderr_chunks = [], []
+
+        def drain(is_ready, recv, chunks):
+            while is_ready():
+                chunk = recv(1024).decode()
+                print(chunk, end="", flush=True)
+                chunks.append(chunk)
+
+        while not channel.exit_status_ready():
+            drain(channel.recv_ready, channel.recv, stdout_chunks)
+            drain(channel.recv_stderr_ready, channel.recv_stderr, stderr_chunks)
+            time.sleep(0.1)
+
+        drain(channel.recv_ready, channel.recv, stdout_chunks)
+        drain(channel.recv_stderr_ready, channel.recv_stderr, stderr_chunks)
+
+        return "".join(stdout_chunks), "".join(stderr_chunks), channel.recv_exit_status()
 
     def close(self):
         self.client.close()
