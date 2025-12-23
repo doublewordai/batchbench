@@ -12,7 +12,7 @@ instance:
     #   - south_america
     # socket: PCIe
 
-  # Passed to create_pod API
+  # Passed to API via create_pod 
   create:
     image: ubuntu_22_cuda_12
     diskSize: 100
