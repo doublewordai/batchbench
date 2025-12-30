@@ -88,11 +88,15 @@ class PrimeIntellectClient:
         while time.time() - start < timeout:
             pod = self.get_pod(pod_id)
             status = pod.get("status", "").lower()
-            print(f"  Pod status: {status}")
-            if status == "active":
-                return pod
-            elif status in ("stopped", "error", "terminated"):
+            install_status = (pod.get("installationStatus") or "").lower()
+            ssh_conn = pod.get("sshConnection")
+
+            print(f"  Pod status: {status}, installation: {install_status}")
+
+            if status in ("stopped", "error", "terminated"):
                 raise RuntimeError(f"Pod entered {status} state")
+            if status == "active" and ssh_conn:
+                return pod
             time.sleep(poll_interval)
         raise TimeoutError(f"Pod not ready after {timeout}s")
 
@@ -196,12 +200,13 @@ class Instance:
             print("Check availability at: https://app.primeintellect.ai/dashboard/create-cluster")
             sys.exit(1)
 
-        # Select cheapest non-runpod GPU
-        non_runpod = [opt for opt in available if opt["provider"] != "runpod"]
-        if not non_runpod:
-            print("ERROR: No non-runpod GPUs available")
+        # Select cheapest GPU, excluding problematic providers
+        excluded_providers = {"runpod", "hyperstack"}
+        valid_gpus = [opt for opt in available if opt["provider"] not in excluded_providers]
+        if not valid_gpus:
+            print(f"ERROR: No GPUs available (excluded: {', '.join(excluded_providers)})")
             sys.exit(1)
-        selected = min(non_runpod, key=lambda x: float(x["prices"]["onDemand"]))
+        selected = min(valid_gpus, key=lambda x: float(x["prices"]["onDemand"]))
         provider = selected["provider"]
         price = selected["prices"]["onDemand"]
         print(f"Found available GPU:")
