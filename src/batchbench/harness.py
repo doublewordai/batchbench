@@ -480,8 +480,15 @@ def wait_for_vllm_ready(env: RemoteEnvironment, port: int, timeout: int) -> None
     sys.exit(1)
 
 
+def stop_vllm_server(env: RemoteEnvironment) -> None:
+    env.exec("pkill -f 'vllm serve'; sleep 2; pkill -9 -f 'vllm serve' 2>/dev/null")
+
+
 def start_vllm_server(env: RemoteEnvironment, config: dict) -> None:
     """Start vLLM server inside the container and wait for it to be ready."""
+    # Stop any existing vLLM server first
+    stop_vllm_server(env)
+
     vllm_cfg = config["vllm"]
     model = vllm_cfg["model"]
     args = vllm_cfg.get("args") or {}
