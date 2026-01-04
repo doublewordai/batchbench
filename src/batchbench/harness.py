@@ -12,7 +12,10 @@ This script:
 """
 
 import argparse
+import hashlib
+import json
 import os
+import re
 import sys
 import time
 from pathlib import Path
@@ -25,15 +28,36 @@ import yaml
 # Container name used for docker exec commands
 CONTAINER_NAME = "batchbench-run"
 
-
-# Prime Intellect API base URL
 PI_API_BASE = "https://api.primeintellect.ai/api/v1"
+
+RESULTS_DIR = Path("results")
 
 
 def load_config(config_path: str) -> dict:
     """Load YAML configuration file."""
     with open(config_path, "r") as f:
         return yaml.safe_load(f)
+
+
+def save_run_config(config: dict) -> Path:
+    """Save config to results directory, return the run directory path.
+
+    Structure: results/{model_name}/{config_hash}/config.yaml
+    """
+    # Build run directory path
+    model = config["vllm"]["model"]
+    model_dir = RESULTS_DIR / re.sub(r'[/\\]', '--', model)
+    config_hash = hashlib.sha256(
+        json.dumps(config, sort_keys=True, separators=(',', ':')).encode()
+    ).hexdigest()[:8]
+    run_dir = model_dir / config_hash
+
+    # Save config
+    run_dir.mkdir(parents=True, exist_ok=True)
+    with open(run_dir / "config.yaml", "w") as f:
+        yaml.dump(config, f, default_flow_style=False, sort_keys=False)
+
+    return run_dir
 
 
 class PrimeIntellectClient:
@@ -383,7 +407,7 @@ def run_synthetic_generation(env: RemoteEnvironment, config: dict) -> str:
     return output
 
 
-def run_benchmark(env: RemoteEnvironment, config: dict, synthetic_data_path: str) -> None:
+def run_benchmark(env: RemoteEnvironment, config: dict, synthetic_data_path: str, run_dir: Path) -> None:
     """Run the online benchmark inside the container."""
     bench_cfg = config["benchmark"]
     vllm_cfg = config["vllm"]
@@ -407,6 +431,15 @@ def run_benchmark(env: RemoteEnvironment, config: dict, synthetic_data_path: str
     if exit_code != 0:
         print(f"Benchmark failed: {stderr}")
         sys.exit(1)
+
+    remote_results = bench_cfg.get("results-csv")
+    if remote_results:
+        stdout, _, rc = env.exec(f"cat {remote_results}")
+        if rc == 0:
+            local_results = run_dir / "results.csv"
+            with open(local_results, "w") as f:
+                f.write(stdout)
+            print(f"Results saved to: {local_results}")
 
     print("\nBenchmark complete!")
 
@@ -479,6 +512,9 @@ def run_harness(config_path: str, resume_pod_id: str = None) -> None:
     config = load_config(config_path)
     ssh_key_path = Path(os.environ["PRIME_SSH_KEY_PATH"])
 
+    run_dir = save_run_config(config)
+    print(f"Run directory: {run_dir}")
+
     # Step 1: Get instance (provision new or reuse existing)
     if resume_pod_id:
         instance = Instance.from_pod_id(resume_pod_id)
@@ -496,7 +532,7 @@ def run_harness(config_path: str, resume_pod_id: str = None) -> None:
 
             start_vllm_server(env, config)
             synthetic_data_path = run_synthetic_generation(env, config)
-            run_benchmark(env, config, synthetic_data_path)
+            run_benchmark(env, config, synthetic_data_path, run_dir)
 
     except Exception as e:
         print(f"Error: {e}")
@@ -505,6 +541,7 @@ def run_harness(config_path: str, resume_pod_id: str = None) -> None:
     print("\n" + "=" * 60)
     print("Instance Summary")
     print("=" * 60)
+    print(f"Run directory: {run_dir}")
     print(f"Pod ID: {instance.pod_id}")
     print(f"SSH: ssh {instance.ssh_user}@{instance.ssh_host} -p {instance.ssh_port}")
     print(f"\nTo terminate: prime pods terminate {instance.pod_id}")
