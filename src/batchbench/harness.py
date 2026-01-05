@@ -159,7 +159,7 @@ class SSHSession:
 
         def drain(is_ready, recv, chunks):
             while is_ready():
-                chunk = recv(1024).decode()
+                chunk = recv(1024).decode(errors='replace')
                 print(chunk, end="", flush=True)
                 chunks.append(chunk)
 
