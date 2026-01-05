@@ -275,20 +275,20 @@ class RemoteEnvironment:
         _, _, rc = self.ssh.run("docker info > /dev/null 2>&1")
         self._docker_cmd = "docker" if rc == 0 else "sudo docker"
 
-    def is_ready(self) -> bool:
-        """Check if environment is fully set up."""
-        return (
-            self._is_container_running()
-            and self._is_repo_cloned()
-            and self._is_package_installed()
-        )
-
-    def _is_container_running(self) -> bool:
-        """Check if container exists and is running."""
+    def _get_container_info(self) -> tuple[bool, str | None]:
+        """Get container state: (is_running, image) or (False, None) if no container."""
         stdout, _, exit_code = self.ssh.run(
-            f"{self._docker_cmd} inspect -f '{{{{.State.Running}}}}' {CONTAINER_NAME}"
+            f"{self._docker_cmd} inspect -f '{{{{.State.Running}}}} {{{{.Config.Image}}}}' {CONTAINER_NAME}"
         )
-        return exit_code == 0 and stdout.strip() == "true"
+        if exit_code != 0:
+            return (False, None)  # Container doesn't exist
+
+        is_running, image = stdout.strip().split(" ", 1)
+        return (is_running == "true", image)
+
+    def _stop_and_remove_container(self) -> None:
+        self.ssh.run(f"{self._docker_cmd} stop {CONTAINER_NAME} 2>/dev/null")
+        self.ssh.run(f"{self._docker_cmd} rm {CONTAINER_NAME} 2>/dev/null")
 
     def _is_repo_cloned(self) -> bool:
         """Check if batchbench repo was cloned."""
@@ -301,11 +301,16 @@ class RemoteEnvironment:
         return exit_code == 0
 
     def setup(self, config: dict) -> None:
-        """Pull image, start container, clone repo, install dependencies."""
+        """Ensure container is running with correct image, repo cloned, deps installed."""
         docker_image = config["instance"]["docker-image"]
+        is_running, current_image = self._get_container_info()
 
-        # Pull and start container (skip if already running)
-        if not self._is_container_running():
+        # Ensure correct container is running
+        if not is_running or current_image != docker_image:
+            if current_image is not None:
+                print(f"\nRemoving container with image: {current_image}")
+                self._stop_and_remove_container()
+
             print(f"\nPulling Docker image {docker_image}...")
             stdout, stderr, exit_code = self.ssh.run(
                 f"{self._docker_cmd} pull {docker_image}",
@@ -534,9 +539,7 @@ def run_harness(config_path: str, resume_pod_id: str = None) -> None:
     print("\nConnecting via SSH...")
     try:
         with RemoteEnvironment(instance, ssh_key_path) as env:
-            if not env.is_ready():
-                env.setup(config)
-
+            env.setup(config)
             start_vllm_server(env, config)
             synthetic_data_path = run_synthetic_generation(env, config)
             run_benchmark(env, config, synthetic_data_path, run_dir)
