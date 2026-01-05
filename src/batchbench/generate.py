@@ -100,6 +100,7 @@ def assemble_prompts(
         unique_ids = token_ids[prefix_length:]
         final_ids = prefix_ids + unique_ids        
         prompt = tokenizer.decode(final_ids, skip_special_tokens=True, clean_up_tokenization_spaces=True)
+        prompt = re.sub(r'[\ud800-\udfff]', '', prompt)  # Remove surrogate characters
         prompts.append(prompt)
     
     return prompts, sequence_lengths
@@ -202,10 +203,10 @@ def main():
         seed=args.seed,
     )
     
-    if output_path.exists():
-        print(f"File exists: {output_path}", file=sys.stderr)
-        print(output_path)
-        return 0
+    # if output_path.exists():
+    #     print(f"File exists: {output_path}", file=sys.stderr)
+    #     print(output_path)
+    #     return 0
     
     # Write output
     with output_path.open("w", encoding="utf-8") as f:
