@@ -394,8 +394,6 @@ def build_cli_command(base: str, args: dict) -> str:
 def run_synthetic_generation(env: RemoteEnvironment, config: dict) -> str:
     """Generate synthetic data inside the container. Returns the output file path."""
     gen_cfg = config["generate"]
-    output = gen_cfg.get("output", "data/output.jsonl")
-
     generate_cmd = build_cli_command("python -m batchbench.generate", gen_cfg)
     full_cmd = (
         "source /opt/batchbench/.venv/bin/activate && "
@@ -408,8 +406,9 @@ def run_synthetic_generation(env: RemoteEnvironment, config: dict) -> str:
         print(f"Synthetic generation failed: {stderr}")
         sys.exit(1)
 
-    print("Synthetic data generation complete")
-    return output
+    output_path = stdout.strip().split("\n")[-1]
+    print(f"Synthetic data generation complete: {output_path}")
+    return output_path
 
 
 def run_benchmark(env: RemoteEnvironment, config: dict, synthetic_data_path: str, run_dir: Path) -> None:
