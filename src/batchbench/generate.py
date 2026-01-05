@@ -107,40 +107,35 @@ def assemble_prompts(
 
 
 def build_output_path(
-    base_path,
     count,
     prefix_overlap,
-    target_tokens,
     tokenizer_label,
-    dist_mode,
-    dist_median,
-    dist_sigma,
     seed,
+    dist_mode,
+    dist_median=None,
+    dist_sigma=None,
+    dist_max=None,
+    target_tokens=None,
+    tolerance=None,
 ):
-    """Generate output path with metadata."""
-    # Check if user specified an exact .jsonl filename (not a directory)
-    if base_path.suffix == ".jsonl" and not base_path.is_dir():
-        directory = base_path.parent or Path(".")
-        directory.mkdir(parents=True, exist_ok=True)
-        return base_path
-        
-    # Build metadata suffix for auto-generated filenames
-    tokens_label = (f"lognorm-med{int(dist_median)}-sig{dist_sigma:.2f}".replace(".", "p") 
-                    if dist_mode == "lognormal" 
-                    else str(target_tokens)
-    )
+    """Generate output path based on generation parameters."""
+    base_dir = Path("prompts")
+
     prefix_label = f"{prefix_overlap:.2f}".replace(".", "p")
     tokenizer_component = re.sub(r"[^0-9A-Za-z._-]+", "-", tokenizer_label).strip("-._") or "none"
-    metadata = f"count-{count}_tokens-{tokens_label}_prefix-{prefix_label}_tokenizer-{tokenizer_component}_seed-{seed}"
-    filename = f"requests_{metadata}.jsonl"
-    base_path.mkdir(parents=True, exist_ok=True)
-    return base_path / filename
+
+    tokens_label = (f"lognorm-{int(dist_median)}-{dist_sigma:.2f}-{dist_max}".replace(".", "p")
+                    if dist_mode == "lognormal" else f"fixed-{target_tokens}-{tolerance}")
+
+    metadata = f"n{count}_prefix{prefix_label}_{tokens_label}_tok-{tokenizer_component}_seed{seed}"
+    filename = f"{metadata}.jsonl"
+    base_dir.mkdir(parents=True, exist_ok=True)
+    return base_dir / filename
 
 def main():
     parser = argparse.ArgumentParser()
     parser.add_argument("--count", "-n", type=int, default=10, help="Number of requests")
     parser.add_argument("--prefix-overlap", type=float, default=0.0)
-    parser.add_argument("--output", "-o", type=Path, default=Path("outputs"), help="Output dir or file")
     parser.add_argument("--approx-input-tokens", type=int, default=0, help="Target tokens per prompt")
     parser.add_argument("--tokenizer", default="gpt2")
     parser.add_argument("--token-tolerance", type=int, default=None)
@@ -192,21 +187,17 @@ def main():
     
     # Build output path
     output_path = build_output_path(
-        args.output,
         count=args.count,
         prefix_overlap=args.prefix_overlap,
-        target_tokens=target_tokens,
         tokenizer_label=args.tokenizer,
+        seed=args.seed,
         dist_mode=args.dist_mode,
         dist_median=args.dist_median,
         dist_sigma=args.dist_sigma,
-        seed=args.seed,
+        dist_max=args.dist_max,
+        target_tokens=target_tokens,
+        tolerance=tolerance,
     )
-    
-    # if output_path.exists():
-    #     print(f"File exists: {output_path}", file=sys.stderr)
-    #     print(output_path)
-    #     return 0
     
     # Write output
     with output_path.open("w", encoding="utf-8") as f:
