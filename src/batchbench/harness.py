@@ -204,7 +204,7 @@ class Instance:
         return cls(pod_id, client, timeout=60)  # Short timeout - should already be active
 
     @classmethod
-    def provision(cls, config: dict) -> "Instance":
+    def provision(cls, config: dict, include_spot: bool = False) -> "Instance":
         """Provision a new GPU instance via Prime Intellect API."""
         instance_cfg = config["instance"]
         availability_params = instance_cfg["availability"]
@@ -224,11 +224,16 @@ class Instance:
             print("Check availability at: https://app.primeintellect.ai/dashboard/create-cluster")
             sys.exit(1)
 
-        # Select cheapest GPU, excluding problematic providers
+        # Select cheapest GPU, excluding problematic providers and optionally spot instances
         excluded_providers = {"runpod", "hyperstack"}
-        valid_gpus = [opt for opt in available if opt["provider"] not in excluded_providers]
+        valid_gpus = [
+            opt for opt in available
+            if opt["provider"] not in excluded_providers
+            and (include_spot or opt.get("isSpot") is not True)
+        ]
         if not valid_gpus:
-            print(f"ERROR: No GPUs available (excluded: {', '.join(excluded_providers)})")
+            excluded = [*excluded_providers] + ([] if include_spot else ["spot"])
+            print(f"ERROR: No GPUs available (excluded: {', '.join(excluded)})")
             sys.exit(1)
         selected = min(valid_gpus, key=lambda x: float(x["prices"]["onDemand"]))
         provider = selected["provider"]
@@ -339,7 +344,8 @@ class RemoteEnvironment:
         # Clone batchbench repo (skip if already cloned)
         if not self._is_repo_cloned():
             print("\nCloning batchbench repository...")
-            repo_url = "https://github.com/doublewordai/batchbench.git"
+            # TODO: Change back to main after surrogate fix is merged
+            repo_url = "https://github.com/doublewordai/batchbench.git -b harness"
             stdout, stderr, exit_code = self.exec(f"git clone {repo_url}", stream=True)
             if exit_code != 0:
                 print(f"Git clone failed: {stderr}")
@@ -517,7 +523,7 @@ def start_vllm_server(env: RemoteEnvironment, config: dict) -> None:
     wait_for_vllm_ready(env, port, startup_timeout)
 
 
-def run_harness(config_path: str, resume_pod_id: str = None) -> None:
+def run_harness(config_path: str, resume_pod_id: str = None, include_spot: bool = False) -> None:
     """Main harness execution."""
     print(f"Loading config from: {config_path}")
     config = load_config(config_path)
@@ -530,7 +536,7 @@ def run_harness(config_path: str, resume_pod_id: str = None) -> None:
     if resume_pod_id:
         instance = Instance.from_pod_id(resume_pod_id)
     else:
-        instance = Instance.provision(config)
+        instance = Instance.provision(config, include_spot=include_spot)
         print("Waiting for SSH to be ready...")
         time.sleep(10)
 
@@ -560,13 +566,14 @@ def main():
     parser = argparse.ArgumentParser(description="BatchBench Harness - Automated GPU instance provisioning and benchmarking")
     parser.add_argument("config", nargs="?", default="configs/harness.yaml", help="Path to config file")
     parser.add_argument("--resume", type=str, metavar="POD_ID", help="Resume with existing pod")
+    parser.add_argument("--include-spot", action="store_true", help="Include spot instances when selecting GPUs")
     args = parser.parse_args()
 
     if not Path(args.config).exists():
         print(f"ERROR: Config file not found: {args.config}")
         sys.exit(1)
 
-    run_harness(args.config, resume_pod_id=args.resume)
+    run_harness(args.config, resume_pod_id=args.resume, include_spot=args.include_spot)
 
 
 if __name__ == "__main__":
