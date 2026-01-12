@@ -145,6 +145,10 @@ struct Args {
     #[arg(long)]
     output_lognorm_mu: Option<f64>,
 
+    /// Sample output length from log-normal distribution with this median (preferred over mu)
+    #[arg(long)]
+    output_lognorm_median: Option<f64>,
+
     /// Sample output length from log-normal distribution with this sigma parameter (std dev of underlying normal)
     #[arg(long)]
     output_lognorm_sigma: Option<f64>,
@@ -209,28 +213,40 @@ async fn main() -> Result<()> {
         }
     }
 
-    // Validate lognormal parameters
-    let output_lognorm = match (args.output_lognorm_mu, args.output_lognorm_sigma) {
-        (Some(mu), Some(sigma)) => {
+    // Validate lognormal parameters (accept median -> mu conversion)
+    let output_lognorm = {
+        if args.output_tokens.is_some() && (args.output_lognorm_mu.is_some() || args.output_lognorm_median.is_some()) {
+            return Err(anyhow!("lognormal output sampling cannot be combined with --output-tokens"));
+        }
+
+        // Reject mixing mu and median simultaneously
+        if args.output_lognorm_mu.is_some() && args.output_lognorm_median.is_some() {
+            return Err(anyhow!("provide either --output-lognorm-mu or --output-lognorm-median, not both"));
+        }
+
+        // Resolve mu
+        let mu = if let Some(median) = args.output_lognorm_median {
+            if median <= 0.0 {
+                return Err(anyhow!("--output-lognorm-median must be greater than zero"));
+            }
+            median.ln()
+        } else if let Some(mu) = args.output_lognorm_mu {
+            mu
+        } else {
+            // no lognorm
+            f64::NAN
+        };
+
+        if mu.is_nan() {
+            None
+        } else if let Some(sigma) = args.output_lognorm_sigma {
             if sigma <= 0.0 {
                 return Err(anyhow!("output-lognorm-sigma must be greater than zero"));
             }
-            if args.output_tokens.is_some() {
-                return Err(anyhow!("--output-lognorm-mu/--output-lognorm-sigma cannot be used with --output-tokens"));
-            }
             Some((mu, sigma, args.output_lognorm_max))
+        } else {
+            return Err(anyhow!("--output-lognorm-sigma is required when using lognormal output"));
         }
-        (Some(_), None) => {
-            return Err(anyhow!(
-                "--output-lognorm-mu requires --output-lognorm-sigma to be set"
-            ));
-        }
-        (None, Some(_)) => {
-            return Err(anyhow!(
-                "--output-lognorm-sigma requires --output-lognorm-mu to be set"
-            ));
-        }
-        (None, None) => None,
     };
 
     let api_key = args
@@ -354,13 +370,13 @@ async fn main() -> Result<()> {
         let expected_median = mu.exp();
         if let Some(max_val) = max {
             println!(
-                "Output tokens: lognormal(μ={}, σ={}, max={}) [expected mean≈{:.0}, median≈{:.0}]",
-                mu, sigma, max_val, expected_mean, expected_median
+                "Output tokens: lognormal(median≈{:.0}, σ={}, max={}) [expected mean≈{:.0}, μ={:.3}]",
+                expected_median, sigma, max_val, expected_mean, mu
             );
         } else {
             println!(
-                "Output tokens: lognormal(μ={}, σ={}) [expected mean≈{:.0}, median≈{:.0}]",
-                mu, sigma, expected_mean, expected_median
+                "Output tokens: lognormal(median≈{:.0}, σ={}) [expected mean≈{:.0}, μ={:.3}]",
+                expected_median, sigma, expected_mean, mu
             );
         }
     }
