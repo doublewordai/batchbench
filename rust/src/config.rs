@@ -6,6 +6,13 @@ use reqwest::Url;
 use serde_json::Value;
 
 #[derive(Clone, Debug)]
+pub struct RequestEntry {
+    pub body: Value,
+    pub line_idx: usize,
+    pub input_tokens: usize,
+}
+
+#[derive(Clone, Debug)]
 pub enum RunMode {
     /// Execute a fixed number of requests per user and then stop.
     Finite { requests_per_user: usize },
@@ -18,9 +25,8 @@ pub struct BenchmarkConfig {
     pub endpoint: Url,
     pub user_count: usize,
     pub mode: RunMode,
-    pub request_body: Value,
-    pub per_user_bodies: Option<Vec<Value>>,
-    pub random_request_pool: Option<Vec<Value>>,
+    pub request_body: RequestEntry,
+    pub requests: Vec<RequestEntry>,
     pub request_timeout: Duration,
     pub max_retries: usize,
     pub retry_delay: Duration,
@@ -30,6 +36,8 @@ pub struct BenchmarkConfig {
     pub output_lognorm: Option<(f64, f64, Option<usize>)>,
     /// Optional random seed for reproducible benchmarking
     pub seed: Option<u64>,
+    /// Dry-run mode: skip HTTP and log selected request + token info
+    pub dry_run: bool,
 }
 
 impl BenchmarkConfig {
@@ -38,7 +46,7 @@ impl BenchmarkConfig {
         api_key: Option<String>,
         user_count: usize,
         mode: RunMode,
-        request_body: Value,
+        request_body: RequestEntry,
     ) -> Result<Self> {
         if user_count == 0 {
             return Err(anyhow!("user_count must be greater than zero"));
@@ -80,8 +88,7 @@ impl BenchmarkConfig {
             user_count,
             mode,
             request_body,
-            per_user_bodies: None,
-            random_request_pool: None,
+            requests: Vec::new(),
             request_timeout: Duration::from_secs(6000),
             max_retries: 2,
             retry_delay: Duration::from_millis(250),
@@ -89,6 +96,7 @@ impl BenchmarkConfig {
             verbose: false,
             output_lognorm: None,
             seed: None,
+            dry_run: false,
         })
     }
 
@@ -122,6 +130,11 @@ impl BenchmarkConfig {
         self
     }
 
+    pub fn with_dry_run(mut self, dry_run: bool) -> Self {
+        self.dry_run = dry_run;
+        self
+    }
+
     pub fn add_header(mut self, name: HeaderName, value: HeaderValue) -> Self {
         self.headers.insert(name, value);
         self
@@ -131,64 +144,15 @@ impl BenchmarkConfig {
         &mut self.headers
     }
 
-    pub fn with_per_user_bodies(mut self, bodies: Vec<Value>) -> Result<Self> {
-        if bodies.len() < self.user_count {
-            return Err(anyhow!(
-                "per-user request bodies length ({}) is less than user_count ({})",
-                bodies.len(),
-                self.user_count
-            ));
+    pub fn with_request_list(mut self, requests: Vec<RequestEntry>) -> Result<Self> {
+        if requests.is_empty() {
+            return Err(anyhow!("request list cannot be empty"));
         }
-
-        self.request_body = bodies
+        self.request_body = requests
             .first()
             .cloned()
             .unwrap_or_else(|| self.request_body.clone());
-        self.per_user_bodies = Some(bodies);
+        self.requests = requests;
         Ok(self)
-    }
-
-    pub fn with_random_request_pool(mut self, bodies: Vec<Value>) -> Result<Self> {
-        if bodies.is_empty() {
-            return Err(anyhow!("random request pool cannot be empty"));
-        }
-
-        self.request_body = bodies
-            .first()
-            .cloned()
-            .unwrap_or_else(|| self.request_body.clone());
-        self.random_request_pool = Some(bodies);
-        Ok(self)
-    }
-
-    pub fn request_body_for(&self, user_id: usize) -> Result<&Value> {
-        if let Some(bodies) = &self.per_user_bodies {
-            bodies
-                .get(user_id)
-                .ok_or_else(|| anyhow!("no request body configured for user {}", user_id))
-        } else {
-            Ok(&self.request_body)
-        }
-    }
-
-    pub fn random_request_body(&self, user_id: usize, request_id: usize) -> Result<&Value> {
-        if let Some(pool) = &self.random_request_pool {
-            use rand::{Rng, SeedableRng};
-            let idx = if let Some(seed) = self.seed {
-                // Use seeded RNG for reproducibility
-                // Mix in user_id and request_id to ensure different requests get different indices
-                let mixed_seed = seed
-                    .wrapping_add(user_id as u64)
-                    .wrapping_add((request_id as u64).wrapping_mul(65537)); // Use prime multiplier for better distribution
-                let mut rng = rand::rngs::StdRng::seed_from_u64(mixed_seed);
-                rng.gen_range(0..pool.len())
-            } else {
-                let mut rng = rand::thread_rng();
-                rng.gen_range(0..pool.len())
-            };
-            Ok(&pool[idx])
-        } else {
-            Err(anyhow!("random request pool is not configured"))
-        }
     }
 }
