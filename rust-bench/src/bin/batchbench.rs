@@ -125,8 +125,8 @@ struct Args {
     output_tokens: Option<usize>,
 
     /// Apply a +/- uniform variation when --output-tokens is provided
-    #[arg(long)]
-    output_vary: Option<usize>,
+    #[arg(long, default_value_t = 0)]
+    output_vary: usize,
 
     /// Sample output length from log-normal distribution with this mu parameter (mean of underlying normal)
     #[arg(long)]
@@ -179,16 +179,15 @@ async fn main() -> Result<()> {
         }
     }
 
-    if let Some(vary) = args.output_vary {
-        if args.output_tokens.is_none() {
+    if args.output_tokens.is_none() {
+        if args.output_vary > 0 {
             return Err(anyhow!("output-vary requires --output-tokens to be set"));
         }
-        if vary > i64::MAX as usize {
-            return Err(anyhow!(
-                "output-vary must be less than or equal to {}",
-                i64::MAX
-            ));
-        }
+    } else if args.output_vary > i64::MAX as usize {
+        return Err(anyhow!(
+            "output-vary must be less than or equal to {}",
+            i64::MAX
+        ));
     }
 
     // Validate lognormal parameters (accept median -> mu conversion)
@@ -268,7 +267,12 @@ async fn main() -> Result<()> {
     };
 
     let mut request_bodies = generate_requests(&gen_opts, &args.model)?;
-    apply_output_tokens(&mut request_bodies, args.output_tokens, args.output_vary, args.seed)?;
+    let output_vary = if args.output_tokens.is_some() {
+        Some(args.output_vary)
+    } else {
+        None
+    };
+    apply_output_tokens(&mut request_bodies, args.output_tokens, output_vary, args.seed)?;
     let dataset_label = format!("generated (count={}, tokenizer={})", total_requests, args.model);
     let dataset_size = request_bodies.len();
 
@@ -292,14 +296,11 @@ async fn main() -> Result<()> {
     println!("Requests per user: {}", requests_per_user);
     println!("Total requests: {}", total_requests);
     if let Some(tokens) = args.output_tokens {
-        if let Some(vary) = args.output_vary {
-            if vary == 0 {
-                println!("Output tokens: {} (no variation)", tokens);
-            } else {
-                println!("Output tokens: {} ±{}", tokens, vary);
-            }
+        let vary = args.output_vary;
+        if vary == 0 {
+            println!("Output tokens: {} (no variation)", tokens);
         } else {
-            println!("Output tokens: {}", tokens);
+            println!("Output tokens: {} ±{}", tokens, vary);
         }
     }
     if let Some((mu, sigma, max)) = output_lognorm {
@@ -376,7 +377,7 @@ async fn main() -> Result<()> {
             latency_p90_ms: report.latency_p90.map(|d| d.as_secs_f64() * 1000.0),
             latency_p99_ms: report.latency_p99.map(|d| d.as_secs_f64() * 1000.0),
             output_tokens: args.output_tokens,
-            output_vary: args.output_vary,
+            output_vary: if args.output_tokens.is_some() { Some(args.output_vary) } else { None },
             output_lognorm_mu: args.output_lognorm_mu,
             output_lognorm_sigma: args.output_lognorm_sigma,
             output_lognorm_max: args.output_lognorm_max,
