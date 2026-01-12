@@ -57,10 +57,6 @@ struct Args {
     #[arg(long)]
     jsonl: Option<PathBuf>,
 
-    /// Generate a dataset inline instead of reading JSONL (defaults to disabled). Set >0 to enable.
-    #[arg(long, default_value_t = 0)]
-    gen_count: usize,
-
     /// Fraction of tokens shared as prefix across generated prompts (0.0-1.0)
     #[arg(long, default_value_t = 0.0)]
     gen_prefix_overlap: f64,
@@ -247,62 +243,65 @@ async fn main() -> Result<()> {
         .api_key
         .or_else(|| std::env::var(&args.api_key_env).ok());
 
-    // Decide request source: existing JSONL or inline generation
-    let (dataset_label, mut request_bodies): (String, Vec<RequestEntry>) = match (&args.jsonl, args.gen_count) {
-        (Some(path), 0) => {
-            let bodies = load_requests_from_file(
-                path,
-                &args.model,
-                args.output_tokens,
-                args.output_vary,
-                args.seed,
-                &args.model,
-            )
-            .with_context(|| format!("failed to load requests from {}", path.display()))?;
-            if bodies.is_empty() {
-                return Err(anyhow!(
-                    "{} did not contain any valid JSON records with a `text` field",
-                    path.display()
-                ));
-            }
-            (path.to_string_lossy().into_owned(), bodies)
-        }
-        (None, count) if count > 0 => {
-            let dist_mode = parse_dist_mode(&args.gen_dist_mode)?;
-            let target_tokens = if args.gen_approx_input_tokens > 0 {
-                Some(args.gen_approx_input_tokens)
-            } else {
-                None
-            };
+    // Resolve request multiplicity up front
+    let requests_per_user = args.requests_per_user.unwrap_or(1);
+    if requests_per_user == 0 {
+        return Err(anyhow!("requests_per_user must be greater than zero"));
+    }
 
-            let gen_opts = GenerateOptions {
-                count,
-                prefix_overlap: args.gen_prefix_overlap,
-                target_tokens,
-                token_tolerance: args.gen_token_tolerance,
-                tokenizer_model: args.model.clone(),
-                dist_mode,
-                dist_median: args.gen_dist_median,
-                dist_sigma: args.gen_dist_sigma,
-                dist_max: args.gen_dist_max,
-                seed: args.seed,
-            };
-
-            let bodies = generate_requests(&gen_opts, &args.model)?;
-            let label = format!("generated (count={}, tokenizer={})", count, args.model);
-            (label, bodies)
-        }
-        (Some(_), count) if count > 0 => {
-            return Err(anyhow!("provide either --jsonl or --gen-count, not both"));
-        }
-        _ => {
+    // Decide request source: existing JSONL or inline generation sized to users * requests_per_user
+    let (dataset_label, mut request_bodies, user_count): (String, Vec<RequestEntry>, usize) = if let Some(path) = args.jsonl.as_ref() {
+        let bodies = load_requests_from_file(
+            path,
+            &args.model,
+            args.output_tokens,
+            args.output_vary,
+            args.seed,
+            &args.model,
+        )
+        .with_context(|| format!("failed to load requests from {}", path.display()))?;
+        if bodies.is_empty() {
             return Err(anyhow!(
-                "must supply either --jsonl <path> or --gen-count <n> to build requests"
+                "{} did not contain any valid JSON records with a `text` field",
+                path.display()
             ));
         }
+        let user_count = args.users.unwrap_or(bodies.len());
+        (path.to_string_lossy().into_owned(), bodies, user_count)
+    } else {
+        let user_count = args.users.unwrap_or(1);
+        if user_count == 0 {
+            return Err(anyhow!("users must be greater than zero"));
+        }
+        let total_requests = user_count
+            .checked_mul(requests_per_user)
+            .ok_or_else(|| anyhow!("users * requests_per_user overflowed"))?;
+
+        let dist_mode = parse_dist_mode(&args.gen_dist_mode)?;
+        let target_tokens = if args.gen_approx_input_tokens > 0 {
+            Some(args.gen_approx_input_tokens)
+        } else {
+            None
+        };
+
+        let gen_opts = GenerateOptions {
+            count: total_requests,
+            prefix_overlap: args.gen_prefix_overlap,
+            target_tokens,
+            token_tolerance: args.gen_token_tolerance,
+            tokenizer_model: args.model.clone(),
+            dist_mode,
+            dist_median: args.gen_dist_median,
+            dist_sigma: args.gen_dist_sigma,
+            dist_max: args.gen_dist_max,
+            seed: args.seed,
+        };
+
+        let bodies = generate_requests(&gen_opts, &args.model)?;
+        let label = format!("generated (count={}, tokenizer={})", total_requests, args.model);
+        (label, bodies, user_count)
     };
 
-    let user_count = args.users.unwrap_or(request_bodies.len());
     if user_count == 0 {
         return Err(anyhow!("users must be greater than zero"));
     }
@@ -329,10 +328,6 @@ async fn main() -> Result<()> {
 
     let endpoint = resolve_endpoint(&args.host, &args.endpoint);
     let endpoint_for_config = endpoint.clone(); // Clone for later use in config JSON
-    let requests_per_user = args.requests_per_user.unwrap_or(1);
-    if requests_per_user == 0 {
-        return Err(anyhow!("requests_per_user must be greater than zero"));
-    }
 
     // Print benchmark configuration summary
     println!("=== Benchmark Configuration ===");
