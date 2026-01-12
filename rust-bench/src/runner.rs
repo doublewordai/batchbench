@@ -182,12 +182,11 @@ async fn dispatch_request(
         };
 
         println!(
-            "[DRY-RUN] user={} request={} line={} {}body={}",
+            "[DRY-RUN] user={} request={} line={} {}",
             user_id,
             request_id,
             request_entry.line_idx + 1,
             tokens_msg,
-            serde_json::to_string(&request_body)?
         );
         return Ok(());
     }
