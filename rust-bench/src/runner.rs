@@ -138,11 +138,17 @@ async fn dispatch_request(
     event_tx: &mpsc::UnboundedSender<WorkerEvent>,
     status_tx: &mpsc::UnboundedSender<StatusEvent>,
 ) -> Result<()> {
-    let request_entry: RequestEntry = if config.random_request_pool.is_some() {
-        config.random_request_body(user_id, request_id)?.clone()
-    } else {
-        config.request_body_for(user_id)?.clone()
-    };
+    // Deterministic mapping: request m from user n uses index m * user_count + n
+    let idx = request_id
+        .checked_mul(config.user_count)
+        .and_then(|v| v.checked_add(user_id))
+        .ok_or_else(|| anyhow!("request index overflowed"))?;
+
+    let request_entry: RequestEntry = config
+        .requests
+        .get(idx)
+        .cloned()
+        .ok_or_else(|| anyhow!("no request entry for user {} request {} (index {})", user_id, request_id, idx))?;
 
     let mut request_body = request_entry.body.clone();
 

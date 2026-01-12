@@ -26,8 +26,7 @@ pub struct BenchmarkConfig {
     pub user_count: usize,
     pub mode: RunMode,
     pub request_body: RequestEntry,
-    pub per_user_bodies: Option<Vec<RequestEntry>>,
-    pub random_request_pool: Option<Vec<RequestEntry>>,
+    pub requests: Vec<RequestEntry>,
     pub request_timeout: Duration,
     pub max_retries: usize,
     pub retry_delay: Duration,
@@ -89,8 +88,7 @@ impl BenchmarkConfig {
             user_count,
             mode,
             request_body,
-            per_user_bodies: None,
-            random_request_pool: None,
+            requests: Vec::new(),
             request_timeout: Duration::from_secs(6000),
             max_retries: 2,
             retry_delay: Duration::from_millis(250),
@@ -146,64 +144,15 @@ impl BenchmarkConfig {
         &mut self.headers
     }
 
-    pub fn with_per_user_bodies(mut self, bodies: Vec<RequestEntry>) -> Result<Self> {
-        if bodies.len() < self.user_count {
-            return Err(anyhow!(
-                "per-user request bodies length ({}) is less than user_count ({})",
-                bodies.len(),
-                self.user_count
-            ));
+    pub fn with_request_list(mut self, requests: Vec<RequestEntry>) -> Result<Self> {
+        if requests.is_empty() {
+            return Err(anyhow!("request list cannot be empty"));
         }
-
-        self.request_body = bodies
+        self.request_body = requests
             .first()
             .cloned()
             .unwrap_or_else(|| self.request_body.clone());
-        self.per_user_bodies = Some(bodies);
+        self.requests = requests;
         Ok(self)
-    }
-
-    pub fn with_random_request_pool(mut self, bodies: Vec<RequestEntry>) -> Result<Self> {
-        if bodies.is_empty() {
-            return Err(anyhow!("random request pool cannot be empty"));
-        }
-
-        self.request_body = bodies
-            .first()
-            .cloned()
-            .unwrap_or_else(|| self.request_body.clone());
-        self.random_request_pool = Some(bodies);
-        Ok(self)
-    }
-
-    pub fn request_body_for(&self, user_id: usize) -> Result<&RequestEntry> {
-        if let Some(bodies) = &self.per_user_bodies {
-            bodies
-                .get(user_id)
-                .ok_or_else(|| anyhow!("no request body configured for user {}", user_id))
-        } else {
-            Ok(&self.request_body)
-        }
-    }
-
-    pub fn random_request_body(&self, user_id: usize, request_id: usize) -> Result<&RequestEntry> {
-        if let Some(pool) = &self.random_request_pool {
-            use rand::{Rng, SeedableRng};
-            let idx = if let Some(seed) = self.seed {
-                // Use seeded RNG for reproducibility
-                // Mix in user_id and request_id to ensure different requests get different indices
-                let mixed_seed = seed
-                    .wrapping_add(user_id as u64)
-                    .wrapping_add((request_id as u64).wrapping_mul(65537)); // Use prime multiplier for better distribution
-                let mut rng = rand::rngs::StdRng::seed_from_u64(mixed_seed);
-                rng.gen_range(0..pool.len())
-            } else {
-                let mut rng = rand::thread_rng();
-                rng.gen_range(0..pool.len())
-            };
-            Ok(&pool[idx])
-        } else {
-            Err(anyhow!("random request pool is not configured"))
-        }
     }
 }

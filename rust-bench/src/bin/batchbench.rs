@@ -34,7 +34,6 @@ struct CsvResult {
     latency_p50_ms: Option<f64>,
     latency_p90_ms: Option<f64>,
     latency_p99_ms: Option<f64>,
-    random_requests: bool,
     output_tokens: Option<usize>,
     output_vary: Option<usize>,
     output_lognorm_mu: Option<f64>,
@@ -158,10 +157,6 @@ struct Args {
     dry_run: bool,
 
     // Tokenizers reuse the request model; no separate flags.
-
-    /// Enable random request selection mode (users select random requests from entire dataset)
-    #[arg(long)]
-    random_requests: bool,
 
     /// Optional path to write CSV summary output
     #[arg(long)]
@@ -306,18 +301,21 @@ async fn main() -> Result<()> {
         return Err(anyhow!("users must be greater than zero"));
     }
 
-    if !args.random_requests && request_bodies.len() < user_count {
+    let total_requests = user_count
+        .checked_mul(requests_per_user)
+        .ok_or_else(|| anyhow!("users * requests_per_user overflowed"))?;
+
+    let mut dataset_size = request_bodies.len();
+    if dataset_size < total_requests {
         return Err(anyhow!(
-            "requested {} users but dataset only provided {} records (use --random-requests to select randomly from dataset)",
-            user_count,
-            request_bodies.len()
+            "dataset has {} records but {} total requests are required (users * requests_per_user)",
+            dataset_size,
+            total_requests
         ));
     }
-
-    let dataset_size = request_bodies.len();
-
-    if !args.random_requests {
-        request_bodies.truncate(user_count);
+    if dataset_size > total_requests {
+        request_bodies.truncate(total_requests);
+        dataset_size = request_bodies.len();
     }
 
     // Print input token histogram
@@ -336,16 +334,9 @@ async fn main() -> Result<()> {
     println!("Dataset: {}", dataset_label);
     println!("Dataset size: {}", dataset_size);
     println!("Users: {}", user_count);
-    if args.random_requests {
-        println!("Mode: Random request selection (each user picks randomly from dataset)");
-    } else {
-        println!(
-            "Mode: Fixed assignment (first {} dataset entries)",
-            user_count
-        );
-    }
+    println!("Mode: Deterministic mapping m*N+n into dataset");
     println!("Requests per user: {}", requests_per_user);
-    println!("Total requests: {}", user_count * requests_per_user);
+    println!("Total requests: {}", total_requests);
     if let Some(tokens) = args.output_tokens {
         if let Some(vary) = args.output_vary {
             println!("Output tokens: {} ±{}", tokens, vary);
@@ -395,11 +386,7 @@ async fn main() -> Result<()> {
         config = config.with_seed(seed);
     }
 
-    if args.random_requests {
-        config = config.with_random_request_pool(request_bodies)?;
-    } else {
-        config = config.with_per_user_bodies(request_bodies)?;
-    }
+    config = config.with_request_list(request_bodies)?;
 
     if let Some((mu, sigma, max)) = output_lognorm {
         config = config.with_output_lognorm(mu, sigma, max);
@@ -430,7 +417,6 @@ async fn main() -> Result<()> {
             latency_p50_ms: report.latency_p50.map(|d| d.as_secs_f64() * 1000.0),
             latency_p90_ms: report.latency_p90.map(|d| d.as_secs_f64() * 1000.0),
             latency_p99_ms: report.latency_p99.map(|d| d.as_secs_f64() * 1000.0),
-            random_requests: args.random_requests,
             output_tokens: args.output_tokens,
             output_vary: args.output_vary,
             output_lognorm_mu: args.output_lognorm_mu,
