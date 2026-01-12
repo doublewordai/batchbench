@@ -1,6 +1,5 @@
-use std::fs::{self, File};
-use std::io::{BufRead, BufReader};
-use std::path::{Path, PathBuf};
+use std::fs;
+use std::path::Path;
 use std::time::Duration;
 
 use anyhow::{anyhow, Context, Result};
@@ -11,7 +10,7 @@ use batchbench_rs::{
 use clap::Parser;
 use rand::{Rng, SeedableRng};
 use serde::Serialize;
-use serde_json::{json, Value};
+use serde_json::json;
 use std::cmp;
 
 #[derive(Debug, Serialize)]
@@ -52,10 +51,6 @@ struct CsvResult {
     about = "Drive batchbench-rs benchmarks from the CLI"
 )]
 struct Args {
-    /// Path to the JSONL file whose objects contain a `text` field. If omitted, a dataset is generated inline.
-    #[arg(long)]
-    jsonl: Option<PathBuf>,
-
     /// Fraction of tokens shared as prefix across generated prompts (0.0-1.0)
     #[arg(long, default_value_t = 0.0)]
     gen_prefix_overlap: f64,
@@ -84,7 +79,7 @@ struct Args {
     #[arg(long)]
     gen_dist_max: Option<usize>,
 
-    /// Number of concurrent users to spawn (defaults to the number of JSONL rows)
+    /// Number of concurrent users to spawn (default: 1)
     #[arg(long)]
     users: Option<usize>,
 
@@ -244,59 +239,8 @@ async fn main() -> Result<()> {
         return Err(anyhow!("requests_per_user must be greater than zero"));
     }
 
-    // Decide request source: existing JSONL or inline generation sized to users * requests_per_user
-    let (dataset_label, mut request_bodies, user_count): (String, Vec<RequestEntry>, usize) = if let Some(path) = args.jsonl.as_ref() {
-        let bodies = load_requests_from_file(
-            path,
-            &args.model,
-            args.output_tokens,
-            args.output_vary,
-            args.seed,
-            &args.model,
-        )
-        .with_context(|| format!("failed to load requests from {}", path.display()))?;
-        if bodies.is_empty() {
-            return Err(anyhow!(
-                "{} did not contain any valid JSON records with a `text` field",
-                path.display()
-            ));
-        }
-        let user_count = args.users.unwrap_or(bodies.len());
-        (path.to_string_lossy().into_owned(), bodies, user_count)
-    } else {
-        let user_count = args.users.unwrap_or(1);
-        if user_count == 0 {
-            return Err(anyhow!("users must be greater than zero"));
-        }
-        let total_requests = user_count
-            .checked_mul(requests_per_user)
-            .ok_or_else(|| anyhow!("users * requests_per_user overflowed"))?;
-
-        let dist_mode = parse_dist_mode(&args.gen_dist_mode)?;
-        let target_tokens = if args.gen_approx_input_tokens > 0 {
-            Some(args.gen_approx_input_tokens)
-        } else {
-            None
-        };
-
-        let gen_opts = GenerateOptions {
-            count: total_requests,
-            prefix_overlap: args.gen_prefix_overlap,
-            target_tokens,
-            token_tolerance: args.gen_token_tolerance,
-            tokenizer_model: args.model.clone(),
-            dist_mode,
-            dist_median: args.gen_dist_median,
-            dist_sigma: args.gen_dist_sigma,
-            dist_max: args.gen_dist_max,
-            seed: args.seed,
-        };
-
-        let bodies = generate_requests(&gen_opts, &args.model)?;
-        let label = format!("generated (count={}, tokenizer={})", total_requests, args.model);
-        (label, bodies, user_count)
-    };
-
+    // Always generate inline: size to users * requests_per_user
+    let user_count = args.users.unwrap_or(1);
     if user_count == 0 {
         return Err(anyhow!("users must be greater than zero"));
     }
@@ -305,18 +249,30 @@ async fn main() -> Result<()> {
         .checked_mul(requests_per_user)
         .ok_or_else(|| anyhow!("users * requests_per_user overflowed"))?;
 
-    let mut dataset_size = request_bodies.len();
-    if dataset_size < total_requests {
-        return Err(anyhow!(
-            "dataset has {} records but {} total requests are required (users * requests_per_user)",
-            dataset_size,
-            total_requests
-        ));
-    }
-    if dataset_size > total_requests {
-        request_bodies.truncate(total_requests);
-        dataset_size = request_bodies.len();
-    }
+    let dist_mode = parse_dist_mode(&args.gen_dist_mode)?;
+    let target_tokens = if args.gen_approx_input_tokens > 0 {
+        Some(args.gen_approx_input_tokens)
+    } else {
+        None
+    };
+
+    let gen_opts = GenerateOptions {
+        count: total_requests,
+        prefix_overlap: args.gen_prefix_overlap,
+        target_tokens,
+        token_tolerance: args.gen_token_tolerance,
+        tokenizer_model: args.model.clone(),
+        dist_mode,
+        dist_median: args.gen_dist_median,
+        dist_sigma: args.gen_dist_sigma,
+        dist_max: args.gen_dist_max,
+        seed: args.seed,
+    };
+
+    let mut request_bodies = generate_requests(&gen_opts, &args.model)?;
+    apply_output_tokens(&mut request_bodies, args.output_tokens, args.output_vary, args.seed)?;
+    let dataset_label = format!("generated (count={}, tokenizer={})", total_requests, args.model);
+    let dataset_size = request_bodies.len();
 
     // Print input token histogram
     let input_tokens: Vec<usize> = request_bodies.iter().map(|r| r.input_tokens).collect();
@@ -334,7 +290,7 @@ async fn main() -> Result<()> {
     println!("Dataset: {}", dataset_label);
     println!("Dataset size: {}", dataset_size);
     println!("Users: {}", user_count);
-    println!("Mode: Deterministic mapping m*N+n into dataset");
+    println!("Mode: Deterministic mapping m*N+n into generated dataset");
     println!("Requests per user: {}", requests_per_user);
     println!("Total requests: {}", total_requests);
     if let Some(tokens) = args.output_tokens {
@@ -450,166 +406,51 @@ fn parse_dist_mode(mode: &str) -> Result<DistMode> {
     }
 }
 
-fn load_requests_from_file(
-    path: &PathBuf,
-    model: &str,
+/// Apply output token settings to generated request bodies, honoring optional variation and seed.
+fn apply_output_tokens(
+    bodies: &mut [RequestEntry],
     output_tokens: Option<usize>,
     output_vary: Option<usize>,
     seed: Option<u64>,
-    tokenizer_model: &str,
-) -> Result<Vec<RequestEntry>> {
-    let file = File::open(path).with_context(|| format!("unable to open {}", path.display()))?;
-    let reader = BufReader::new(file);
-
-    // Tokenizer for counting input tokens (dry-run reporting)
-    let tokenizer: tokenizers::Tokenizer = tokenizers::Tokenizer::from_pretrained(tokenizer_model, None)
-        .map_err(|e| anyhow!("failed to load dry run tokenizer {}: {}", tokenizer_model, e))?;
-
-    let mut bodies = Vec::new();
-    for (idx, line) in reader.lines().enumerate() {
-        let line = line.with_context(|| format!("failed to read line {}", idx + 1))?;
-        let trimmed = line.trim();
-        if trimmed.is_empty() {
-            continue;
-        }
-        let value: Value = serde_json::from_str(trimmed)
-            .with_context(|| format!("line {} is not valid JSON: {}", idx + 1, trimmed))?;
-
-        // Try to parse as OpenAI Batch API format first (with "messages" field)
-        let messages = if let Some(messages_array) = value.get("messages") {
-            // OpenAI Batch API format: {"messages": [...], "model": "..."}
-            if let Some(msgs) = messages_array.as_array() {
-                // Validate and clone the messages array
-                let mut validated_msgs = Vec::new();
-                for (msg_idx, msg) in msgs.iter().enumerate() {
-                    let content = msg.get("content").and_then(|v| v.as_str()).ok_or_else(|| {
-                        anyhow!(
-                            "line {} messages[{}] missing string field `content`",
-                            idx + 1,
-                            msg_idx
-                        )
-                    })?;
-                    let role = msg.get("role").and_then(|v| v.as_str()).ok_or_else(|| {
-                        anyhow!(
-                            "line {} messages[{}] missing string field `role`",
-                            idx + 1,
-                            msg_idx
-                        )
-                    })?;
-                    validated_msgs.push(json!({
-                        "role": role,
-                        "content": content,
-                    }));
-                }
-                validated_msgs
-            } else {
-                return Err(anyhow!(
-                    "line {} field `messages` must be an array",
-                    idx + 1
-                ));
-            }
-        } else if let Some(text_field) = value.get("text") {
-            // Legacy format: {"text": "..."}
-            if let Some(text_str) = text_field.as_str() {
-                // Handle text as a string
-                vec![json!({
-                    "role": "user",
-                    "content": text_str,
-                })]
-            } else if let Some(text_array) = text_field.as_array() {
-                // Handle text as an array of maps with content and role fields
-                let mut msgs = Vec::new();
-                for (msg_idx, msg) in text_array.iter().enumerate() {
-                    let content = msg.get("content").and_then(|v| v.as_str()).ok_or_else(|| {
-                        anyhow!(
-                            "line {} text[{}] missing string field `content`",
-                            idx + 1,
-                            msg_idx
-                        )
-                    })?;
-                    let role = msg.get("role").and_then(|v| v.as_str()).ok_or_else(|| {
-                        anyhow!(
-                            "line {} text[{}] missing string field `role`",
-                            idx + 1,
-                            msg_idx
-                        )
-                    })?;
-                    msgs.push(json!({
-                        "role": role,
-                        "content": content,
-                    }));
-                }
-                msgs
-            } else {
-                return Err(anyhow!(
-                    "line {} field `text` must be either a string or an array",
-                    idx + 1
-                ));
-            }
-        } else {
-            return Err(anyhow!(
-                "line {} missing required field `messages` or `text`",
-                idx + 1
-            ));
-        };
-
-        // Use the model from the JSONL if present, otherwise use the CLI argument
-        let model_to_use = value.get("model").and_then(|v| v.as_str()).unwrap_or(model);
-
-        let mut body = json!({
-            "model": model_to_use,
-            "messages": messages,
-        });
-
-        if let Some(tokens) = output_tokens {
-            let mut final_tokens = tokens;
-            if let Some(vary) = output_vary {
-                // This randomization is per-JSONL-record (not per-dispatch). If --seed is set,
-                // it becomes deterministic based on (seed, line_index).
-                let mut rng = if let Some(seed) = seed {
-                    // Mix in line index to ensure different lines get different samples.
-                    let mixed_seed = seed
-                        .wrapping_add((idx as u64).wrapping_mul(65537)); // prime multiplier
-                    rand::rngs::StdRng::seed_from_u64(mixed_seed)
-                } else {
-                    rand::rngs::StdRng::from_rng(rand::thread_rng())
-                        .map_err(|e| anyhow!("failed to initialize rng: {}", e))?
-                };
-                let vary_i64 = vary as i64;
-                let base_i64 = tokens as i64;
-                let delta = rng.gen_range(-vary_i64..=vary_i64);
-                let adjusted = (base_i64 + delta).max(1);
-                final_tokens = adjusted as usize;
-            }
-
-            if let Some(map) = body.as_object_mut() {
-                map.insert("max_tokens".to_string(), json!(final_tokens));
-                map.insert("min_tokens".to_string(), json!(final_tokens));
-                // map.insert("max_completion_tokens".to_string(), json!(final_tokens));
-                // map.insert("nvext".to_string(), json!({ "ignore_eos": true }));
-            }
-        }
-
-        // Count tokens for the user content using tokenizer
-        let input_tokens = messages
-            .iter()
-            .filter_map(|m| m.get("content").and_then(|c| c.as_str()))
-            .map(|text| {
-                tokenizer
-                    .encode(text, false)
-                    .map(|enc| enc.len())
-                    .unwrap_or(0)
-            })
-            .sum();
-
-        bodies.push(RequestEntry {
-            body,
-            line_idx: idx,
-            input_tokens,
-        });
+) -> Result<()> {
+    if output_tokens.is_none() {
+        return Ok(());
     }
 
-    Ok(bodies)
+    let tokens = output_tokens.unwrap();
+    if tokens == 0 {
+        return Err(anyhow!("output-tokens must be greater than zero"));
+    }
+
+    for (idx, entry) in bodies.iter_mut().enumerate() {
+        let mut final_tokens = tokens;
+        if let Some(vary) = output_vary {
+            if vary == 0 {
+                return Err(anyhow!("output-vary must be greater than zero"));
+            }
+            // Deterministic per-entry variation when seed is provided
+            let mut rng = if let Some(seed) = seed {
+                let mixed_seed = seed
+                    .wrapping_add((idx as u64).wrapping_mul(65537));
+                rand::rngs::StdRng::seed_from_u64(mixed_seed)
+            } else {
+                rand::rngs::StdRng::from_rng(rand::thread_rng())
+                    .map_err(|e| anyhow!("failed to initialize rng: {}", e))?
+            };
+            let vary_i64 = vary as i64;
+            let base_i64 = tokens as i64;
+            let delta = rng.gen_range(-vary_i64..=vary_i64);
+            let adjusted = (base_i64 + delta).max(1);
+            final_tokens = adjusted as usize;
+        }
+
+        if let Some(map) = entry.body.as_object_mut() {
+            map.insert("max_tokens".to_string(), json!(final_tokens));
+            map.insert("min_tokens".to_string(), json!(final_tokens));
+        }
+    }
+
+    Ok(())
 }
 
 fn resolve_endpoint(host: &str, endpoint: &str) -> String {
