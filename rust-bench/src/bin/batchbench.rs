@@ -73,10 +73,6 @@ struct Args {
     #[arg(long)]
     gen_token_tolerance: Option<usize>,
 
-    /// Hugging Face tokenizer identifier to use for generation (default: gpt2)
-    #[arg(long, default_value = "gpt2")]
-    gen_tokenizer_model: String,
-
     /// Token length sampling mode for generation: fixed or lognormal
     #[arg(long, default_value = "fixed")]
     gen_dist_mode: String,
@@ -98,7 +94,7 @@ struct Args {
     users: Option<usize>,
 
     /// OpenAI-style model identifier to embed in each request body
-    #[arg(long, default_value = "gpt-4o-mini")]
+    #[arg(long, default_value = "Qwen/Qwen3-VL-235B-A22B-Instruct-FP8")]
     model: String,
 
     /// Host to target (e.g. https://api.openai.com)
@@ -165,9 +161,7 @@ struct Args {
     #[arg(long)]
     dry_run: bool,
 
-    /// Tokenizer to count input tokens for dry-run/reporting when loading JSONL
-    #[arg(long, default_value = "gpt2")]
-    dry_run_tokenizer_model: String,
+    // Tokenizers reuse the request model; no separate flags.
 
     /// Enable random request selection mode (users select random requests from entire dataset)
     #[arg(long)]
@@ -262,7 +256,7 @@ async fn main() -> Result<()> {
                 args.output_tokens,
                 args.output_vary,
                 args.seed,
-                &args.dry_run_tokenizer_model,
+                &args.model,
             )
             .with_context(|| format!("failed to load requests from {}", path.display()))?;
             if bodies.is_empty() {
@@ -286,7 +280,7 @@ async fn main() -> Result<()> {
                 prefix_overlap: args.gen_prefix_overlap,
                 target_tokens,
                 token_tolerance: args.gen_token_tolerance,
-                tokenizer_model: args.gen_tokenizer_model.clone(),
+                tokenizer_model: args.model.clone(),
                 dist_mode,
                 dist_median: args.gen_dist_median,
                 dist_sigma: args.gen_dist_sigma,
@@ -295,7 +289,7 @@ async fn main() -> Result<()> {
             };
 
             let bodies = generate_requests(&gen_opts, &args.model)?;
-            let label = format!("generated (count={}, tokenizer={})", count, args.gen_tokenizer_model);
+            let label = format!("generated (count={}, tokenizer={})", count, args.model);
             (label, bodies)
         }
         (Some(_), count) if count > 0 => {
@@ -481,14 +475,14 @@ fn load_requests_from_file(
     output_tokens: Option<usize>,
     output_vary: Option<usize>,
     seed: Option<u64>,
-    dry_run_tokenizer_model: &str,
+    tokenizer_model: &str,
 ) -> Result<Vec<RequestEntry>> {
     let file = File::open(path).with_context(|| format!("unable to open {}", path.display()))?;
     let reader = BufReader::new(file);
 
     // Tokenizer for counting input tokens (dry-run reporting)
-    let tokenizer = tokenizers::Tokenizer::from_pretrained(dry_run_tokenizer_model, None)
-        .map_err(|e| anyhow!("failed to load tokenizer {}: {}", dry_run_tokenizer_model, e))?;
+    let tokenizer: tokenizers::Tokenizer = tokenizers::Tokenizer::from_pretrained(tokenizer_model, None)
+        .map_err(|e| anyhow!("failed to load dry run tokenizer {}: {}", tokenizer_model, e))?;
 
     let mut bodies = Vec::new();
     for (idx, line) in reader.lines().enumerate() {

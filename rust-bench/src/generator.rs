@@ -47,7 +47,7 @@ pub fn generate_requests(opts: &GenerateOptions, model: &str) -> Result<Vec<Requ
         None => StdRng::from_rng(rand::thread_rng())
             .context("failed to initialize rng from thread_rng")?,
     };
-
+    
     let tokenizer = Tokenizer::from_pretrained(&opts.tokenizer_model, None)
         .map_err(|e| anyhow!("failed to load tokenizer {}: {}", opts.tokenizer_model, e))?;
 
