@@ -12,7 +12,7 @@ use tokio::fs;
 use tokio::sync::mpsc;
 use tokio::task::JoinSet;
 
-use crate::config::{BenchmarkConfig, RunMode};
+use crate::config::{BenchmarkConfig, RequestEntry, RunMode};
 use crate::report::{BenchmarkReport, FailureRecord};
 
 pub async fn run_benchmark(config: BenchmarkConfig) -> Result<BenchmarkReport> {
@@ -123,13 +123,16 @@ async fn dispatch_request(
     event_tx: &mpsc::UnboundedSender<WorkerEvent>,
     status_tx: &mpsc::UnboundedSender<StatusEvent>,
 ) -> Result<()> {
-    let mut request_body = if config.random_request_pool.is_some() {
+    let request_entry: RequestEntry = if config.random_request_pool.is_some() {
         config.random_request_body(user_id, request_id)?.clone()
     } else {
         config.request_body_for(user_id)?.clone()
     };
 
+    let mut request_body = request_entry.body.clone();
+
     // If lognormal output sampling is configured, sample and inject tokens
+    let mut lognorm_tokens: Option<usize> = None;
     if let Some((mu, sigma, max)) = config.output_lognorm {
         use rand_distr::{Distribution, LogNormal};
         use rand::SeedableRng;
@@ -160,7 +163,33 @@ async fn dispatch_request(
         if let Some(map) = request_body.as_object_mut() {
             map.insert("max_tokens".to_string(), serde_json::json!(tokens));
             map.insert("min_tokens".to_string(), serde_json::json!(tokens));
+            lognorm_tokens = Some(tokens);
         }
+    }
+
+    if config.dry_run {
+        // Prefer the most recent token setting in the body (max_tokens/min_tokens)
+        let token_field = request_body
+            .get("max_tokens")
+            .or_else(|| request_body.get("min_tokens"))
+            .and_then(|v| v.as_u64())
+            .map(|v| v as usize)
+            .or(lognorm_tokens);
+
+        let tokens_msg = match token_field {
+            Some(t) => format!("tokens={} ", t),
+            None => "tokens=(not set) ".to_string(),
+        };
+
+        println!(
+            "[DRY-RUN] user={} request={} line={} {}body={}",
+            user_id,
+            request_id,
+            request_entry.line_idx + 1,
+            tokens_msg,
+            serde_json::to_string(&request_body)?
+        );
+        return Ok(());
     }
 
     match single_attempt(client, config, &request_body).await {

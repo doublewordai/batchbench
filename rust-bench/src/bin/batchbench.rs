@@ -4,7 +4,7 @@ use std::path::{Path, PathBuf};
 use std::time::Duration;
 
 use anyhow::{anyhow, Context, Result};
-use batchbench_rs::{run_benchmark, BenchmarkConfig, BenchmarkReport, RunMode};
+use batchbench_rs::{run_benchmark, BenchmarkConfig, BenchmarkReport, RequestEntry, RunMode};
 use clap::Parser;
 use rand::{Rng, SeedableRng};
 use serde::Serialize;
@@ -116,6 +116,10 @@ struct Args {
     /// Enable verbose mode to print request/response details
     #[arg(long, short)]
     verbose: bool,
+
+    /// Dry run (do not send HTTP requests; log request selection and token settings)
+    #[arg(long)]
+    dry_run: bool,
 
     /// Enable random request selection mode (users select random requests from entire dataset)
     #[arg(long)]
@@ -290,7 +294,8 @@ async fn main() -> Result<()> {
     )?
     .with_request_timeout(Duration::from_secs(args.request_timeout_secs))
     .with_retry(args.max_retries, Duration::from_millis(args.retry_delay_ms))
-    .with_verbose(args.verbose);
+    .with_verbose(args.verbose)
+    .with_dry_run(args.dry_run);
 
     if let Some(seed) = args.seed {
         config = config.with_seed(seed);
@@ -363,7 +368,7 @@ fn load_requests(
     output_tokens: Option<usize>,
     output_vary: Option<usize>,
     seed: Option<u64>,
-) -> Result<Vec<Value>> {
+) -> Result<Vec<RequestEntry>> {
     let file = File::open(path).with_context(|| format!("unable to open {}", path.display()))?;
     let reader = BufReader::new(file);
 
@@ -492,7 +497,7 @@ fn load_requests(
             }
         }
 
-        bodies.push(body);
+        bodies.push(RequestEntry { body, line_idx: idx });
     }
 
     Ok(bodies)

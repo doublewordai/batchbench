@@ -6,6 +6,12 @@ use reqwest::Url;
 use serde_json::Value;
 
 #[derive(Clone, Debug)]
+pub struct RequestEntry {
+    pub body: Value,
+    pub line_idx: usize,
+}
+
+#[derive(Clone, Debug)]
 pub enum RunMode {
     /// Execute a fixed number of requests per user and then stop.
     Finite { requests_per_user: usize },
@@ -18,9 +24,9 @@ pub struct BenchmarkConfig {
     pub endpoint: Url,
     pub user_count: usize,
     pub mode: RunMode,
-    pub request_body: Value,
-    pub per_user_bodies: Option<Vec<Value>>,
-    pub random_request_pool: Option<Vec<Value>>,
+    pub request_body: RequestEntry,
+    pub per_user_bodies: Option<Vec<RequestEntry>>,
+    pub random_request_pool: Option<Vec<RequestEntry>>,
     pub request_timeout: Duration,
     pub max_retries: usize,
     pub retry_delay: Duration,
@@ -30,6 +36,8 @@ pub struct BenchmarkConfig {
     pub output_lognorm: Option<(f64, f64, Option<usize>)>,
     /// Optional random seed for reproducible benchmarking
     pub seed: Option<u64>,
+    /// Dry-run mode: skip HTTP and log selected request + token info
+    pub dry_run: bool,
 }
 
 impl BenchmarkConfig {
@@ -38,7 +46,7 @@ impl BenchmarkConfig {
         api_key: Option<String>,
         user_count: usize,
         mode: RunMode,
-        request_body: Value,
+        request_body: RequestEntry,
     ) -> Result<Self> {
         if user_count == 0 {
             return Err(anyhow!("user_count must be greater than zero"));
@@ -89,6 +97,7 @@ impl BenchmarkConfig {
             verbose: false,
             output_lognorm: None,
             seed: None,
+            dry_run: false,
         })
     }
 
@@ -122,6 +131,11 @@ impl BenchmarkConfig {
         self
     }
 
+    pub fn with_dry_run(mut self, dry_run: bool) -> Self {
+        self.dry_run = dry_run;
+        self
+    }
+
     pub fn add_header(mut self, name: HeaderName, value: HeaderValue) -> Self {
         self.headers.insert(name, value);
         self
@@ -131,7 +145,7 @@ impl BenchmarkConfig {
         &mut self.headers
     }
 
-    pub fn with_per_user_bodies(mut self, bodies: Vec<Value>) -> Result<Self> {
+    pub fn with_per_user_bodies(mut self, bodies: Vec<RequestEntry>) -> Result<Self> {
         if bodies.len() < self.user_count {
             return Err(anyhow!(
                 "per-user request bodies length ({}) is less than user_count ({})",
@@ -148,7 +162,7 @@ impl BenchmarkConfig {
         Ok(self)
     }
 
-    pub fn with_random_request_pool(mut self, bodies: Vec<Value>) -> Result<Self> {
+    pub fn with_random_request_pool(mut self, bodies: Vec<RequestEntry>) -> Result<Self> {
         if bodies.is_empty() {
             return Err(anyhow!("random request pool cannot be empty"));
         }
@@ -161,7 +175,7 @@ impl BenchmarkConfig {
         Ok(self)
     }
 
-    pub fn request_body_for(&self, user_id: usize) -> Result<&Value> {
+    pub fn request_body_for(&self, user_id: usize) -> Result<&RequestEntry> {
         if let Some(bodies) = &self.per_user_bodies {
             bodies
                 .get(user_id)
@@ -171,7 +185,7 @@ impl BenchmarkConfig {
         }
     }
 
-    pub fn random_request_body(&self, user_id: usize, request_id: usize) -> Result<&Value> {
+    pub fn random_request_body(&self, user_id: usize, request_id: usize) -> Result<&RequestEntry> {
         if let Some(pool) = &self.random_request_pool {
             use rand::{Rng, SeedableRng};
             let idx = if let Some(seed) = self.seed {
