@@ -15,6 +15,14 @@ use tokio::task::JoinSet;
 use crate::config::{BenchmarkConfig, RequestEntry, RunMode};
 use crate::report::{BenchmarkReport, FailureRecord};
 
+#[derive(Debug, Clone)]
+struct DryRunRecord {
+    user_id: usize,
+    request_id: usize,
+    line_idx: usize,
+    tokens: Option<usize>,
+}
+
 pub async fn run_benchmark(config: BenchmarkConfig) -> Result<BenchmarkReport> {
     let start = Instant::now();
     let client = Client::builder()
@@ -62,7 +70,13 @@ pub async fn run_benchmark(config: BenchmarkConfig) -> Result<BenchmarkReport> {
         .await
         .map_err(|err| anyhow!("status tracker task failed: {}", err))?;
 
-    Ok(aggregator.finalize(total_duration))
+    let (report, dry_run_events) = aggregator.finalize(total_duration);
+
+    if config.dry_run && !dry_run_events.is_empty() {
+        print_sorted_dry_run_events(&dry_run_events);
+    }
+
+    Ok(report)
 }
 
 async fn collect_metrics(
@@ -176,18 +190,15 @@ async fn dispatch_request(
             .map(|v| v as usize)
             .or(lognorm_tokens);
 
-        let tokens_msg = match token_field {
-            Some(t) => format!("tokens={} ", t),
-            None => "tokens=(not set) ".to_string(),
-        };
+        event_tx
+            .send(WorkerEvent::DryRun {
+                user_id,
+                request_id,
+                line_idx: request_entry.line_idx,
+                tokens: token_field,
+            })
+            .map_err(|_| anyhow!("metrics channel closed before dry-run event"))?;
 
-        println!(
-            "[DRY-RUN] user={} request={} line={} {}",
-            user_id,
-            request_id,
-            request_entry.line_idx + 1,
-            tokens_msg,
-        );
         return Ok(());
     }
 
@@ -382,6 +393,7 @@ struct MetricsAggregator {
     failures: Vec<FailureRecord>,
     latencies: Vec<Duration>,
     planned_total_requests: Option<u64>,
+    dry_run_events: Vec<DryRunRecord>,
 }
 
 impl MetricsAggregator {
@@ -394,6 +406,7 @@ impl MetricsAggregator {
             failures: Vec::new(),
             latencies: Vec::new(),
             planned_total_requests,
+            dry_run_events: Vec::new(),
         }
     }
 
@@ -414,11 +427,24 @@ impl MetricsAggregator {
                 self.failed_requests += 1;
                 self.failures.push(FailureRecord { user_id, error });
             }
+            WorkerEvent::DryRun {
+                user_id,
+                request_id,
+                line_idx,
+                tokens,
+            } => {
+                self.dry_run_events.push(DryRunRecord {
+                    user_id,
+                    request_id,
+                    line_idx,
+                    tokens,
+                });
+            }
         }
         Ok(())
     }
 
-    fn finalize(self, total_duration: Duration) -> BenchmarkReport {
+    fn finalize(self, total_duration: Duration) -> (BenchmarkReport, Vec<DryRunRecord>) {
         let total_requests = self.successful_requests + self.failed_requests;
         let duration_secs = total_duration.as_secs_f64();
         let prompt_tokens_per_second = if duration_secs > 0.0 {
@@ -443,7 +469,7 @@ impl MetricsAggregator {
         let latency_p90 = percentile(&latencies, 0.90);
         let latency_p99 = percentile(&latencies, 0.99);
 
-        BenchmarkReport {
+        let report = BenchmarkReport {
             total_requests,
             successful_requests: self.successful_requests,
             failed_requests: self.failed_requests,
@@ -457,7 +483,9 @@ impl MetricsAggregator {
             latency_p90,
             latency_p99,
             failures: self.failures,
-        }
+        };
+
+        (report, self.dry_run_events)
     }
 }
 
@@ -579,4 +607,38 @@ enum WorkerEvent {
         user_id: usize,
         error: String,
     },
+    DryRun {
+        user_id: usize,
+        request_id: usize,
+        line_idx: usize,
+        tokens: Option<usize>,
+    },
+}
+
+fn print_sorted_dry_run_events(events: &[DryRunRecord]) {
+    let mut sorted = events.to_vec();
+    sorted.sort_by(|a, b| {
+        a.user_id
+            .cmp(&b.user_id)
+            .then_with(|| a.request_id.cmp(&b.request_id))
+            .then_with(|| a.line_idx.cmp(&b.line_idx))
+    });
+
+    for ev in sorted {
+        match ev.tokens {
+            Some(t) => println!(
+                "[DRY-RUN] user={} request={} line={} tokens={}",
+                ev.user_id,
+                ev.request_id,
+                ev.line_idx + 1,
+                t
+            ),
+            None => println!(
+                "[DRY-RUN] user={} request={} line={} tokens=(not set)",
+                ev.user_id,
+                ev.request_id,
+                ev.line_idx + 1
+            ),
+        }
+    }
 }
