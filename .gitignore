@@ -18,4 +18,4 @@ dist/
 src/batchbench.egg-info/
 *.png
 pricing/
-examples/
+examples/*
