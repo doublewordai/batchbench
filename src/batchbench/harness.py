@@ -231,6 +231,11 @@ class Instance:
             if opt["provider"] not in excluded_providers
             and (include_spot or opt.get("isSpot") is not True)
         ]
+        for gpu in valid_gpus:
+            for k,v in gpu.items():
+                print(k,v)
+            # print(gpu)
+            sys.exit()
         if not valid_gpus:
             excluded = [*excluded_providers] + ([] if include_spot else ["spot"])
             print(f"ERROR: No GPUs available (excluded: {', '.join(excluded)})")
@@ -523,7 +528,7 @@ def start_vllm_server(env: RemoteEnvironment, config: dict) -> None:
     wait_for_vllm_ready(env, port, startup_timeout)
 
 
-def run_harness(config_path: str, resume_pod_id: str = None, include_spot: bool = False) -> None:
+def run_harness(config_path: str, resume_pod_id: str = None, include_spot: bool = False, save_server_logs: bool = False) -> None:
     """Main harness execution."""
     print(f"Loading config from: {config_path}")
     config = load_config(config_path)
@@ -548,6 +553,8 @@ def run_harness(config_path: str, resume_pod_id: str = None, include_spot: bool 
             start_vllm_server(env, config)
             synthetic_data_path = run_synthetic_generation(env, config)
             run_benchmark(env, config, synthetic_data_path, run_dir)
+            if save_server_logs:
+                fetch_server_logs(env, run_dir)
 
     except Exception as e:
         print(f"Error: {e}")
@@ -562,18 +569,32 @@ def run_harness(config_path: str, resume_pod_id: str = None, include_spot: bool 
     print(f"\nTo terminate: prime pods terminate {instance.pod_id}")
 
 
+def fetch_server_logs(env: RemoteEnvironment, run_dir: Path) -> None:
+    """Save vLLM server logs from container to local run directory."""
+    print("\nSaving vLLM server logs...")
+    stdout, _, rc = env.exec("cat /tmp/vllm.log")
+    if rc == 0:
+        local_log_path = run_dir / "vllm.log"
+        with open(local_log_path, "w") as f:
+            f.write(stdout)
+        print(f"Server logs saved to: {local_log_path}")
+    else:
+        print("Warning: Could not retrieve vLLM server logs")
+
+
 def main():
     parser = argparse.ArgumentParser(description="BatchBench Harness - Automated GPU instance provisioning and benchmarking")
     parser.add_argument("config", nargs="?", default="configs/harness.yaml", help="Path to config file")
     parser.add_argument("--resume", type=str, metavar="POD_ID", help="Resume with existing pod")
     parser.add_argument("--include-spot", action="store_true", help="Include spot instances when selecting GPUs")
+    parser.add_argument("--save-server-logs", action="store_true", help="Save vLLM server logs to run directory")
     args = parser.parse_args()
 
     if not Path(args.config).exists():
         print(f"ERROR: Config file not found: {args.config}")
         sys.exit(1)
 
-    run_harness(args.config, resume_pod_id=args.resume, include_spot=args.include_spot)
+    run_harness(args.config, resume_pod_id=args.resume, include_spot=args.include_spot, save_server_logs=args.save_server_logs)
 
 
 if __name__ == "__main__":
