@@ -6,7 +6,7 @@ use std::time::Duration;
 use anyhow::{anyhow, Context, Result};
 use batchbench_rs::{run_benchmark, BenchmarkConfig, BenchmarkReport, RunMode};
 use clap::Parser;
-use rand::Rng;
+use rand::{Rng, SeedableRng};
 use serde::Serialize;
 use serde_json::{json, Value};
 
@@ -194,6 +194,7 @@ async fn main() -> Result<()> {
         &args.model,
         args.output_tokens,
         args.output_vary,
+        args.seed,
     )
     .with_context(|| format!("failed to load requests from {}", args.jsonl.display()))?;
 
@@ -361,6 +362,7 @@ fn load_requests(
     model: &str,
     output_tokens: Option<usize>,
     output_vary: Option<usize>,
+    seed: Option<u64>,
 ) -> Result<Vec<Value>> {
     let file = File::open(path).with_context(|| format!("unable to open {}", path.display()))?;
     let reader = BufReader::new(file);
@@ -464,9 +466,17 @@ fn load_requests(
         if let Some(tokens) = output_tokens {
             let mut final_tokens = tokens;
             if let Some(vary) = output_vary {
-                // Note: We use thread_rng here as this is per-request randomization
-                // The seed parameter controls request selection and lognormal sampling
-                let mut rng = rand::thread_rng();
+                // This randomization is per-JSONL-record (not per-dispatch). If --seed is set,
+                // it becomes deterministic based on (seed, line_index).
+                let mut rng = if let Some(seed) = seed {
+                    // Mix in line index to ensure different lines get different samples.
+                    let mixed_seed = seed
+                        .wrapping_add((idx as u64).wrapping_mul(65537)); // prime multiplier
+                    rand::rngs::StdRng::seed_from_u64(mixed_seed)
+                } else {
+                    rand::rngs::StdRng::from_rng(rand::thread_rng())
+                        .map_err(|e| anyhow!("failed to initialize rng: {}", e))?
+                };
                 let vary_i64 = vary as i64;
                 let base_i64 = tokens as i64;
                 let delta = rng.gen_range(-vary_i64..=vary_i64);
