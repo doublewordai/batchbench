@@ -12,6 +12,7 @@ use clap::Parser;
 use rand::{Rng, SeedableRng};
 use serde::Serialize;
 use serde_json::{json, Value};
+use std::cmp;
 
 #[derive(Debug, Serialize)]
 struct CsvResult {
@@ -160,6 +161,10 @@ struct Args {
     #[arg(long)]
     dry_run: bool,
 
+    /// Tokenizer to count input tokens for dry-run/reporting when loading JSONL
+    #[arg(long, default_value = "gpt2")]
+    dry_run_tokenizer_model: String,
+
     /// Enable random request selection mode (users select random requests from entire dataset)
     #[arg(long)]
     random_requests: bool,
@@ -241,6 +246,7 @@ async fn main() -> Result<()> {
                 args.output_tokens,
                 args.output_vary,
                 args.seed,
+                &args.dry_run_tokenizer_model,
             )
             .with_context(|| format!("failed to load requests from {}", path.display()))?;
             if bodies.is_empty() {
@@ -303,6 +309,12 @@ async fn main() -> Result<()> {
 
     if !args.random_requests {
         request_bodies.truncate(user_count);
+    }
+
+    // Print input token histogram
+    let input_tokens: Vec<usize> = request_bodies.iter().map(|r| r.input_tokens).collect();
+    if !input_tokens.is_empty() {
+        print_histogram("Input tokens", &input_tokens, 20, 50);
     }
 
     let endpoint = resolve_endpoint(&args.host, &args.endpoint);
@@ -453,9 +465,14 @@ fn load_requests_from_file(
     output_tokens: Option<usize>,
     output_vary: Option<usize>,
     seed: Option<u64>,
+    dry_run_tokenizer_model: &str,
 ) -> Result<Vec<RequestEntry>> {
     let file = File::open(path).with_context(|| format!("unable to open {}", path.display()))?;
     let reader = BufReader::new(file);
+
+    // Tokenizer for counting input tokens (dry-run reporting)
+    let tokenizer = tokenizers::Tokenizer::from_pretrained(dry_run_tokenizer_model, None)
+        .map_err(|e| anyhow!("failed to load tokenizer {}: {}", dry_run_tokenizer_model, e))?;
 
     let mut bodies = Vec::new();
     for (idx, line) in reader.lines().enumerate() {
@@ -582,7 +599,23 @@ fn load_requests_from_file(
             }
         }
 
-        bodies.push(RequestEntry { body, line_idx: idx });
+        // Count tokens for the user content using tokenizer
+        let input_tokens = messages
+            .iter()
+            .filter_map(|m| m.get("content").and_then(|c| c.as_str()))
+            .map(|text| {
+                tokenizer
+                    .encode(text, false)
+                    .map(|enc| enc.len())
+                    .unwrap_or(0)
+            })
+            .sum();
+
+        bodies.push(RequestEntry {
+            body,
+            line_idx: idx,
+            input_tokens,
+        });
     }
 
     Ok(bodies)
@@ -654,6 +687,43 @@ fn write_results_csv(path: &Path, record: &CsvResult) -> Result<()> {
         .flush()
         .with_context(|| format!("failed to flush {}", path.display()))?;
     Ok(())
+}
+
+fn print_histogram(label: &str, data: &[usize], bins: usize, bar_width: usize) {
+    if data.is_empty() || bins == 0 {
+        return;
+    }
+    let min = *data.iter().min().unwrap_or(&0);
+    let max = *data.iter().max().unwrap_or(&0);
+    let mean: f64 = data.iter().map(|&v| v as f64).sum::<f64>() / data.len() as f64;
+    let mut sorted = data.to_vec();
+    sorted.sort_unstable();
+    let median = sorted[sorted.len() / 2];
+    let p95 = sorted[((sorted.len() as f64 * 0.95).round() as usize).min(sorted.len() - 1)];
+    let p99 = sorted[((sorted.len() as f64 * 0.99).round() as usize).min(sorted.len() - 1)];
+
+    let span = if max > min { max - min } else { 1 };
+    let bin_width = cmp::max(1, (span as f64 / bins as f64).ceil() as usize);
+    let mut counts = vec![0usize; bins];
+    for &v in data {
+        let idx = cmp::min((v - min) / bin_width, bins - 1);
+        counts[idx] += 1;
+    }
+    let max_count = *counts.iter().max().unwrap_or(&1);
+
+    eprintln!("\n== {} (n={}) ==", label, data.len());
+    eprintln!("min={} mean={:.1} median={} p95={} p99={} max={}", min, mean, median, p95, p99, max);
+    for (i, count) in counts.iter().enumerate() {
+        let start = min + i * bin_width;
+        let end = start + bin_width;
+        let bar_len = if max_count > 0 {
+            ((count * bar_width) as f64 / max_count as f64).round() as usize
+        } else {
+            0
+        };
+        let bar = "#".repeat(bar_len);
+        eprintln!("{:>6}-{:>6} | {:<bar_width$} {}", start, end, bar, count, bar_width = bar_width);
+    }
 }
 
 fn format_latency(latency: Option<Duration>) -> String {

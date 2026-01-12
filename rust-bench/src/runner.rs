@@ -14,12 +14,13 @@ use tokio::task::JoinSet;
 
 use crate::config::{BenchmarkConfig, RequestEntry, RunMode};
 use crate::report::{BenchmarkReport, FailureRecord};
+use std::cmp;
 
 #[derive(Debug, Clone)]
 struct DryRunRecord {
     user_id: usize,
     request_id: usize,
-    line_idx: usize,
+    input_tokens: usize,
     tokens: Option<usize>,
 }
 
@@ -194,7 +195,7 @@ async fn dispatch_request(
             .send(WorkerEvent::DryRun {
                 user_id,
                 request_id,
-                line_idx: request_entry.line_idx,
+                input_tokens: request_entry.input_tokens,
                 tokens: token_field,
             })
             .map_err(|_| anyhow!("metrics channel closed before dry-run event"))?;
@@ -430,13 +431,13 @@ impl MetricsAggregator {
             WorkerEvent::DryRun {
                 user_id,
                 request_id,
-                line_idx,
+                input_tokens,
                 tokens,
             } => {
                 self.dry_run_events.push(DryRunRecord {
                     user_id,
                     request_id,
-                    line_idx,
+                    input_tokens,
                     tokens,
                 });
             }
@@ -610,7 +611,7 @@ enum WorkerEvent {
     DryRun {
         user_id: usize,
         request_id: usize,
-        line_idx: usize,
+        input_tokens: usize,
         tokens: Option<usize>,
     },
 }
@@ -621,24 +622,69 @@ fn print_sorted_dry_run_events(events: &[DryRunRecord]) {
         a.user_id
             .cmp(&b.user_id)
             .then_with(|| a.request_id.cmp(&b.request_id))
-            .then_with(|| a.line_idx.cmp(&b.line_idx))
     });
+
+    // Output token histogram (only if tokens present)
+    let output_tokens: Vec<usize> = sorted
+        .iter()
+        .filter_map(|ev| ev.tokens)
+        .collect();
+    if !output_tokens.is_empty() {
+        print_histogram("Output tokens (dry-run)", &output_tokens, 20, 50);
+    }
 
     for ev in sorted {
         match ev.tokens {
             Some(t) => println!(
-                "[DRY-RUN] user={} request={} line={} tokens={}",
+                "[DRY-RUN] user={} request={} input_tokens={} tokens={}",
                 ev.user_id,
                 ev.request_id,
-                ev.line_idx + 1,
+                ev.input_tokens,
                 t
             ),
             None => println!(
-                "[DRY-RUN] user={} request={} line={} tokens=(not set)",
+                "[DRY-RUN] user={} request={} input_tokens={} tokens=(not set)",
                 ev.user_id,
                 ev.request_id,
-                ev.line_idx + 1
+                ev.input_tokens
             ),
         }
+    }
+}
+
+fn print_histogram(label: &str, data: &[usize], bins: usize, bar_width: usize) {
+    if data.is_empty() || bins == 0 {
+        return;
+    }
+    let min = *data.iter().min().unwrap_or(&0);
+    let max = *data.iter().max().unwrap_or(&0);
+    let mean: f64 = data.iter().map(|&v| v as f64).sum::<f64>() / data.len() as f64;
+    let mut sorted = data.to_vec();
+    sorted.sort_unstable();
+    let median = sorted[sorted.len() / 2];
+    let p95 = sorted[((sorted.len() as f64 * 0.95).round() as usize).min(sorted.len() - 1)];
+    let p99 = sorted[((sorted.len() as f64 * 0.99).round() as usize).min(sorted.len() - 1)];
+
+    let span = if max > min { max - min } else { 1 };
+    let bin_width = cmp::max(1, (span as f64 / bins as f64).ceil() as usize);
+    let mut counts = vec![0usize; bins];
+    for &v in data {
+        let idx = cmp::min((v - min) / bin_width, bins - 1);
+        counts[idx] += 1;
+    }
+    let max_count = *counts.iter().max().unwrap_or(&1);
+
+    eprintln!("\n== {} (n={}) ==", label, data.len());
+    eprintln!("min={} mean={:.1} median={} p95={} p99={} max={}", min, mean, median, p95, p99, max);
+    for (i, count) in counts.iter().enumerate() {
+        let start = min + i * bin_width;
+        let end = start + bin_width;
+        let bar_len = if max_count > 0 {
+            ((count * bar_width) as f64 / max_count as f64).round() as usize
+        } else {
+            0
+        };
+        let bar = "#".repeat(bar_len);
+        eprintln!("{:>6}-{:>6} | {:<bar_width$} {}", start, end, bar, count, bar_width = bar_width);
     }
 }

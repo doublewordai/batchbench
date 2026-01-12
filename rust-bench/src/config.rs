@@ -9,6 +9,7 @@ use serde_json::Value;
 pub struct RequestEntry {
     pub body: Value,
     pub line_idx: usize,
+    pub input_tokens: usize,
 }
 
 #[derive(Clone, Debug)]

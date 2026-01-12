@@ -156,6 +156,7 @@ pub fn generate_requests(opts: &GenerateOptions, model: &str) -> Result<Vec<Requ
         requests.push(RequestEntry {
             body,
             line_idx: idx,
+            input_tokens: seq_len,
         });
     }
 
