@@ -4,7 +4,10 @@ use std::path::{Path, PathBuf};
 use std::time::Duration;
 
 use anyhow::{anyhow, Context, Result};
-use batchbench_rs::{run_benchmark, BenchmarkConfig, BenchmarkReport, RequestEntry, RunMode};
+use batchbench_rs::{
+    generate_requests, GenerateOptions, RunMode, BenchmarkConfig, BenchmarkReport, RequestEntry,
+    DistMode, run_benchmark,
+};
 use clap::Parser;
 use rand::{Rng, SeedableRng};
 use serde::Serialize;
@@ -49,9 +52,45 @@ struct CsvResult {
     about = "Drive batchbench-rs benchmarks from the CLI"
 )]
 struct Args {
-    /// Path to the JSONL file whose objects contain a `text` field
+    /// Path to the JSONL file whose objects contain a `text` field. If omitted, a dataset is generated inline.
     #[arg(long)]
-    jsonl: PathBuf,
+    jsonl: Option<PathBuf>,
+
+    /// Generate a dataset inline instead of reading JSONL (defaults to disabled). Set >0 to enable.
+    #[arg(long, default_value_t = 0)]
+    gen_count: usize,
+
+    /// Fraction of tokens shared as prefix across generated prompts (0.0-1.0)
+    #[arg(long, default_value_t = 0.0)]
+    gen_prefix_overlap: f64,
+
+    /// Approximate number of input tokens per prompt (0 = disable)
+    #[arg(long, default_value_t = 0)]
+    gen_approx_input_tokens: usize,
+
+    /// Optional explicit token tolerance (+/-). Default is max(5, 5% of target).
+    #[arg(long)]
+    gen_token_tolerance: Option<usize>,
+
+    /// Hugging Face tokenizer identifier to use for generation (default: gpt2)
+    #[arg(long, default_value = "gpt2")]
+    gen_tokenizer_model: String,
+
+    /// Token length sampling mode for generation: fixed or lognormal
+    #[arg(long, default_value = "fixed")]
+    gen_dist_mode: String,
+
+    /// Median token count for lognormal generation mode
+    #[arg(long)]
+    gen_dist_median: Option<f64>,
+
+    /// Sigma for lognormal generation mode
+    #[arg(long, default_value_t = 0.5)]
+    gen_dist_sigma: f64,
+
+    /// Maximum token count when using lognormal generation mode
+    #[arg(long)]
+    gen_dist_max: Option<usize>,
 
     /// Number of concurrent users to spawn (defaults to the number of JSONL rows)
     #[arg(long)]
@@ -193,21 +232,59 @@ async fn main() -> Result<()> {
         .api_key
         .or_else(|| std::env::var(&args.api_key_env).ok());
 
-    let mut request_bodies = load_requests(
-        &args.jsonl,
-        &args.model,
-        args.output_tokens,
-        args.output_vary,
-        args.seed,
-    )
-    .with_context(|| format!("failed to load requests from {}", args.jsonl.display()))?;
+    // Decide request source: existing JSONL or inline generation
+    let (dataset_label, mut request_bodies): (String, Vec<RequestEntry>) = match (&args.jsonl, args.gen_count) {
+        (Some(path), 0) => {
+            let bodies = load_requests_from_file(
+                path,
+                &args.model,
+                args.output_tokens,
+                args.output_vary,
+                args.seed,
+            )
+            .with_context(|| format!("failed to load requests from {}", path.display()))?;
+            if bodies.is_empty() {
+                return Err(anyhow!(
+                    "{} did not contain any valid JSON records with a `text` field",
+                    path.display()
+                ));
+            }
+            (path.to_string_lossy().into_owned(), bodies)
+        }
+        (None, count) if count > 0 => {
+            let dist_mode = parse_dist_mode(&args.gen_dist_mode)?;
+            let target_tokens = if args.gen_approx_input_tokens > 0 {
+                Some(args.gen_approx_input_tokens)
+            } else {
+                None
+            };
 
-    if request_bodies.is_empty() {
-        return Err(anyhow!(
-            "{} did not contain any valid JSON records with a `text` field",
-            args.jsonl.display()
-        ));
-    }
+            let gen_opts = GenerateOptions {
+                count,
+                prefix_overlap: args.gen_prefix_overlap,
+                target_tokens,
+                token_tolerance: args.gen_token_tolerance,
+                tokenizer_model: args.gen_tokenizer_model.clone(),
+                dist_mode,
+                dist_median: args.gen_dist_median,
+                dist_sigma: args.gen_dist_sigma,
+                dist_max: args.gen_dist_max,
+                seed: args.seed,
+            };
+
+            let bodies = generate_requests(&gen_opts, &args.model)?;
+            let label = format!("generated (count={}, tokenizer={})", count, args.gen_tokenizer_model);
+            (label, bodies)
+        }
+        (Some(_), count) if count > 0 => {
+            return Err(anyhow!("provide either --jsonl or --gen-count, not both"));
+        }
+        _ => {
+            return Err(anyhow!(
+                "must supply either --jsonl <path> or --gen-count <n> to build requests"
+            ));
+        }
+    };
 
     let user_count = args.users.unwrap_or(request_bodies.len());
     if user_count == 0 {
@@ -216,7 +293,7 @@ async fn main() -> Result<()> {
 
     if !args.random_requests && request_bodies.len() < user_count {
         return Err(anyhow!(
-            "requested {} users but JSONL only provided {} records (use --random-requests to select randomly from dataset)",
+            "requested {} users but dataset only provided {} records (use --random-requests to select randomly from dataset)",
             user_count,
             request_bodies.len()
         ));
@@ -239,7 +316,7 @@ async fn main() -> Result<()> {
     println!("=== Benchmark Configuration ===");
     println!("Endpoint: {}", endpoint);
     println!("Model: {}", args.model);
-    println!("Dataset: {}", args.jsonl.display());
+    println!("Dataset: {}", dataset_label);
     println!("Dataset size: {}", dataset_size);
     println!("Users: {}", user_count);
     if args.random_requests {
@@ -320,7 +397,7 @@ async fn main() -> Result<()> {
         let record = CsvResult {
             timestamp: start_time.to_rfc3339(),
             model: args.model.clone(),
-            dataset_path: args.jsonl.to_string_lossy().into_owned(),
+            dataset_path: dataset_label.clone(),
             dataset_size,
             users: user_count,
             requests_per_user,
@@ -362,7 +439,15 @@ async fn main() -> Result<()> {
     Ok(())
 }
 
-fn load_requests(
+fn parse_dist_mode(mode: &str) -> Result<DistMode> {
+    match mode.to_ascii_lowercase().as_str() {
+        "fixed" => Ok(DistMode::Fixed),
+        "lognormal" => Ok(DistMode::LogNormal),
+        other => Err(anyhow!("invalid --gen-dist-mode '{}'; use fixed or lognormal", other)),
+    }
+}
+
+fn load_requests_from_file(
     path: &PathBuf,
     model: &str,
     output_tokens: Option<usize>,
