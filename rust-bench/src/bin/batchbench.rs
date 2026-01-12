@@ -183,9 +183,6 @@ async fn main() -> Result<()> {
         if args.output_tokens.is_none() {
             return Err(anyhow!("output-vary requires --output-tokens to be set"));
         }
-        if vary == 0 {
-            return Err(anyhow!("output-vary must be greater than zero"));
-        }
         if vary > i64::MAX as usize {
             return Err(anyhow!(
                 "output-vary must be less than or equal to {}",
@@ -296,7 +293,11 @@ async fn main() -> Result<()> {
     println!("Total requests: {}", total_requests);
     if let Some(tokens) = args.output_tokens {
         if let Some(vary) = args.output_vary {
-            println!("Output tokens: {} ±{}", tokens, vary);
+            if vary == 0 {
+                println!("Output tokens: {} (no variation)", tokens);
+            } else {
+                println!("Output tokens: {} ±{}", tokens, vary);
+            }
         } else {
             println!("Output tokens: {}", tokens);
         }
@@ -426,23 +427,22 @@ fn apply_output_tokens(
     for (idx, entry) in bodies.iter_mut().enumerate() {
         let mut final_tokens = tokens;
         if let Some(vary) = output_vary {
-            if vary == 0 {
-                return Err(anyhow!("output-vary must be greater than zero"));
+            if vary > 0 {
+                // Deterministic per-entry variation when seed is provided
+                let mut rng = if let Some(seed) = seed {
+                    let mixed_seed = seed
+                        .wrapping_add((idx as u64).wrapping_mul(65537));
+                    rand::rngs::StdRng::seed_from_u64(mixed_seed)
+                } else {
+                    rand::rngs::StdRng::from_rng(rand::thread_rng())
+                        .map_err(|e| anyhow!("failed to initialize rng: {}", e))?
+                };
+                let vary_i64 = vary as i64;
+                let base_i64 = tokens as i64;
+                let delta = rng.gen_range(-vary_i64..=vary_i64);
+                let adjusted = (base_i64 + delta).max(1);
+                final_tokens = adjusted as usize;
             }
-            // Deterministic per-entry variation when seed is provided
-            let mut rng = if let Some(seed) = seed {
-                let mixed_seed = seed
-                    .wrapping_add((idx as u64).wrapping_mul(65537));
-                rand::rngs::StdRng::seed_from_u64(mixed_seed)
-            } else {
-                rand::rngs::StdRng::from_rng(rand::thread_rng())
-                    .map_err(|e| anyhow!("failed to initialize rng: {}", e))?
-            };
-            let vary_i64 = vary as i64;
-            let base_i64 = tokens as i64;
-            let delta = rng.gen_range(-vary_i64..=vary_i64);
-            let adjusted = (base_i64 + delta).max(1);
-            final_tokens = adjusted as usize;
         }
 
         if let Some(map) = entry.body.as_object_mut() {
