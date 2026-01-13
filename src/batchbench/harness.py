@@ -18,7 +18,10 @@ import os
 import re
 import sys
 import time
+from concurrent.futures import ThreadPoolExecutor, as_completed
+from dataclasses import dataclass
 from pathlib import Path
+from typing import Optional
 
 import paramiko
 import requests
@@ -33,10 +36,54 @@ PI_API_BASE = "https://api.primeintellect.ai/api/v1"
 RESULTS_DIR = Path("results")
 
 
+class ProvisioningError(Exception):
+    """Raised when instance provisioning fails."""
+    pass
+
+
+class PipelineError(Exception):
+    """Raised when pipeline execution fails."""
+    pass
+
+
+@dataclass
+class ConfigResult:
+    """Result of running a single config."""
+    success: bool
+    error: Optional[str]
+    run_dir: Optional[str]
+
+
 def load_config(config_path: str) -> dict:
     """Load YAML configuration file."""
     with open(config_path, "r") as f:
         return yaml.safe_load(f)
+
+
+def build_queues(path: Path) -> dict[tuple[str, int], list[Path]]:
+    """Build GPU-type queues from config path(s).
+
+    Args:
+        path: Single config file or directory of configs
+
+    Returns:
+        Dict mapping (gpu_type, gpu_count) to list of config paths
+    """
+    if path.is_file():
+        config_paths = [path]
+    elif path.is_dir():
+        config_paths = sorted(path.glob("*.yaml"))
+    else:
+        raise FileNotFoundError(f"Path not found: {path}")
+
+    queues: dict[tuple[str, int], list[Path]] = {}
+    for config_path in config_paths:
+        config = load_config(str(config_path))
+        avail = config["instance"]["availability"]
+        gpu_key = (avail["gpu_type"], avail["gpu_count"])
+        queues.setdefault(gpu_key, []).append(config_path)
+
+    return queues
 
 
 def save_run_config(config: dict) -> Path:
@@ -106,6 +153,11 @@ class PrimeIntellectClient:
 
     def terminate_pod(self, pod_id: str) -> None:
         self._request("DELETE", f"/pods/{pod_id}")
+
+    def list_pods(self) -> list[dict]:
+        """List all pods for this account."""
+        result = self._request("GET", "/pods")
+        return result.get("data", [])
 
     def wait_for_pod_ready(self, pod_id: str, timeout: int = 600, poll_interval: int = 10) -> dict:
         start = time.time()
@@ -197,22 +249,18 @@ class Instance:
         self.ssh_port = int(port_str) if port_str else 22
 
     @classmethod
-    def from_pod_id(cls, pod_id: str) -> "Instance":
+    def from_pod_id(cls, pod_id: str, client: PrimeIntellectClient) -> "Instance":
         """Resume with an existing pod by ID."""
-        client = PrimeIntellectClient(os.environ["PRIME_API_KEY"])
         print(f"Resuming pod: {pod_id}")
         return cls(pod_id, client, timeout=60)  # Short timeout - should already be active
 
     @classmethod
-    def provision(cls, config: dict, include_spot: bool = False) -> "Instance":
+    def provision(cls, instance_cfg: dict, client: PrimeIntellectClient, include_spot: bool = False) -> "Instance":
         """Provision a new GPU instance via Prime Intellect API."""
-        instance_cfg = config["instance"]
         availability_params = instance_cfg["availability"]
         create_params = instance_cfg["create"]
         provision_timeout = instance_cfg.get("provision-timeout", 600)
         team_id = os.environ["PRIME_TEAM_ID"]
-
-        client = PrimeIntellectClient(os.environ["PRIME_API_KEY"])
 
         # Check availability
         gpu_type = availability_params["gpu_type"]
@@ -220,9 +268,10 @@ class Instance:
         print(f"Checking availability for {gpu_count}x {gpu_type}...")
         available = client.check_availability(**availability_params)
         if not available:
-            print(f"ERROR: No {gpu_type} GPUs available")
-            print("Check availability at: https://app.primeintellect.ai/dashboard/create-cluster")
-            sys.exit(1)
+            raise ProvisioningError(
+                f"No {gpu_type} GPUs available. "
+                "Check availability at: https://app.primeintellect.ai/dashboard/create-cluster"
+            )
 
         # Select cheapest GPU, excluding problematic providers and optionally spot instances
         excluded_providers = {"runpod", "hyperstack"}
@@ -231,15 +280,9 @@ class Instance:
             if opt["provider"] not in excluded_providers
             and (include_spot or opt.get("isSpot") is not True)
         ]
-        for gpu in valid_gpus:
-            for k,v in gpu.items():
-                print(k,v)
-            # print(gpu)
-            sys.exit()
         if not valid_gpus:
             excluded = [*excluded_providers] + ([] if include_spot else ["spot"])
-            print(f"ERROR: No GPUs available (excluded: {', '.join(excluded)})")
-            sys.exit(1)
+            raise ProvisioningError(f"No GPUs available (excluded: {', '.join(excluded)})")
         selected = min(valid_gpus, key=lambda x: float(x["prices"]["onDemand"]))
         provider = selected["provider"]
         price = selected["prices"]["onDemand"]
@@ -258,13 +301,13 @@ class Instance:
 
         try:
             return cls(pod_id, client, timeout=provision_timeout)
-        except (TimeoutError, RuntimeError):
+        except (TimeoutError, RuntimeError) as e:
             print("Cleaning up...")
             try:
                 client.terminate_pod(pod_id)
             except Exception:
                 pass
-            sys.exit(1)
+            raise ProvisioningError(f"Pod failed to become ready: {e}") from e
 
     def terminate(self):
         """Terminate this instance."""
@@ -328,8 +371,7 @@ class RemoteEnvironment:
                 stream=True,
             )
             if exit_code != 0:
-                print(f"Docker pull failed: {stderr}")
-                sys.exit(1)
+                raise PipelineError(f"Docker pull failed: {stderr}")
             print("Docker image pulled successfully")
 
             print(f"\nStarting container '{CONTAINER_NAME}'...")
@@ -342,8 +384,7 @@ class RemoteEnvironment:
             )
             stdout, stderr, exit_code = self.ssh.run(docker_run_cmd, stream=True)
             if exit_code != 0:
-                print(f"Failed to start container: {stderr}")
-                sys.exit(1)
+                raise PipelineError(f"Failed to start container: {stderr}")
             print("Container started successfully")
 
         # Clone batchbench repo (skip if already cloned)
@@ -353,8 +394,7 @@ class RemoteEnvironment:
             repo_url = "https://github.com/doublewordai/batchbench.git -b harness"
             stdout, stderr, exit_code = self.exec(f"git clone {repo_url}", stream=True)
             if exit_code != 0:
-                print(f"Git clone failed: {stderr}")
-                sys.exit(1)
+                raise PipelineError(f"Git clone failed: {stderr}")
             print("Repository cloned successfully")
 
         # Install dependencies (skip if already installed)
@@ -367,9 +407,7 @@ class RemoteEnvironment:
             )
             stdout, stderr, exit_code = self.exec(install_cmd, timeout=300, stream=True)
             if exit_code != 0:
-                print(f"Dependency installation failed: {stderr}")
-                print(f"stdout: {stdout}")
-                sys.exit(1)
+                raise PipelineError(f"Dependency installation failed: {stderr}\nstdout: {stdout}")
             print("Dependencies installed successfully")
 
     def exec(self, cmd: str, timeout: int = 300, stream: bool = False) -> tuple[str, str, int]:
@@ -388,7 +426,7 @@ class RemoteEnvironment:
     def __enter__(self) -> "RemoteEnvironment":
         return self
 
-    def __exit__(self, *args) -> None:
+    def __exit__(self, *_args) -> None:
         self.close()
 
 
@@ -411,11 +449,10 @@ def run_synthetic_generation(env: RemoteEnvironment, config: dict) -> str:
         f"cd batchbench && {generate_cmd}"
     )
 
-    print(f"\nGenerating synthetic data...")
+    print("\nGenerating synthetic data...")
     stdout, stderr, exit_code = env.exec(full_cmd, timeout=600, stream=True)
     if exit_code != 0:
-        print(f"Synthetic generation failed: {stderr}")
-        sys.exit(1)
+        raise PipelineError(f"Synthetic generation failed: {stderr}")
 
     output_path = stdout.strip().split("\n")[-1]
     print(f"Synthetic data generation complete: {output_path}")
@@ -433,19 +470,18 @@ def run_benchmark(env: RemoteEnvironment, config: dict, synthetic_data_path: str
     host = f"http://localhost:{port}"
 
     # Merge benchmark config with derived values
-    args = {"jsonl": synthetic_data_path, "model": model, "host": host, **bench_cfg}
-    benchmark_cmd = build_cli_command("python -m batchbench.online", args)
+    bench_args = {"jsonl": synthetic_data_path, "model": model, "host": host, **bench_cfg}
+    benchmark_cmd = build_cli_command("python -m batchbench.online", bench_args)
 
     full_cmd = (
         "source /opt/batchbench/.venv/bin/activate && "
         f"cd batchbench && {benchmark_cmd}"
     )
 
-    print(f"\nRunning online benchmark...")
+    print("\nRunning online benchmark...")
     stdout, stderr, exit_code = env.exec(full_cmd, timeout=3600, stream=True)
     if exit_code != 0:
-        print(f"Benchmark failed: {stderr}")
-        sys.exit(1)
+        raise PipelineError(f"Benchmark failed: {stderr}")
 
     remote_results = bench_cfg.get("results-csv")
     if remote_results:
@@ -491,8 +527,7 @@ def wait_for_vllm_ready(env: RemoteEnvironment, port: int, timeout: int) -> None
         time.sleep(poll_interval)
 
     print("-" * 60)
-    print(f"ERROR: vLLM server not ready after {timeout}s")
-    sys.exit(1)
+    raise PipelineError(f"vLLM server not ready after {timeout}s")
 
 
 def stop_vllm_server(env: RemoteEnvironment) -> None:
@@ -506,12 +541,12 @@ def start_vllm_server(env: RemoteEnvironment, config: dict) -> None:
 
     vllm_cfg = config["vllm"]
     model = vllm_cfg["model"]
-    args = vllm_cfg.get("args") or {}
+    vllm_args = vllm_cfg.get("args") or {}
     vllm_env = vllm_cfg.get("env") or {}
     startup_timeout = vllm_cfg.get("startup-timeout", 600)
-    port = args.get("port", 8000)
+    port = vllm_args.get("port", 8000)
 
-    vllm_cmd = build_cli_command(f"vllm serve {model}", args)
+    vllm_cmd = build_cli_command(f"vllm serve {model}", vllm_args)
     env_exports = " ".join(f"{k}={v}" for k, v in vllm_env.items())
     full_cmd = (
         "source /opt/batchbench/.venv/bin/activate && "
@@ -519,54 +554,175 @@ def start_vllm_server(env: RemoteEnvironment, config: dict) -> None:
     )
 
     print(f"\nStarting vLLM server with model: {model}")
-    stdout, stderr, exit_code = env.exec(full_cmd)
+    _, stderr, exit_code = env.exec(full_cmd)
     if exit_code != 0:
-        print(f"Failed to start vLLM server: {stderr}")
-        sys.exit(1)
+        raise PipelineError(f"Failed to start vLLM server: {stderr}")
     print("vLLM server process started")
 
     wait_for_vllm_ready(env, port, startup_timeout)
 
 
-def run_harness(config_path: str, resume_pod_id: str = None, include_spot: bool = False, save_server_logs: bool = False) -> None:
-    """Main harness execution."""
-    print(f"Loading config from: {config_path}")
-    config = load_config(config_path)
-    ssh_key_path = Path(os.environ["PRIME_SSH_KEY_PATH"])
+class QueueWorker:
+    """Worker that processes a queue of configs for a specific GPU type."""
 
-    run_dir = save_run_config(config)
-    print(f"Run directory: {run_dir}")
+    def __init__(
+        self,
+        gpu_key: tuple[str, int],
+        config_paths: list[Path],
+        include_spot: bool,
+        save_server_logs: bool,
+        keep_alive: bool = False,
+        resume_pod_id: Optional[str] = None,
+    ):
+        self.gpu_key = gpu_key
+        self.config_paths = config_paths
+        self.include_spot = include_spot
+        self.save_server_logs = save_server_logs
+        self.keep_alive = keep_alive
+        self.resume_pod_id = resume_pod_id
+        self.results: list[ConfigResult] = []
+        self.instance: Optional[Instance] = None
 
-    # Step 1: Get instance (provision new or reuse existing)
-    if resume_pod_id:
-        instance = Instance.from_pod_id(resume_pod_id)
-    else:
-        instance = Instance.provision(config, include_spot=include_spot)
-        print("Waiting for SSH to be ready...")
-        time.sleep(10)
+    def run(self) -> list[ConfigResult]:
+        """Process all configs in this queue. Returns results for each config."""
+        try:
+            instance_cfg = load_config(str(self.config_paths[0]))["instance"]
+            self.instance = self.get_instance(instance_cfg)
+        except Exception as e:
+            for path in self.config_paths:
+                self.results.append(ConfigResult(
+                    success=False,
+                    error=f"Provisioning failed: {e}",
+                    run_dir=None,
+                ))
+            return self.results
 
-    # Step 2: Connect and run pipeline
-    print("\nConnecting via SSH...")
-    try:
-        with RemoteEnvironment(instance, ssh_key_path) as env:
-            env.setup(config)
-            start_vllm_server(env, config)
-            synthetic_data_path = run_synthetic_generation(env, config)
-            run_benchmark(env, config, synthetic_data_path, run_dir)
-            if save_server_logs:
-                fetch_server_logs(env, run_dir)
+        try:
+            if not self.resume_pod_id:
+                time.sleep(10)  # Wait for SSH to be ready
 
-    except Exception as e:
-        print(f"Error: {e}")
+            for config_path in self.config_paths:
+                result = self.run_pipeline(config_path)
+                self.results.append(result)
+        finally:
+            if self.instance:
+                if self.keep_alive:
+                    print(f"\nInstance kept alive: {self.instance.pod_id}")
+                    print(f"SSH: ssh {self.instance.ssh_user}@{self.instance.ssh_host} -p {self.instance.ssh_port}")
+                    print(f"To reuse: python -m batchbench.harness <config> --resume {self.instance.pod_id}")
+                    print(f"To terminate: prime pods terminate {self.instance.pod_id}")
+                else:
+                    try:
+                        self.instance.terminate()
+                    except Exception as e:
+                        print(f"WARNING: Failed to terminate instance {self.instance.pod_id}: {e}")
+                        print(f"Manually terminate at: https://app.primeintellect.ai/dashboard")
 
-    # Print summary
-    print("\n" + "=" * 60)
-    print("Instance Summary")
-    print("=" * 60)
-    print(f"Run directory: {run_dir}")
-    print(f"Pod ID: {instance.pod_id}")
-    print(f"SSH: ssh {instance.ssh_user}@{instance.ssh_host} -p {instance.ssh_port}")
-    print(f"\nTo terminate: prime pods terminate {instance.pod_id}")
+        return self.results
+
+    def get_instance(self, instance_cfg: dict, max_retries: int = 10, retry_delay: int = 60) -> Instance:
+        """Get instance - resume existing or provision new with retries."""
+        client = PrimeIntellectClient(os.environ["PRIME_API_KEY"])
+
+        # Resume existing pod if specified
+        if self.resume_pod_id:
+            return Instance.from_pod_id(self.resume_pod_id, client)
+
+        # Provision with retries
+        errors = set()
+        for attempt in range(max_retries):
+            try:
+                return Instance.provision(instance_cfg, client, include_spot=self.include_spot)
+            except ProvisioningError as e:
+                errors.add(str(e))
+                if attempt < max_retries - 1:
+                    time.sleep(retry_delay)
+
+        raise ProvisioningError(f"Failed after {max_retries} attempts: {'; '.join(errors)}")
+
+    def run_pipeline(self, config_path: Path) -> ConfigResult:
+        """Run single config on the instance."""
+        config = load_config(str(config_path))
+        ssh_key_path = Path(os.environ["PRIME_SSH_KEY_PATH"])
+        run_dir = save_run_config(config)
+
+        try:
+            with RemoteEnvironment(self.instance, ssh_key_path) as env:
+                env.setup(config)
+                start_vllm_server(env, config)
+                synthetic_data_path = run_synthetic_generation(env, config)
+                run_benchmark(env, config, synthetic_data_path, run_dir)
+                if self.save_server_logs:
+                    fetch_server_logs(env, run_dir)
+            return ConfigResult(
+                success=True,
+                error=None,
+                run_dir=str(run_dir),
+            )
+        except (PipelineError, Exception) as e:
+            return ConfigResult(
+                success=False,
+                error=str(e),
+                run_dir=str(run_dir),
+            )
+
+
+def print_summary(results: list[ConfigResult]) -> None:
+    """Print summary of all results."""
+    succeeded = [r for r in results if r.success]
+    failed = [r for r in results if not r.success]
+
+    print("\n" + "=" * 70)
+    print("SUMMARY")
+    print("=" * 70)
+    print(f"Total configs: {len(results)}")
+    print(f"Succeeded: {len(succeeded)}")
+    print(f"Failed: {len(failed)}")
+
+    if failed:
+        print("\nFailed:")
+        for r in failed:
+            print(f"  - {r.run_dir or 'N/A'}: {r.error}")
+
+    if succeeded:
+        print("\nSucceeded:")
+        for r in succeeded:
+            print(f"  - {r.run_dir}")
+
+
+def run_queues(
+    config_path: Path,
+    resume_pod_id: Optional[str] = None,
+    include_spot: bool = False,
+    save_server_logs: bool = False,
+    keep_alive: bool = False,
+) -> None:
+    """Main entry point - process configs with parallel queue execution."""
+    queues = build_queues(config_path)
+    if not queues:
+        print(f"No configs found at {config_path}")
+        sys.exit(1)
+
+    workers = [
+        QueueWorker(
+            gpu_key=gpu_key,
+            config_paths=paths,
+            include_spot=include_spot,
+            save_server_logs=save_server_logs,
+            keep_alive=keep_alive,
+            resume_pod_id=resume_pod_id,
+        )
+        for gpu_key, paths in queues.items()
+    ]
+
+    all_results: list[ConfigResult] = []
+    print(f"\nStarting {len(workers)} parallel queue(s)...\n")
+    with ThreadPoolExecutor(max_workers=len(workers)) as executor:
+        futures = [executor.submit(w.run) for w in workers]
+        for future in as_completed(futures):
+            all_results.extend(future.result())
+
+    print_summary(all_results)
 
 
 def fetch_server_logs(env: RemoteEnvironment, run_dir: Path) -> None:
@@ -583,18 +739,57 @@ def fetch_server_logs(env: RemoteEnvironment, run_dir: Path) -> None:
 
 
 def main():
-    parser = argparse.ArgumentParser(description="BatchBench Harness - Automated GPU instance provisioning and benchmarking")
-    parser.add_argument("config", nargs="?", default="configs/harness.yaml", help="Path to config file")
-    parser.add_argument("--resume", type=str, metavar="POD_ID", help="Resume with existing pod")
-    parser.add_argument("--include-spot", action="store_true", help="Include spot instances when selecting GPUs")
-    parser.add_argument("--save-server-logs", action="store_true", help="Save vLLM server logs to run directory")
+    parser = argparse.ArgumentParser(
+        description="BatchBench Harness - Automated GPU instance provisioning and benchmarking"
+    )
+    parser.add_argument(
+        "config",
+        nargs="?",
+        default="configs/harness.yaml",
+        help="Path to config file or directory of configs",
+    )
+    parser.add_argument(
+        "--resume",
+        metavar="POD_ID",
+        help="Resume using an existing pod (single config only)",
+    )
+    parser.add_argument(
+        "--keep-alive",
+        action="store_true",
+        help="Keep instance alive after completion (single config only)",
+    )
+    parser.add_argument(
+        "--include-spot",
+        action="store_true",
+        help="Include spot instances when selecting GPUs",
+    )
+    parser.add_argument(
+        "--save-server-logs",
+        action="store_true",
+        help="Save vLLM server logs to run directory",
+    )
     args = parser.parse_args()
 
-    if not Path(args.config).exists():
-        print(f"ERROR: Config file not found: {args.config}")
+    config_path = Path(args.config)
+    if not config_path.exists():
+        print(f"ERROR: Path not found: {args.config}")
         sys.exit(1)
 
-    run_harness(args.config, resume_pod_id=args.resume, include_spot=args.include_spot, save_server_logs=args.save_server_logs)
+    is_single = config_path.is_file()
+    if args.resume and not is_single:
+        print("ERROR: --resume only supported for single config files")
+        sys.exit(1)
+    if args.keep_alive and not is_single:
+        print("ERROR: --keep-alive only supported for single config files")
+        sys.exit(1)
+
+    run_queues(
+        config_path,
+        resume_pod_id=args.resume,
+        include_spot=args.include_spot,
+        save_server_logs=args.save_server_logs,
+        keep_alive=args.keep_alive,
+    )
 
 
 if __name__ == "__main__":
