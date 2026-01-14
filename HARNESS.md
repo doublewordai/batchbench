@@ -50,6 +50,8 @@ The config file is the interface for setting instance, vLLM, and benchmark args.
 - `vllm.args`: `vllm serve --help`
 - `benchmark`: `batchbench --help`
 
+**Note**: Always include `results-csv: /tmp/results.csv` in the benchmark config so results are saved and fetched from the remote instance.
+
 ## Architecture
 
 The harness accepts either a single config file or a directory of configs (all `*.yaml` files in that directory).
