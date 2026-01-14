@@ -1,0 +1,57 @@
+instance:
+  docker-image: tytn/batchbench:cu130-b200
+  provision-timeout: 2400
+
+  # Passed directly to API via check_availability
+  availability:
+    gpu_type: B200_180GB
+    gpu_count: 1
+    security: secure_cloud
+    # regions:
+    #   - united_states
+    #   - south_america
+    # socket: PCIe
+
+  # Passed to API via create_pod 
+  create:
+    image: ubuntu_22_cuda_12
+    # image: custom_template
+    # customTemplateId: cmk6ulhgj000ti0tk08cypasr
+    diskSize: 500
+
+
+vllm:
+  model: Qwen/Qwen3-30B-A3B-Instruct-2507-FP8
+  startup-timeout: 2400
+
+  # vLLM serve arguments
+  args:
+    port: 8000
+    host: 0.0.0.0
+    max-model-len: 262144
+    gpu-memory-utilization: 0.9
+    trust-remote-code: true
+
+  # Environment variables for vLLM
+  env:
+    VLLM_FLASHINFER_MOE_BACKEND: throughput
+
+
+benchmark:
+  seed: 42
+
+  # Generation args
+  gen-prefix-overlap: 0.0
+  gen-dist-mode: lognormal
+  gen-dist-median: 1000
+  gen-dist-sigma: 1.68
+  gen-dist-max: 128000
+
+  # Load args
+  users: 32
+  requests-per-user: 1
+  output-lognorm-mu: 6
+  output-lognorm-sigma: 0.7
+  output-lognorm-max: 2000
+  request-timeout-secs: 10000
+  results-csv: /tmp/results.csv
