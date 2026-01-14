@@ -385,7 +385,7 @@ class RemoteEnvironment:
         if not self._is_repo_cloned():
             print("\nCloning batchbench repository...")
             # TODO: Change back to main after merge is complete
-            repo_url = "https://github.com/doublewordai/batchbench.git -b harness"
+            repo_url = "https://github.com/doublewordai/batchbench.git"
             stdout, stderr, exit_code = self.exec(f"git clone {repo_url}", stream=True)
             if exit_code != 0:
                 raise PipelineError(f"Git clone failed: {stderr}")
