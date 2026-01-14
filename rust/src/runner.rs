@@ -12,8 +12,17 @@ use tokio::fs;
 use tokio::sync::mpsc;
 use tokio::task::JoinSet;
 
-use crate::config::{BenchmarkConfig, RunMode};
+use crate::config::{BenchmarkConfig, RequestEntry, RunMode};
 use crate::report::{BenchmarkReport, FailureRecord};
+use std::cmp;
+
+#[derive(Debug, Clone)]
+struct DryRunRecord {
+    user_id: usize,
+    request_id: usize,
+    input_tokens: usize,
+    tokens: Option<usize>,
+}
 
 pub async fn run_benchmark(config: BenchmarkConfig) -> Result<BenchmarkReport> {
     let start = Instant::now();
@@ -62,7 +71,13 @@ pub async fn run_benchmark(config: BenchmarkConfig) -> Result<BenchmarkReport> {
         .await
         .map_err(|err| anyhow!("status tracker task failed: {}", err))?;
 
-    Ok(aggregator.finalize(total_duration))
+    let (report, dry_run_events) = aggregator.finalize(total_duration);
+
+    if config.dry_run && !dry_run_events.is_empty() {
+        print_sorted_dry_run_events(&dry_run_events);
+    }
+
+    Ok(report)
 }
 
 async fn collect_metrics(
@@ -123,13 +138,22 @@ async fn dispatch_request(
     event_tx: &mpsc::UnboundedSender<WorkerEvent>,
     status_tx: &mpsc::UnboundedSender<StatusEvent>,
 ) -> Result<()> {
-    let mut request_body = if config.random_request_pool.is_some() {
-        config.random_request_body(user_id, request_id)?.clone()
-    } else {
-        config.request_body_for(user_id)?.clone()
-    };
+    // Deterministic mapping: request m from user n uses index m * user_count + n
+    let idx = request_id
+        .checked_mul(config.user_count)
+        .and_then(|v| v.checked_add(user_id))
+        .ok_or_else(|| anyhow!("request index overflowed"))?;
+
+    let request_entry: RequestEntry = config
+        .requests
+        .get(idx)
+        .cloned()
+        .ok_or_else(|| anyhow!("no request entry for user {} request {} (index {})", user_id, request_id, idx))?;
+
+    let mut request_body = request_entry.body.clone();
 
     // If lognormal output sampling is configured, sample and inject tokens
+    let mut lognorm_tokens: Option<usize> = None;
     if let Some((mu, sigma, max)) = config.output_lognorm {
         use rand_distr::{Distribution, LogNormal};
         use rand::SeedableRng;
@@ -160,7 +184,29 @@ async fn dispatch_request(
         if let Some(map) = request_body.as_object_mut() {
             map.insert("max_tokens".to_string(), serde_json::json!(tokens));
             map.insert("min_tokens".to_string(), serde_json::json!(tokens));
+            lognorm_tokens = Some(tokens);
         }
+    }
+
+    if config.dry_run {
+        // Prefer the most recent token setting in the body (max_tokens/min_tokens)
+        let token_field = request_body
+            .get("max_tokens")
+            .or_else(|| request_body.get("min_tokens"))
+            .and_then(|v| v.as_u64())
+            .map(|v| v as usize)
+            .or(lognorm_tokens);
+
+        event_tx
+            .send(WorkerEvent::DryRun {
+                user_id,
+                request_id,
+                input_tokens: request_entry.input_tokens,
+                tokens: token_field,
+            })
+            .map_err(|_| anyhow!("metrics channel closed before dry-run event"))?;
+
+        return Ok(());
     }
 
     match single_attempt(client, config, &request_body).await {
@@ -354,6 +400,7 @@ struct MetricsAggregator {
     failures: Vec<FailureRecord>,
     latencies: Vec<Duration>,
     planned_total_requests: Option<u64>,
+    dry_run_events: Vec<DryRunRecord>,
 }
 
 impl MetricsAggregator {
@@ -366,6 +413,7 @@ impl MetricsAggregator {
             failures: Vec::new(),
             latencies: Vec::new(),
             planned_total_requests,
+            dry_run_events: Vec::new(),
         }
     }
 
@@ -386,11 +434,24 @@ impl MetricsAggregator {
                 self.failed_requests += 1;
                 self.failures.push(FailureRecord { user_id, error });
             }
+            WorkerEvent::DryRun {
+                user_id,
+                request_id,
+                input_tokens,
+                tokens,
+            } => {
+                self.dry_run_events.push(DryRunRecord {
+                    user_id,
+                    request_id,
+                    input_tokens,
+                    tokens,
+                });
+            }
         }
         Ok(())
     }
 
-    fn finalize(self, total_duration: Duration) -> BenchmarkReport {
+    fn finalize(self, total_duration: Duration) -> (BenchmarkReport, Vec<DryRunRecord>) {
         let total_requests = self.successful_requests + self.failed_requests;
         let duration_secs = total_duration.as_secs_f64();
         let prompt_tokens_per_second = if duration_secs > 0.0 {
@@ -415,7 +476,7 @@ impl MetricsAggregator {
         let latency_p90 = percentile(&latencies, 0.90);
         let latency_p99 = percentile(&latencies, 0.99);
 
-        BenchmarkReport {
+        let report = BenchmarkReport {
             total_requests,
             successful_requests: self.successful_requests,
             failed_requests: self.failed_requests,
@@ -429,7 +490,9 @@ impl MetricsAggregator {
             latency_p90,
             latency_p99,
             failures: self.failures,
-        }
+        };
+
+        (report, self.dry_run_events)
     }
 }
 
@@ -551,4 +614,83 @@ enum WorkerEvent {
         user_id: usize,
         error: String,
     },
+    DryRun {
+        user_id: usize,
+        request_id: usize,
+        input_tokens: usize,
+        tokens: Option<usize>,
+    },
+}
+
+fn print_sorted_dry_run_events(events: &[DryRunRecord]) {
+    let mut sorted = events.to_vec();
+    sorted.sort_by(|a, b| {
+        a.user_id
+            .cmp(&b.user_id)
+            .then_with(|| a.request_id.cmp(&b.request_id))
+    });
+
+    // Output token histogram (only if tokens present)
+    let output_tokens: Vec<usize> = sorted
+        .iter()
+        .filter_map(|ev| ev.tokens)
+        .collect();
+    if !output_tokens.is_empty() {
+        print_histogram("Output tokens (dry-run)", &output_tokens, 20, 50);
+    }
+
+    for ev in sorted {
+        match ev.tokens {
+            Some(t) => println!(
+                "[DRY-RUN] user={} request={} input_tokens={} tokens={}",
+                ev.user_id,
+                ev.request_id,
+                ev.input_tokens,
+                t
+            ),
+            None => println!(
+                "[DRY-RUN] user={} request={} input_tokens={} tokens=(not set)",
+                ev.user_id,
+                ev.request_id,
+                ev.input_tokens
+            ),
+        }
+    }
+}
+
+fn print_histogram(label: &str, data: &[usize], bins: usize, bar_width: usize) {
+    if data.is_empty() || bins == 0 {
+        return;
+    }
+    let min = *data.iter().min().unwrap_or(&0);
+    let max = *data.iter().max().unwrap_or(&0);
+    let mean: f64 = data.iter().map(|&v| v as f64).sum::<f64>() / data.len() as f64;
+    let mut sorted = data.to_vec();
+    sorted.sort_unstable();
+    let median = sorted[sorted.len() / 2];
+    let p95 = sorted[((sorted.len() as f64 * 0.95).round() as usize).min(sorted.len() - 1)];
+    let p99 = sorted[((sorted.len() as f64 * 0.99).round() as usize).min(sorted.len() - 1)];
+
+    let span = if max > min { max - min } else { 1 };
+    let bin_width = cmp::max(1, (span as f64 / bins as f64).ceil() as usize);
+    let mut counts = vec![0usize; bins];
+    for &v in data {
+        let idx = cmp::min((v - min) / bin_width, bins - 1);
+        counts[idx] += 1;
+    }
+    let max_count = *counts.iter().max().unwrap_or(&1);
+
+    eprintln!("\n== {} (n={}) ==", label, data.len());
+    eprintln!("min={} mean={:.1} median={} p95={} p99={} max={}", min, mean, median, p95, p99, max);
+    for (i, count) in counts.iter().enumerate() {
+        let start = min + i * bin_width;
+        let end = start + bin_width;
+        let bar_len = if max_count > 0 {
+            ((count * bar_width) as f64 / max_count as f64).round() as usize
+        } else {
+            0
+        };
+        let bar = "#".repeat(bar_len);
+        eprintln!("{:>6}-{:>6} | {:<bar_width$} {}", start, end, bar, count, bar_width = bar_width);
+    }
 }

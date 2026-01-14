@@ -1,51 +1,31 @@
-# BatchBench
+# BatchBench (Rust-only)
 
-BatchBench bundles two benchmarking utilities behind installable Python entrypoints:
+BatchBench is now a Rust-only CLI for generating synthetic request corpora and running online benchmarks against OpenAI-compatible endpoints.
 
-- `batchbench.generate` produces JSONL request corpora with controllable prefix overlap and approximate token counts.
-- `batchbench.online` launches the packaged Rust binary that fans requests out to OpenAI-compatible endpoints in parallel.
-
-## Installation
+## Build
 
 ```bash
-pip install batchbench
+cargo build --release --bin batchbench -p batchbench-rs
+# Binary: rust-bench/target/release/batchbench
 ```
 
-Optional extras install tool-specific dependencies:
+## Run
+
+Generate a workload and run the benchmark (inline generation sized to `users * requests_per_user`):
 
 ```bash
-pip install "batchbench[generate]"   # adds transformers for prompt sizing
-```
-
-## Generating Requests
-
-```bash
-batchbench.generate \
-  --count 100 \
-  --prefix-overlap 0.3 \
-  --approx-input-tokens 512 \
-  --tokenizer-model gpt-3.5-turbo \
-  --output data
-```
-
-Each row in the resulting JSONL file has a `text` field. The filename embeds run metadata (count, tokens, prefix, tokenizer) to keep runs distinct.
-
-## Online Benchmarking
-
-`batchbench.online` wraps the Rust executable that used to live under `rust-bench/`. The binary ships inside the wheel, so Cargo is not required on the host.
-
-```bash
-batchbench.online \
-  --jsonl data/requests.jsonl \
+./rust-bench/target/release/batchbench \
   --model gpt-4o-mini \
-  --host https://api.openai.com \
-  --endpoint /v1/chat/completions \
   --users 8 \
-  --requests-per-user 1
+  --requests-per-user 2 \
+  --gen-approx-input-tokens 256 \
+  --output-tokens 64 \
+  --output-vary 0
 ```
 
-Provide an API key via `--api-key` or the environment variable named by `--api-key-env` (defaults to `OPENAI_API_KEY`).
+Set your API key via `--api-key` or the environment variable named by `--api-key-env` (defaults to `OPENAI_API_KEY`).
 
-## Development Notes
+## Notes
 
-The project now follows a `src/` layout. Run `pip install -e .[generate]` during development to work against the editable package. The Rust binary can be rebuilt with `cargo build --release` inside `rust-bench/`; copy the resulting executable to `src/batchbench/bin/` if you need to refresh it.
+- The CLI deterministically maps request index `m*N + n` (request m, user n) into the generated dataset.
+- `build_rust.sh` simply builds the release binary; no Python packaging remains.

@@ -5,10 +5,9 @@ This script:
 1. Provisions a GPU instance via Prime Intellect API
 2. Connects via SSH
 3. Pulls the batchbench Docker image and starts container
-4. Sets up environment (venv, dependencies)
+4. Clones the batchbench repository (with pre-built Rust binary)
 5. Starts vLLM server and waits for readiness
-6. Generates synthetic data
-7. Runs online benchmark
+6. Runs benchmark (generation + load test via Rust binary)
 """
 
 import argparse
@@ -348,13 +347,8 @@ class RemoteEnvironment:
         _, _, exit_code = self.exec("test -d batchbench")
         return exit_code == 0
 
-    def _is_package_installed(self) -> bool:
-        """Check if batchbench package was installed."""
-        _, _, exit_code = self.exec("/opt/batchbench/.venv/bin/pip show batchbench")
-        return exit_code == 0
-
     def setup(self, config: dict) -> None:
-        """Ensure container is running with correct image, repo cloned, deps installed."""
+        """Ensure container is running with correct image and repo cloned."""
         docker_image = config["instance"]["docker-image"]
         is_running, current_image = self._get_container_info()
 
@@ -390,25 +384,12 @@ class RemoteEnvironment:
         # Clone batchbench repo (skip if already cloned)
         if not self._is_repo_cloned():
             print("\nCloning batchbench repository...")
-            # TODO: Change back to main after surrogate fix is merged
+            # TODO: Change back to main after merge is complete
             repo_url = "https://github.com/doublewordai/batchbench.git -b harness"
             stdout, stderr, exit_code = self.exec(f"git clone {repo_url}", stream=True)
             if exit_code != 0:
                 raise PipelineError(f"Git clone failed: {stderr}")
             print("Repository cloned successfully")
-
-        # Install dependencies (skip if already installed)
-        if not self._is_package_installed():
-            print("\nInstalling dependencies...")
-            install_cmd = (
-                "source /opt/batchbench/.venv/bin/activate && "
-                "cd batchbench && "
-                "uv pip install -e '.[generate]'"
-            )
-            stdout, stderr, exit_code = self.exec(install_cmd, timeout=300, stream=True)
-            if exit_code != 0:
-                raise PipelineError(f"Dependency installation failed: {stderr}\nstdout: {stdout}")
-            print("Dependencies installed successfully")
 
     def exec(self, cmd: str, timeout: int = 300, stream: bool = False) -> tuple[str, str, int]:
         """Execute a command inside the container."""
@@ -440,27 +421,8 @@ def build_cli_command(base: str, args: dict) -> str:
     return base + " " + " ".join(cmd_args)
 
 
-def run_synthetic_generation(env: RemoteEnvironment, config: dict) -> str:
-    """Generate synthetic data inside the container. Returns the output file path."""
-    gen_cfg = config["generate"]
-    generate_cmd = build_cli_command("python -m batchbench.generate", gen_cfg)
-    full_cmd = (
-        "source /opt/batchbench/.venv/bin/activate && "
-        f"cd batchbench && {generate_cmd}"
-    )
-
-    print("\nGenerating synthetic data...")
-    stdout, stderr, exit_code = env.exec(full_cmd, timeout=600, stream=True)
-    if exit_code != 0:
-        raise PipelineError(f"Synthetic generation failed: {stderr}")
-
-    output_path = stdout.strip().split("\n")[-1]
-    print(f"Synthetic data generation complete: {output_path}")
-    return output_path
-
-
-def run_benchmark(env: RemoteEnvironment, config: dict, synthetic_data_path: str, run_dir: Path) -> None:
-    """Run the online benchmark inside the container."""
+def run_benchmark(env: RemoteEnvironment, config: dict, run_dir: Path) -> None:
+    """Run the benchmark using the Rust binary inside the container."""
     bench_cfg = config["benchmark"]
     vllm_cfg = config["vllm"]
     vllm_args = vllm_cfg.get("args") or {}
@@ -469,17 +431,12 @@ def run_benchmark(env: RemoteEnvironment, config: dict, synthetic_data_path: str
     port = vllm_args.get("port", 8000)
     host = f"http://localhost:{port}"
 
-    # Merge benchmark config with derived values
-    bench_args = {"jsonl": synthetic_data_path, "model": model, "host": host, **bench_cfg}
-    benchmark_cmd = build_cli_command("python -m batchbench.online", bench_args)
+    # Build args for Rust binary
+    bench_args = {"model": model, "host": host, **bench_cfg}
+    benchmark_cmd = build_cli_command("batchbench/bin/batchbench", bench_args)
 
-    full_cmd = (
-        "source /opt/batchbench/.venv/bin/activate && "
-        f"cd batchbench && {benchmark_cmd}"
-    )
-
-    print("\nRunning online benchmark...")
-    stdout, stderr, exit_code = env.exec(full_cmd, timeout=3600, stream=True)
+    print("\nRunning benchmark...")
+    stdout, stderr, exit_code = env.exec(benchmark_cmd, timeout=3600, stream=True)
     if exit_code != 0:
         raise PipelineError(f"Benchmark failed: {stderr}")
 
@@ -650,8 +607,7 @@ class QueueWorker:
             with RemoteEnvironment(self.instance, ssh_key_path) as env:
                 env.setup(config)
                 start_vllm_server(env, config)
-                synthetic_data_path = run_synthetic_generation(env, config)
-                run_benchmark(env, config, synthetic_data_path, run_dir)
+                run_benchmark(env, config, run_dir)
                 if self.save_server_logs:
                     fetch_server_logs(env, run_dir)
             return ConfigResult(

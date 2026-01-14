@@ -1,14 +1,18 @@
-use std::fs::{self, File};
-use std::io::{BufRead, BufReader};
-use std::path::{Path, PathBuf};
+use std::fs;
+use std::path::Path;
 use std::time::Duration;
 
 use anyhow::{anyhow, Context, Result};
-use batchbench_rs::{run_benchmark, BenchmarkConfig, BenchmarkReport, RunMode};
+use batchbench_rs::{
+    generate_requests, GenerateOptions, RunMode, BenchmarkConfig, BenchmarkReport, RequestEntry,
+    DistMode, run_benchmark,
+};
 use clap::Parser;
-use rand::Rng;
+use rand::{Rng, SeedableRng};
 use serde::Serialize;
-use serde_json::{json, Value};
+use serde_json::json;
+use std::cmp;
+use std::path::PathBuf;
 
 #[derive(Debug, Serialize)]
 struct CsvResult {
@@ -30,7 +34,6 @@ struct CsvResult {
     latency_p50_ms: Option<f64>,
     latency_p90_ms: Option<f64>,
     latency_p99_ms: Option<f64>,
-    random_requests: bool,
     output_tokens: Option<usize>,
     output_vary: Option<usize>,
     output_lognorm_mu: Option<f64>,
@@ -49,16 +52,40 @@ struct CsvResult {
     about = "Drive batchbench-rs benchmarks from the CLI"
 )]
 struct Args {
-    /// Path to the JSONL file whose objects contain a `text` field
-    #[arg(long)]
-    jsonl: PathBuf,
+    /// Fraction of tokens shared as prefix across generated prompts (0.0-1.0)
+    #[arg(long, default_value_t = 0.0)]
+    gen_prefix_overlap: f64,
 
-    /// Number of concurrent users to spawn (defaults to the number of JSONL rows)
+    /// Approximate number of input tokens per prompt (0 = disable)
+    #[arg(long, default_value_t = 0)]
+    gen_approx_input_tokens: usize,
+
+    /// Optional explicit token tolerance (+/-). Default is max(5, 5% of target).
+    #[arg(long)]
+    gen_token_tolerance: Option<usize>,
+
+    /// Token length sampling mode for generation: fixed or lognormal
+    #[arg(long, default_value = "fixed")]
+    gen_dist_mode: String,
+
+    /// Median token count for lognormal generation mode
+    #[arg(long)]
+    gen_dist_median: Option<f64>,
+
+    /// Sigma for lognormal generation mode
+    #[arg(long, default_value_t = 0.5)]
+    gen_dist_sigma: f64,
+
+    /// Maximum token count when using lognormal generation mode
+    #[arg(long)]
+    gen_dist_max: Option<usize>,
+
+    /// Number of concurrent users to spawn (default: 1)
     #[arg(long)]
     users: Option<usize>,
 
     /// OpenAI-style model identifier to embed in each request body
-    #[arg(long, default_value = "gpt-4o-mini")]
+    #[arg(long, default_value = "Qwen/Qwen3-VL-235B-A22B-Instruct-FP8")]
     model: String,
 
     /// Host to target (e.g. https://api.openai.com)
@@ -98,12 +125,16 @@ struct Args {
     output_tokens: Option<usize>,
 
     /// Apply a +/- uniform variation when --output-tokens is provided
-    #[arg(long)]
-    output_vary: Option<usize>,
+    #[arg(long, default_value_t = 0)]
+    output_vary: usize,
 
     /// Sample output length from log-normal distribution with this mu parameter (mean of underlying normal)
     #[arg(long)]
     output_lognorm_mu: Option<f64>,
+
+    /// Sample output length from log-normal distribution with this median (preferred over mu)
+    #[arg(long)]
+    output_lognorm_median: Option<f64>,
 
     /// Sample output length from log-normal distribution with this sigma parameter (std dev of underlying normal)
     #[arg(long)]
@@ -117,9 +148,11 @@ struct Args {
     #[arg(long, short)]
     verbose: bool,
 
-    /// Enable random request selection mode (users select random requests from entire dataset)
+    /// Dry run (do not send HTTP requests; log request selection and token settings)
     #[arg(long)]
-    random_requests: bool,
+    dry_run: bool,
+
+    // Tokenizers reuse the request model; no separate flags.
 
     /// Optional path to write CSV summary output
     #[arg(long)]
@@ -146,112 +179,128 @@ async fn main() -> Result<()> {
         }
     }
 
-    if let Some(vary) = args.output_vary {
-        if args.output_tokens.is_none() {
+    if args.output_tokens.is_none() {
+        if args.output_vary > 0 {
             return Err(anyhow!("output-vary requires --output-tokens to be set"));
         }
-        if vary == 0 {
-            return Err(anyhow!("output-vary must be greater than zero"));
-        }
-        if vary > i64::MAX as usize {
-            return Err(anyhow!(
-                "output-vary must be less than or equal to {}",
-                i64::MAX
-            ));
-        }
+    } else if args.output_vary > i64::MAX as usize {
+        return Err(anyhow!(
+            "output-vary must be less than or equal to {}",
+            i64::MAX
+        ));
     }
 
-    // Validate lognormal parameters
-    let output_lognorm = match (args.output_lognorm_mu, args.output_lognorm_sigma) {
-        (Some(mu), Some(sigma)) => {
+    // Validate lognormal parameters (accept median -> mu conversion)
+    let output_lognorm = {
+        if args.output_tokens.is_some() && (args.output_lognorm_mu.is_some() || args.output_lognorm_median.is_some()) {
+            return Err(anyhow!("lognormal output sampling cannot be combined with --output-tokens"));
+        }
+
+        // Reject mixing mu and median simultaneously
+        if args.output_lognorm_mu.is_some() && args.output_lognorm_median.is_some() {
+            return Err(anyhow!("provide either --output-lognorm-mu or --output-lognorm-median, not both"));
+        }
+
+        // Resolve mu
+        let mu = if let Some(median) = args.output_lognorm_median {
+            if median <= 0.0 {
+                return Err(anyhow!("--output-lognorm-median must be greater than zero"));
+            }
+            median.ln()
+        } else if let Some(mu) = args.output_lognorm_mu {
+            mu
+        } else {
+            // no lognorm
+            f64::NAN
+        };
+
+        if mu.is_nan() {
+            None
+        } else if let Some(sigma) = args.output_lognorm_sigma {
             if sigma <= 0.0 {
                 return Err(anyhow!("output-lognorm-sigma must be greater than zero"));
             }
-            if args.output_tokens.is_some() {
-                return Err(anyhow!("--output-lognorm-mu/--output-lognorm-sigma cannot be used with --output-tokens"));
-            }
             Some((mu, sigma, args.output_lognorm_max))
+        } else {
+            return Err(anyhow!("--output-lognorm-sigma is required when using lognormal output"));
         }
-        (Some(_), None) => {
-            return Err(anyhow!(
-                "--output-lognorm-mu requires --output-lognorm-sigma to be set"
-            ));
-        }
-        (None, Some(_)) => {
-            return Err(anyhow!(
-                "--output-lognorm-sigma requires --output-lognorm-mu to be set"
-            ));
-        }
-        (None, None) => None,
     };
 
     let api_key = args
         .api_key
         .or_else(|| std::env::var(&args.api_key_env).ok());
 
-    let mut request_bodies = load_requests(
-        &args.jsonl,
-        &args.model,
-        args.output_tokens,
-        args.output_vary,
-    )
-    .with_context(|| format!("failed to load requests from {}", args.jsonl.display()))?;
-
-    if request_bodies.is_empty() {
-        return Err(anyhow!(
-            "{} did not contain any valid JSON records with a `text` field",
-            args.jsonl.display()
-        ));
-    }
-
-    let user_count = args.users.unwrap_or(request_bodies.len());
-    if user_count == 0 {
-        return Err(anyhow!("users must be greater than zero"));
-    }
-
-    if !args.random_requests && request_bodies.len() < user_count {
-        return Err(anyhow!(
-            "requested {} users but JSONL only provided {} records (use --random-requests to select randomly from dataset)",
-            user_count,
-            request_bodies.len()
-        ));
-    }
-
-    let dataset_size = request_bodies.len();
-
-    if !args.random_requests {
-        request_bodies.truncate(user_count);
-    }
-
-    let endpoint = resolve_endpoint(&args.host, &args.endpoint);
-    let endpoint_for_config = endpoint.clone(); // Clone for later use in config JSON
+    // Resolve request multiplicity up front
     let requests_per_user = args.requests_per_user.unwrap_or(1);
     if requests_per_user == 0 {
         return Err(anyhow!("requests_per_user must be greater than zero"));
     }
 
+    // Always generate inline: size to users * requests_per_user
+    let user_count = args.users.unwrap_or(1);
+    if user_count == 0 {
+        return Err(anyhow!("users must be greater than zero"));
+    }
+
+    let total_requests = user_count
+        .checked_mul(requests_per_user)
+        .ok_or_else(|| anyhow!("users * requests_per_user overflowed"))?;
+
+    let dist_mode = parse_dist_mode(&args.gen_dist_mode)?;
+    let target_tokens = if args.gen_approx_input_tokens > 0 {
+        Some(args.gen_approx_input_tokens)
+    } else {
+        None
+    };
+
+    let gen_opts = GenerateOptions {
+        count: total_requests,
+        prefix_overlap: args.gen_prefix_overlap,
+        target_tokens,
+        token_tolerance: args.gen_token_tolerance,
+        tokenizer_model: args.model.clone(),
+        dist_mode,
+        dist_median: args.gen_dist_median,
+        dist_sigma: args.gen_dist_sigma,
+        dist_max: args.gen_dist_max,
+        seed: args.seed,
+    };
+
+    let mut request_bodies = generate_requests(&gen_opts, &args.model)?;
+    let output_vary = if args.output_tokens.is_some() {
+        Some(args.output_vary)
+    } else {
+        None
+    };
+    apply_output_tokens(&mut request_bodies, args.output_tokens, output_vary, args.seed)?;
+    let dataset_label = format!("generated (count={}, tokenizer={})", total_requests, args.model);
+    let dataset_size = request_bodies.len();
+
+    // Print input token histogram
+    let input_tokens: Vec<usize> = request_bodies.iter().map(|r| r.input_tokens).collect();
+    if !input_tokens.is_empty() {
+        print_histogram("Input tokens", &input_tokens, 20, 50);
+    }
+
+    let endpoint = resolve_endpoint(&args.host, &args.endpoint);
+    let endpoint_for_config = endpoint.clone(); // Clone for later use in config JSON
+
     // Print benchmark configuration summary
     println!("=== Benchmark Configuration ===");
     println!("Endpoint: {}", endpoint);
     println!("Model: {}", args.model);
-    println!("Dataset: {}", args.jsonl.display());
+    println!("Dataset: {}", dataset_label);
     println!("Dataset size: {}", dataset_size);
     println!("Users: {}", user_count);
-    if args.random_requests {
-        println!("Mode: Random request selection (each user picks randomly from dataset)");
-    } else {
-        println!(
-            "Mode: Fixed assignment (first {} dataset entries)",
-            user_count
-        );
-    }
+    println!("Mode: Deterministic mapping m*N+n into generated dataset");
     println!("Requests per user: {}", requests_per_user);
-    println!("Total requests: {}", user_count * requests_per_user);
+    println!("Total requests: {}", total_requests);
     if let Some(tokens) = args.output_tokens {
-        if let Some(vary) = args.output_vary {
-            println!("Output tokens: {} ±{}", tokens, vary);
+        let vary = args.output_vary;
+        if vary == 0 {
+            println!("Output tokens: {} (no variation)", tokens);
         } else {
-            println!("Output tokens: {}", tokens);
+            println!("Output tokens: {} ±{}", tokens, vary);
         }
     }
     if let Some((mu, sigma, max)) = output_lognorm {
@@ -260,13 +309,13 @@ async fn main() -> Result<()> {
         let expected_median = mu.exp();
         if let Some(max_val) = max {
             println!(
-                "Output tokens: lognormal(μ={}, σ={}, max={}) [expected mean≈{:.0}, median≈{:.0}]",
-                mu, sigma, max_val, expected_mean, expected_median
+                "Output tokens: lognormal(median≈{:.0}, σ={}, max={}) [expected mean≈{:.0}, μ={:.3}]",
+                expected_median, sigma, max_val, expected_mean, mu
             );
         } else {
             println!(
-                "Output tokens: lognormal(μ={}, σ={}) [expected mean≈{:.0}, median≈{:.0}]",
-                mu, sigma, expected_mean, expected_median
+                "Output tokens: lognormal(median≈{:.0}, σ={}) [expected mean≈{:.0}, μ={:.3}]",
+                expected_median, sigma, expected_mean, mu
             );
         }
     }
@@ -289,17 +338,14 @@ async fn main() -> Result<()> {
     )?
     .with_request_timeout(Duration::from_secs(args.request_timeout_secs))
     .with_retry(args.max_retries, Duration::from_millis(args.retry_delay_ms))
-    .with_verbose(args.verbose);
+    .with_verbose(args.verbose)
+    .with_dry_run(args.dry_run);
 
     if let Some(seed) = args.seed {
         config = config.with_seed(seed);
     }
 
-    if args.random_requests {
-        config = config.with_random_request_pool(request_bodies)?;
-    } else {
-        config = config.with_per_user_bodies(request_bodies)?;
-    }
+    config = config.with_request_list(request_bodies)?;
 
     if let Some((mu, sigma, max)) = output_lognorm {
         config = config.with_output_lognorm(mu, sigma, max);
@@ -314,7 +360,7 @@ async fn main() -> Result<()> {
         let record = CsvResult {
             timestamp: start_time.to_rfc3339(),
             model: args.model.clone(),
-            dataset_path: args.jsonl.to_string_lossy().into_owned(),
+            dataset_path: dataset_label.clone(),
             dataset_size,
             users: user_count,
             requests_per_user,
@@ -330,9 +376,8 @@ async fn main() -> Result<()> {
             latency_p50_ms: report.latency_p50.map(|d| d.as_secs_f64() * 1000.0),
             latency_p90_ms: report.latency_p90.map(|d| d.as_secs_f64() * 1000.0),
             latency_p99_ms: report.latency_p99.map(|d| d.as_secs_f64() * 1000.0),
-            random_requests: args.random_requests,
             output_tokens: args.output_tokens,
-            output_vary: args.output_vary,
+            output_vary: if args.output_tokens.is_some() { Some(args.output_vary) } else { None },
             output_lognorm_mu: args.output_lognorm_mu,
             output_lognorm_sigma: args.output_lognorm_sigma,
             output_lognorm_max: args.output_lognorm_max,
@@ -356,136 +401,58 @@ async fn main() -> Result<()> {
     Ok(())
 }
 
-fn load_requests(
-    path: &PathBuf,
-    model: &str,
+fn parse_dist_mode(mode: &str) -> Result<DistMode> {
+    match mode.to_ascii_lowercase().as_str() {
+        "fixed" => Ok(DistMode::Fixed),
+        "lognormal" => Ok(DistMode::LogNormal),
+        other => Err(anyhow!("invalid --gen-dist-mode '{}'; use fixed or lognormal", other)),
+    }
+}
+
+/// Apply output token settings to generated request bodies, honoring optional variation and seed.
+fn apply_output_tokens(
+    bodies: &mut [RequestEntry],
     output_tokens: Option<usize>,
     output_vary: Option<usize>,
-) -> Result<Vec<Value>> {
-    let file = File::open(path).with_context(|| format!("unable to open {}", path.display()))?;
-    let reader = BufReader::new(file);
+    seed: Option<u64>,
+) -> Result<()> {
+    if output_tokens.is_none() {
+        return Ok(());
+    }
 
-    let mut bodies = Vec::new();
-    for (idx, line) in reader.lines().enumerate() {
-        let line = line.with_context(|| format!("failed to read line {}", idx + 1))?;
-        let trimmed = line.trim();
-        if trimmed.is_empty() {
-            continue;
-        }
-        let value: Value = serde_json::from_str(trimmed)
-            .with_context(|| format!("line {} is not valid JSON: {}", idx + 1, trimmed))?;
+    let tokens = output_tokens.unwrap();
+    if tokens == 0 {
+        return Err(anyhow!("output-tokens must be greater than zero"));
+    }
 
-        // Try to parse as OpenAI Batch API format first (with "messages" field)
-        let messages = if let Some(messages_array) = value.get("messages") {
-            // OpenAI Batch API format: {"messages": [...], "model": "..."}
-            if let Some(msgs) = messages_array.as_array() {
-                // Validate and clone the messages array
-                let mut validated_msgs = Vec::new();
-                for (msg_idx, msg) in msgs.iter().enumerate() {
-                    let content = msg.get("content").and_then(|v| v.as_str()).ok_or_else(|| {
-                        anyhow!(
-                            "line {} messages[{}] missing string field `content`",
-                            idx + 1,
-                            msg_idx
-                        )
-                    })?;
-                    let role = msg.get("role").and_then(|v| v.as_str()).ok_or_else(|| {
-                        anyhow!(
-                            "line {} messages[{}] missing string field `role`",
-                            idx + 1,
-                            msg_idx
-                        )
-                    })?;
-                    validated_msgs.push(json!({
-                        "role": role,
-                        "content": content,
-                    }));
-                }
-                validated_msgs
-            } else {
-                return Err(anyhow!(
-                    "line {} field `messages` must be an array",
-                    idx + 1
-                ));
-            }
-        } else if let Some(text_field) = value.get("text") {
-            // Legacy format: {"text": "..."}
-            if let Some(text_str) = text_field.as_str() {
-                // Handle text as a string
-                vec![json!({
-                    "role": "user",
-                    "content": text_str,
-                })]
-            } else if let Some(text_array) = text_field.as_array() {
-                // Handle text as an array of maps with content and role fields
-                let mut msgs = Vec::new();
-                for (msg_idx, msg) in text_array.iter().enumerate() {
-                    let content = msg.get("content").and_then(|v| v.as_str()).ok_or_else(|| {
-                        anyhow!(
-                            "line {} text[{}] missing string field `content`",
-                            idx + 1,
-                            msg_idx
-                        )
-                    })?;
-                    let role = msg.get("role").and_then(|v| v.as_str()).ok_or_else(|| {
-                        anyhow!(
-                            "line {} text[{}] missing string field `role`",
-                            idx + 1,
-                            msg_idx
-                        )
-                    })?;
-                    msgs.push(json!({
-                        "role": role,
-                        "content": content,
-                    }));
-                }
-                msgs
-            } else {
-                return Err(anyhow!(
-                    "line {} field `text` must be either a string or an array",
-                    idx + 1
-                ));
-            }
-        } else {
-            return Err(anyhow!(
-                "line {} missing required field `messages` or `text`",
-                idx + 1
-            ));
-        };
-
-        // Use the model from the JSONL if present, otherwise use the CLI argument
-        let model_to_use = value.get("model").and_then(|v| v.as_str()).unwrap_or(model);
-
-        let mut body = json!({
-            "model": model_to_use,
-            "messages": messages,
-        });
-
-        if let Some(tokens) = output_tokens {
-            let mut final_tokens = tokens;
-            if let Some(vary) = output_vary {
-                // Note: We use thread_rng here as this is per-request randomization
-                // The seed parameter controls request selection and lognormal sampling
-                let mut rng = rand::thread_rng();
+    for (idx, entry) in bodies.iter_mut().enumerate() {
+        let mut final_tokens = tokens;
+        if let Some(vary) = output_vary {
+            if vary > 0 {
+                // Deterministic per-entry variation when seed is provided
+                let mut rng = if let Some(seed) = seed {
+                    let mixed_seed = seed
+                        .wrapping_add((idx as u64).wrapping_mul(65537));
+                    rand::rngs::StdRng::seed_from_u64(mixed_seed)
+                } else {
+                    rand::rngs::StdRng::from_rng(rand::thread_rng())
+                        .map_err(|e| anyhow!("failed to initialize rng: {}", e))?
+                };
                 let vary_i64 = vary as i64;
                 let base_i64 = tokens as i64;
                 let delta = rng.gen_range(-vary_i64..=vary_i64);
                 let adjusted = (base_i64 + delta).max(1);
                 final_tokens = adjusted as usize;
             }
-
-            if let Some(map) = body.as_object_mut() {
-                map.insert("max_tokens".to_string(), json!(final_tokens));
-                map.insert("min_tokens".to_string(), json!(final_tokens));
-                // map.insert("max_completion_tokens".to_string(), json!(final_tokens));
-                // map.insert("nvext".to_string(), json!({ "ignore_eos": true }));
-            }
         }
 
-        bodies.push(body);
+        if let Some(map) = entry.body.as_object_mut() {
+            map.insert("max_tokens".to_string(), json!(final_tokens));
+            map.insert("min_tokens".to_string(), json!(final_tokens));
+        }
     }
 
-    Ok(bodies)
+    Ok(())
 }
 
 fn resolve_endpoint(host: &str, endpoint: &str) -> String {
@@ -554,6 +521,43 @@ fn write_results_csv(path: &Path, record: &CsvResult) -> Result<()> {
         .flush()
         .with_context(|| format!("failed to flush {}", path.display()))?;
     Ok(())
+}
+
+fn print_histogram(label: &str, data: &[usize], bins: usize, bar_width: usize) {
+    if data.is_empty() || bins == 0 {
+        return;
+    }
+    let min = *data.iter().min().unwrap_or(&0);
+    let max = *data.iter().max().unwrap_or(&0);
+    let mean: f64 = data.iter().map(|&v| v as f64).sum::<f64>() / data.len() as f64;
+    let mut sorted = data.to_vec();
+    sorted.sort_unstable();
+    let median = sorted[sorted.len() / 2];
+    let p95 = sorted[((sorted.len() as f64 * 0.95).round() as usize).min(sorted.len() - 1)];
+    let p99 = sorted[((sorted.len() as f64 * 0.99).round() as usize).min(sorted.len() - 1)];
+
+    let span = if max > min { max - min } else { 1 };
+    let bin_width = cmp::max(1, (span as f64 / bins as f64).ceil() as usize);
+    let mut counts = vec![0usize; bins];
+    for &v in data {
+        let idx = cmp::min((v - min) / bin_width, bins - 1);
+        counts[idx] += 1;
+    }
+    let max_count = *counts.iter().max().unwrap_or(&1);
+
+    eprintln!("\n== {} (n={}) ==", label, data.len());
+    eprintln!("min={} mean={:.1} median={} p95={} p99={} max={}", min, mean, median, p95, p99, max);
+    for (i, count) in counts.iter().enumerate() {
+        let start = min + i * bin_width;
+        let end = start + bin_width;
+        let bar_len = if max_count > 0 {
+            ((count * bar_width) as f64 / max_count as f64).round() as usize
+        } else {
+            0
+        };
+        let bar = "#".repeat(bar_len);
+        eprintln!("{:>6}-{:>6} | {:<bar_width$} {}", start, end, bar, count, bar_width = bar_width);
+    }
 }
 
 fn format_latency(latency: Option<Duration>) -> String {
