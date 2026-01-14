@@ -506,7 +506,6 @@ def start_vllm_server(env: RemoteEnvironment, config: dict) -> None:
     vllm_cmd = build_cli_command(f"vllm serve {model}", vllm_args)
     env_exports = " ".join(f"{k}={v}" for k, v in vllm_env.items())
     full_cmd = (
-        "source /opt/batchbench/.venv/bin/activate && "
         f"{env_exports} nohup {vllm_cmd} > /tmp/vllm.log 2>&1 &"
     )
 
