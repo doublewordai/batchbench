@@ -15,48 +15,49 @@ export PRIME_SSH_KEY_PATH=...
 
 ## Running
 
+### Single Config
+
 ```bash
 python -m batchbench.harness configs/harness.yaml
 ```
 
-## Cleanup
+By default, the instance is automatically terminated after the benchmark completes. With a single config, you have the option to:
 
-The GPU instance is **not** automatically deleted after benchmarking. Terminate manually:
-
+**Keep the instance running** for another benchmark:
 ```bash
-prime pods terminate <pod-id>
+python -m batchbench.harness --keep-alive configs/harness.yaml
 ```
 
-## Resuming
-
-Reuse an existing instance with `--resume`:
-
+**Resume** an existing instance:
 ```bash
 python -m batchbench.harness --resume <pod-id> configs/harness.yaml
 ```
 
-Use `--resume` when:
-1. Finished benchmarking and want to reuse the same instance for another run
-2. Script exited early due to an error and you want to retry after fixing
+### Directory of Configs
 
-When changing instance config (docker-image, availability, create), spin up a new instance instead.
+```bash
+python -m batchbench.harness configs/my-benchmarks/
+```
+
+Instances are automatically terminated after processing completes. The `--resume` and `--keep-alive` options are not available in this mode.
 
 ## Configuration
 
-The config file is the interface for setting instance, vLLM, generate, and benchmark args. Use the exact syntax of the relevant API or CLI:
+The config file is the interface for setting instance, vLLM, and benchmark args. Use the exact syntax of the relevant API or CLI:
 
 - `instance.availability`: https://docs.primeintellect.ai/api-reference/availability/get-gpu-availability
 - `instance.create`: https://docs.primeintellect.ai/api-reference/pods/create-pod
 - `vllm.args`: `vllm serve --help`
-- `generate`: `python -m batchbench.generate --help`
-- `benchmark`: see `rust-bench/README.md`
+- `benchmark`: `batchbench --help`
 
 ## Architecture
 
-Entry point is `run_harness()` which orchestrates the full pipeline. The first step is either provisioning a new GPU or connecting to an already provisioned one.
+The harness accepts either a single config file or a directory of configs (all `*.yaml` files in that directory).
 
-**Provisioning**: Query the availability API endpoint per instance config, select the cheapest GPU from results, then POST to the create API endpoint. The `Instance` class holds SSH connection info (host, port, user) in its fields. API interaction is abstracted through `PrimeIntellectClient`.
+**Entry point**: `run_queues()` orchestrates the full pipeline. First, `build_queues()` groups configs by instance type (determined by `gpu_type` and `gpu_count` from the availability settings). Each group becomes a queue processed by a `QueueWorker`. Multiple queues run in parallel via `ThreadPoolExecutor`.
 
-**Environment setup**: For a freshly provisioned GPU, pull the docker image, start the container, clone batchbench, activate the virtual environment, and install dependencies. When resuming (`--resume`), setup continues from where it was interrupted or skips entirely if already complete. These actions are executed via `docker pull`/`run`/`exec` wrapped in `SSHSession.run()`, which uses paramiko to maintain an SSH connection and execute commands on the remote instance. `RemoteEnvironment` wraps `SSHSession` and provides an `exec()` method that runs `docker exec` inside the SSH session.
+**Provisioning**: For each queue, the worker queries the availability API endpoint, selects the cheapest GPU from results, then POSTs to the create API endpoint. The `Instance` class holds SSH connection info (host, port, user) in its fields. API interaction is abstracted through `PrimeIntellectClient`. Once provisioned, all configs in that queue run sequentially on the same instance. After processing completes, the instance is automatically terminated by default.
 
-**Pipeline stages**: After setup, three stages run sequentially: start vLLM server, generate synthetic data (`batchbench.generate`), run benchmark (`batchbench.online`). Each stage builds a CLI command from config and executes it via `RemoteEnvironment.exec()`.
+**Environment setup**: For a freshly provisioned GPU, the harness pulls the docker image, starts the container, and clones the batchbench repository. When resuming (`--resume`), setup continues from where it was interrupted or skips entirely if already complete. These actions are executed via `docker pull`/`run`/`exec` wrapped in `SSHSession.run()`, which uses paramiko to maintain an SSH connection and execute commands on the remote instance. `RemoteEnvironment` wraps `SSHSession` and provides an `exec()` method that runs `docker exec` inside the SSH session.
+
+**Pipeline stages**: After setup, two stages run sequentially: start vLLM server, run benchmark (via Rust binary). Each stage builds a CLI command from config and executes it via `RemoteEnvironment.exec()`.
