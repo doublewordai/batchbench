@@ -114,14 +114,16 @@ async fn run_user(
     match mode {
         RunMode::Finite { requests_per_user } => {
             for request_id in 0..requests_per_user {
-                dispatch_request(user_id, request_id, &client, &config, &event_tx, &status_tx).await?;
+                dispatch_request(user_id, request_id, &client, &config, &event_tx, &status_tx)
+                    .await?;
             }
         }
         RunMode::LongRunning { duration } => {
             let deadline = Instant::now() + duration;
             let mut request_id = 0usize;
             while Instant::now() < deadline {
-                dispatch_request(user_id, request_id, &client, &config, &event_tx, &status_tx).await?;
+                dispatch_request(user_id, request_id, &client, &config, &event_tx, &status_tx)
+                    .await?;
                 request_id = request_id.wrapping_add(1);
             }
         }
@@ -144,23 +146,26 @@ async fn dispatch_request(
         .and_then(|v| v.checked_add(user_id))
         .ok_or_else(|| anyhow!("request index overflowed"))?;
 
-    let request_entry: RequestEntry = config
-        .requests
-        .get(idx)
-        .cloned()
-        .ok_or_else(|| anyhow!("no request entry for user {} request {} (index {})", user_id, request_id, idx))?;
+    let request_entry: RequestEntry = config.requests.get(idx).cloned().ok_or_else(|| {
+        anyhow!(
+            "no request entry for user {} request {} (index {})",
+            user_id,
+            request_id,
+            idx
+        )
+    })?;
 
     let mut request_body = request_entry.body.clone();
 
     // If lognormal output sampling is configured, sample and inject tokens
     let mut lognorm_tokens: Option<usize> = None;
     if let Some((mu, sigma, max)) = config.output_lognorm {
-        use rand_distr::{Distribution, LogNormal};
         use rand::SeedableRng;
+        use rand_distr::{Distribution, LogNormal};
 
         let log_normal = LogNormal::new(mu, sigma)
             .map_err(|e| anyhow!("failed to create lognormal distribution: {}", e))?;
-        
+
         let sampled: f64 = if let Some(seed) = config.seed {
             // Use seeded RNG for reproducibility
             // Mix in user_id and request_id to ensure different requests get different samples
@@ -173,9 +178,9 @@ async fn dispatch_request(
             let mut rng = rand::thread_rng();
             log_normal.sample(&mut rng)
         };
-        
+
         let mut tokens = (sampled.round() as usize).max(1); // Ensure at least 1 token
-        
+
         // Apply max truncation if specified
         if let Some(max_val) = max {
             tokens = tokens.min(max_val);
@@ -631,10 +636,7 @@ fn print_sorted_dry_run_events(events: &[DryRunRecord]) {
     });
 
     // Output token histogram (only if tokens present)
-    let output_tokens: Vec<usize> = sorted
-        .iter()
-        .filter_map(|ev| ev.tokens)
-        .collect();
+    let output_tokens: Vec<usize> = sorted.iter().filter_map(|ev| ev.tokens).collect();
     if !output_tokens.is_empty() {
         print_histogram("Output tokens (dry-run)", &output_tokens, 20, 50);
     }
@@ -643,16 +645,11 @@ fn print_sorted_dry_run_events(events: &[DryRunRecord]) {
         match ev.tokens {
             Some(t) => println!(
                 "[DRY-RUN] user={} request={} input_tokens={} tokens={}",
-                ev.user_id,
-                ev.request_id,
-                ev.input_tokens,
-                t
+                ev.user_id, ev.request_id, ev.input_tokens, t
             ),
             None => println!(
                 "[DRY-RUN] user={} request={} input_tokens={} tokens=(not set)",
-                ev.user_id,
-                ev.request_id,
-                ev.input_tokens
+                ev.user_id, ev.request_id, ev.input_tokens
             ),
         }
     }
@@ -681,7 +678,10 @@ fn print_histogram(label: &str, data: &[usize], bins: usize, bar_width: usize) {
     let max_count = *counts.iter().max().unwrap_or(&1);
 
     eprintln!("\n== {} (n={}) ==", label, data.len());
-    eprintln!("min={} mean={:.1} median={} p95={} p99={} max={}", min, mean, median, p95, p99, max);
+    eprintln!(
+        "min={} mean={:.1} median={} p95={} p99={} max={}",
+        min, mean, median, p95, p99, max
+    );
     for (i, count) in counts.iter().enumerate() {
         let start = min + i * bin_width;
         let end = start + bin_width;
@@ -691,6 +691,13 @@ fn print_histogram(label: &str, data: &[usize], bins: usize, bar_width: usize) {
             0
         };
         let bar = "#".repeat(bar_len);
-        eprintln!("{:>6}-{:>6} | {:<bar_width$} {}", start, end, bar, count, bar_width = bar_width);
+        eprintln!(
+            "{:>6}-{:>6} | {:<bar_width$} {}",
+            start,
+            end,
+            bar,
+            count,
+            bar_width = bar_width
+        );
     }
 }

@@ -1,20 +1,72 @@
-# BatchBench (Rust-only)
+# BatchBench
 
-BatchBench is now a Rust-only CLI for generating synthetic request corpora and running online benchmarks against OpenAI-compatible endpoints.
+BatchBench ships a Rust benchmarking core with a thin Python wrapper.
 
-## Build
+You can install it with:
 
 ```bash
-cargo build --release --bin batchbench -p batchbench-rs
-# Binary: rust-bench/target/release/batchbench
+uv pip install batchbench
 ```
 
-## Run
+The Python package exposes Rust functionality for request generation and benchmark execution.
 
-Generate a workload and run the benchmark (inline generation sized to `users * requests_per_user`):
+## Python API
+
+```python
+import batchbench
+
+config = {
+    "endpoint": "https://example.com/v1/chat/completions",
+    "user_count": 1,
+    "mode": batchbench.finite_mode(requests_per_user=1),
+    "request_body": batchbench.request_entry(
+        {
+            "model": "gpt-4o-mini",
+            "messages": [{"role": "user", "content": "ping"}],
+        },
+        line_idx=0,
+        input_tokens=1,
+    ),
+    "requests": [
+        batchbench.request_entry(
+            {
+                "model": "gpt-4o-mini",
+                "messages": [{"role": "user", "content": "ping"}],
+                "max_tokens": 4,
+            },
+            line_idx=0,
+            input_tokens=1,
+        )
+    ],
+    "dry_run": True,
+}
+
+report = batchbench.run_benchmark(config)
+print(report)
+```
+
+Request generation:
+
+```python
+requests = batchbench.generate_requests(
+    {
+        "count": 16,
+        "prefix_overlap": 0.2,
+        "target_tokens": 128,
+        "tokenizer_model": "Qwen/Qwen3-VL-235B-A22B-Instruct-FP8",
+        "dist_mode": "fixed",
+    },
+    model="Qwen/Qwen3-VL-235B-A22B-Instruct-FP8",
+)
+```
+
+## Python CLI
+
+The package installs `batchbench`, which forwards directly to the Rust CLI implementation.
+Use the same flags as the Rust binary:
 
 ```bash
-./rust-bench/target/release/batchbench \
+batchbench \
   --model gpt-4o-mini \
   --users 8 \
   --requests-per-user 2 \
@@ -23,9 +75,17 @@ Generate a workload and run the benchmark (inline generation sized to `users * r
   --output-vary 0
 ```
 
-Set your API key via `--api-key` or the environment variable named by `--api-key-env` (defaults to `OPENAI_API_KEY`).
+## Rust CLI
 
-## Notes
+The existing Rust CLI is unchanged:
 
-- The CLI deterministically maps request index `m*N + n` (request m, user n) into the generated dataset.
-- `build_rust.sh` simply builds the release binary; no Python packaging remains.
+```bash
+cargo build --release --manifest-path rust/Cargo.toml --bin batchbench
+./rust/target/release/batchbench --help
+```
+
+## Releases and PyPI
+
+- CI (`.github/workflows/ci.yaml`) checks Rust build/test, builds a wheel, and runs smoke tests.
+- Release Please (`.github/workflows/release-please.yaml`) opens/updates release PRs and, on merge, creates `v*` tags/releases.
+- Python release workflow (`.github/workflows/python-release.yaml`) builds wheel/sdist and publishes to PyPI on `v*` tag pushes.

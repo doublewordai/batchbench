@@ -1,0 +1,57 @@
+name: Publish Python Package
+
+on:
+  push:
+    tags:
+      - "v*"
+
+permissions:
+  contents: read
+  id-token: write
+
+jobs:
+  publish:
+    runs-on: ubuntu-latest
+    environment: pypi
+    env:
+      RELEASE_TAG: ${{ github.ref_name }}
+      RELEASE_REF: ${{ github.ref }}
+    steps:
+      - uses: actions/checkout@v6
+        with:
+          ref: ${{ env.RELEASE_REF }}
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: Install Rust
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Sync versions to release tag
+        run: |
+          if [[ -n "${RELEASE_TAG}" ]]; then
+            tag="${RELEASE_TAG}"
+          else
+            echo "RELEASE_TAG is empty; expected a v* tag push."
+            exit 1
+          fi
+
+          version="${tag#v}"
+          sed -i -E "s/^version = \".*\"$/version = \"${version}\"/" rust/Cargo.toml
+          sed -i -E "s/^version = \".*\"$/version = \"${version}\"/" pyproject.toml
+
+      - name: Build wheel and sdist
+        uses: PyO3/maturin-action@v1
+        with:
+          command: build
+          args: --release --sdist --manifest-path rust/Cargo.toml --features python --out dist
+
+      - name: Verify dist locally (act)
+        if: ${{ env.ACT }}
+        run: ls -la dist
+
+      - name: Publish to PyPI
+        if: ${{ !env.ACT }}
+        uses: pypa/gh-action-pypi-publish@release/v1
