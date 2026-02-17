@@ -1,0 +1,12 @@
+{
+  "packages": {
+    ".": {
+      "release-type": "simple",
+      "extra-files": [
+        "pyproject.toml",
+        "rust/Cargo.toml"
+      ]
+    }
+  },
+  "include-component-in-tag": false
+}
