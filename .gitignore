@@ -2,6 +2,8 @@ __pycache__/
 *.py[cod]
 *.jsonl
 *.json
+!release-please-config.json
+!.release-please-manifest.json
 results.csv
 out/
 data/
