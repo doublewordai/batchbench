@@ -47,7 +47,7 @@ pub fn generate_requests(opts: &GenerateOptions, model: &str) -> Result<Vec<Requ
         None => StdRng::from_rng(rand::thread_rng())
             .context("failed to initialize rng from thread_rng")?,
     };
-    
+
     let tokenizer = Tokenizer::from_pretrained(&opts.tokenizer_model, None)
         .map_err(|e| anyhow!("failed to load tokenizer {}: {}", opts.tokenizer_model, e))?;
 
@@ -133,9 +133,7 @@ pub fn generate_requests(opts: &GenerateOptions, model: &str) -> Result<Vec<Requ
         let mut final_ids = prefix_ids.clone();
         final_ids.extend_from_slice(&unique_tail);
 
-        let mut prompt = tokenizer
-            .decode(&final_ids, true)
-            .unwrap_or_default();
+        let mut prompt = tokenizer.decode(&final_ids, true).unwrap_or_default();
 
         if prompt.trim().is_empty() {
             // Fallback: join ids when decoding yields empty text

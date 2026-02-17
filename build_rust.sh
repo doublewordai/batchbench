@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# Build the Rust binary only (no Python packaging)
+# Build the standalone Rust binary
 set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
@@ -16,4 +16,3 @@ mkdir -p "$TARGET_DIR"
 cp target/release/batchbench "$TARGET_DIR/batchbench"
 
 echo "✓ Rust binary built and copied to $TARGET_DIR/batchbench"
-

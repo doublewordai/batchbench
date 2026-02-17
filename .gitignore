@@ -16,6 +16,8 @@ rust-bench/target/
 target/
 dist/
 src/batchbench.egg-info/
+src/batchbench/_core*.so
+src/batchbench/_core*.pyd
 *.png
 pricing/
 examples/*
