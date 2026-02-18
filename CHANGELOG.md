@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.2.1](https://github.com/doublewordai/batchbench/compare/v0.2.0...v0.2.1) (2026-02-18)
+
+
+### Bug Fixes
+
+* document Ctrl+C benchmark cancellation ([fd851df](https://github.com/doublewordai/batchbench/commit/fd851df8709a35e67e419eafc30e3cab84e74d53))
+
 ## [0.2.0](https://github.com/doublewordai/batchbench/compare/v0.1.1...v0.2.0) (2026-02-17)
 
 
