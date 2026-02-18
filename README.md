@@ -75,6 +75,8 @@ batchbench \
   --output-vary 0
 ```
 
+Press `Ctrl+C` during a run to cancel active requests and print a partial summary.
+
 ## Rust CLI
 
 The existing Rust CLI is unchanged:
