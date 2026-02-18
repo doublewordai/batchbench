@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.2.2](https://github.com/doublewordai/batchbench/compare/v0.2.1...v0.2.2) (2026-02-18)
+
+
+### Bug Fixes
+
+* make PyPI wheel publish workflow pass on GitHub-hosted runners ([856c527](https://github.com/doublewordai/batchbench/commit/856c527fae748d9935f793e38d20b697d60b628c))
+
 ## [0.2.1](https://github.com/doublewordai/batchbench/compare/v0.2.0...v0.2.1) (2026-02-18)
 
 
