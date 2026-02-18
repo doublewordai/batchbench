@@ -1,5 +1,13 @@
 # Changelog
 
+## [0.2.3](https://github.com/doublewordai/batchbench/compare/v0.2.2...v0.2.3) (2026-02-18)
+
+
+### Bug Fixes
+
+* publish manylinux wheel artifacts compatible with PyPI ([da580d0](https://github.com/doublewordai/batchbench/commit/da580d0ded9c6b4c75a1fc285941c27bf226d509))
+* publish manylinux wheels accepted by PyPI ([a2d4f78](https://github.com/doublewordai/batchbench/commit/a2d4f7861992ed22f984860f7588eb1e6e93b523))
+
 ## [0.2.2](https://github.com/doublewordai/batchbench/compare/v0.2.1...v0.2.2) (2026-02-18)
 
 
