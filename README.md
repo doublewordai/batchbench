@@ -88,4 +88,4 @@ cargo build --release --manifest-path rust/Cargo.toml --bin batchbench
 
 - CI (`.github/workflows/ci.yaml`) checks Rust build/test, builds a wheel, and runs smoke tests.
 - Release Please (`.github/workflows/release-please.yaml`) opens/updates release PRs and, on merge, creates `v*` tags/releases.
-- Python release workflow (`.github/workflows/python-release.yaml`) builds wheel/sdist and publishes to PyPI on `v*` tag pushes.
+- Python release workflow (`.github/workflows/python-release.yaml`) builds and publishes prebuilt platform wheels to PyPI on `v*` tag pushes.

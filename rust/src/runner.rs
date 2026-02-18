@@ -1,6 +1,7 @@
 use std::env;
 use std::io::{self, Write};
 use std::path::PathBuf;
+use std::pin::pin;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
@@ -60,8 +61,46 @@ pub async fn run_benchmark(config: BenchmarkConfig) -> Result<BenchmarkReport> {
     drop(event_tx);
     drop(status_tx);
 
-    while let Some(join_result) = join_set.join_next().await {
-        join_result??;
+    let mut interrupted = false;
+    let mut ctrl_c = pin!(tokio::signal::ctrl_c());
+    while !join_set.is_empty() {
+        tokio::select! {
+            signal_result = &mut ctrl_c, if !interrupted => {
+                match signal_result {
+                    Ok(()) => {
+                        interrupted = true;
+                        eprintln!("\nReceived Ctrl+C, cancelling active requests...");
+                        join_set.abort_all();
+                    }
+                    Err(err) => {
+                        eprintln!("\nFailed to listen for Ctrl+C: {}", err);
+                    }
+                }
+            }
+            join_result = join_set.join_next() => {
+                match join_result {
+                    Some(Ok(worker_result)) => {
+                        match worker_result {
+                            Ok(()) => {}
+                            Err(err) => {
+                                if interrupted {
+                                    eprintln!("worker exited with error during shutdown: {}", err);
+                                } else {
+                                    return Err(err);
+                                }
+                            }
+                        }
+                    }
+                    Some(Err(err)) => {
+                        if interrupted && err.is_cancelled() {
+                            continue;
+                        }
+                        return Err(anyhow!("worker task failed: {}", err));
+                    }
+                    None => break,
+                }
+            }
+        }
     }
 
     let aggregator = metrics_handle.await??;

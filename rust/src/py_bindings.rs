@@ -314,24 +314,26 @@ fn generate_requests_json(options_json: &str, model: &str) -> PyResult<String> {
 }
 
 #[pyfunction]
-fn run_benchmark_json(config_json: &str) -> PyResult<String> {
+fn run_benchmark_json(py: Python<'_>, config_json: &str) -> PyResult<String> {
     let config: PyBenchmarkConfig =
         serde_json::from_str(config_json).map_err(|err| to_py_error(anyhow!(err)))?;
-    let runtime = tokio::runtime::Builder::new_multi_thread()
-        .enable_all()
-        .build()
-        .map_err(|err| to_py_error(anyhow!(err)))?;
-    let report = runtime
-        .block_on(run_benchmark(
-            to_benchmark_config(config).map_err(to_py_error)?,
-        ))
-        .map_err(to_py_error)?;
-    serde_json::to_string(&PyBenchmarkReport::from(report)).map_err(|err| to_py_error(anyhow!(err)))
+    let config = to_benchmark_config(config).map_err(to_py_error)?;
+
+    let result = py.allow_threads(move || -> Result<String> {
+        let runtime = tokio::runtime::Builder::new_multi_thread()
+            .enable_all()
+            .build()
+            .map_err(anyhow::Error::from)?;
+        let report = runtime.block_on(run_benchmark(config))?;
+        serde_json::to_string(&PyBenchmarkReport::from(report)).map_err(anyhow::Error::from)
+    });
+    result.map_err(to_py_error)
 }
 
 #[pyfunction]
-fn run_cli(argv: Vec<String>) -> PyResult<()> {
-    run_from_argv(argv).map_err(to_py_error)
+fn run_cli(py: Python<'_>, argv: Vec<String>) -> PyResult<()> {
+    py.allow_threads(move || run_from_argv(argv))
+        .map_err(to_py_error)
 }
 
 #[pymodule]
