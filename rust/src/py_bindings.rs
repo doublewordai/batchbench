@@ -77,6 +77,8 @@ struct PyGenerateOptions {
     #[serde(default)]
     dist_mode: PyDistMode,
     #[serde(default)]
+    dist_mu: Option<f64>,
+    #[serde(default)]
     dist_median: Option<f64>,
     #[serde(default = "default_dist_sigma")]
     dist_sigma: f64,
@@ -99,6 +101,7 @@ impl From<PyGenerateOptions> for GenerateOptions {
             token_tolerance: value.token_tolerance,
             tokenizer_model: value.tokenizer_model,
             dist_mode: value.dist_mode.into(),
+            dist_mu: value.dist_mu,
             dist_median: value.dist_median,
             dist_sigma: value.dist_sigma,
             dist_max: value.dist_max,
@@ -168,6 +171,8 @@ struct PyBenchmarkConfig {
     #[serde(default)]
     output_lognorm: Option<PyOutputLognorm>,
     #[serde(default)]
+    sglang: bool,
+    #[serde(default)]
     seed: Option<u64>,
     #[serde(default)]
     dry_run: bool,
@@ -209,6 +214,10 @@ fn to_benchmark_config(value: PyBenchmarkConfig) -> Result<BenchmarkConfig> {
     if let Some(output_lognorm) = value.output_lognorm {
         config =
             config.with_output_lognorm(output_lognorm.mu, output_lognorm.sigma, output_lognorm.max);
+    }
+
+    if value.sglang {
+        config = config.with_sglang(true);
     }
 
     if let Some(seed) = value.seed {

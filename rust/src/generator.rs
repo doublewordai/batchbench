@@ -6,7 +6,7 @@ use tokenizers::Tokenizer;
 
 use crate::config::RequestEntry;
 
-#[derive(Clone, Debug)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum DistMode {
     Fixed,
     LogNormal,
@@ -20,6 +20,7 @@ pub struct GenerateOptions {
     pub token_tolerance: Option<usize>,
     pub tokenizer_model: String,
     pub dist_mode: DistMode,
+    pub dist_mu: Option<f64>,
     pub dist_median: Option<f64>,
     pub dist_sigma: f64,
     pub dist_max: Option<usize>,
@@ -30,11 +31,7 @@ fn resolve_tolerance(target_tokens: usize, explicit: Option<usize>) -> usize {
     if target_tokens == 0 {
         return 0;
     }
-    if let Some(explicit) = explicit {
-        return explicit;
-    }
-    // Match Python behavior: max(5, 5% of target)
-    std::cmp::max(5, (target_tokens as f64 * 0.05).round() as usize)
+    explicit.unwrap_or(0)
 }
 
 pub fn generate_requests(opts: &GenerateOptions, model: &str) -> Result<Vec<RequestEntry>> {
@@ -59,13 +56,26 @@ pub fn generate_requests(opts: &GenerateOptions, model: &str) -> Result<Vec<Requ
 
     match opts.dist_mode {
         DistMode::LogNormal => {
-            let median = opts
-                .dist_median
-                .ok_or_else(|| anyhow!("--gen-dist-median is required for lognormal mode"))?;
-            let mu = median.ln();
+            if opts.dist_mu.is_some() && opts.dist_median.is_some() {
+                return Err(anyhow!(
+                    "provide either --input-lognorm-mu or --input-lognorm-median, not both"
+                ));
+            }
+            let mu = if let Some(median) = opts.dist_median {
+                if median <= 0.0 {
+                    return Err(anyhow!("--input-lognorm-median must be greater than zero"));
+                }
+                median.ln()
+            } else if let Some(mu) = opts.dist_mu {
+                mu
+            } else {
+                return Err(anyhow!(
+                    "--input-lognorm-median or --input-lognorm-mu is required for lognormal input generation"
+                ));
+            };
             let sigma = opts.dist_sigma;
             if sigma <= 0.0 {
-                return Err(anyhow!("lognormal sigma must be > 0"));
+                return Err(anyhow!("input-lognorm-sigma must be greater than zero"));
             }
             let lognorm = LogNormal::new(mu, sigma)
                 .map_err(|e| anyhow!("failed to create lognormal distribution: {}", e))?;

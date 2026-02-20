@@ -41,11 +41,10 @@ benchmark:
   seed: 42
 
   # Generation args
-  gen-prefix-overlap: 0.0
-  gen-dist-mode: lognormal
-  gen-dist-median: 1000
-  gen-dist-sigma: 1.68
-  gen-dist-max: 128000
+  input-prefix-overlap: 0.0
+  input-lognorm-median: 1000
+  input-lognorm-sigma: 1.68
+  input-lognorm-max: 128000
 
   # Load args
   users: 32

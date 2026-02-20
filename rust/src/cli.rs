@@ -40,6 +40,7 @@ struct CsvResult {
     output_lognorm_mu: Option<f64>,
     output_lognorm_sigma: Option<f64>,
     output_lognorm_max: Option<usize>,
+    sglang: bool,
     request_timeout_secs: u64,
     max_retries: usize,
     retry_delay_ms: u64,
@@ -54,32 +55,48 @@ struct CsvResult {
 )]
 struct Args {
     /// Fraction of tokens shared as prefix across generated prompts (0.0-1.0)
-    #[arg(long, default_value_t = 0.0)]
-    gen_prefix_overlap: f64,
+    #[arg(
+        long = "input-prefix-overlap",
+        alias = "gen-prefix-overlap",
+        default_value_t = 0.0
+    )]
+    input_prefix_overlap: f64,
 
-    /// Approximate number of input tokens per prompt (0 = disable)
-    #[arg(long, default_value_t = 0)]
-    gen_approx_input_tokens: usize,
+    /// Target number of input tokens per prompt (0 = disable)
+    #[arg(
+        long = "input-tokens",
+        alias = "gen-approx-input-tokens",
+        default_value_t = 0
+    )]
+    input_tokens: usize,
 
-    /// Optional explicit token tolerance (+/-). Default is max(5, 5% of target).
-    #[arg(long)]
-    gen_token_tolerance: Option<usize>,
+    /// Apply a +/- uniform variation when --input-tokens is provided
+    #[arg(
+        long = "input-vary",
+        alias = "gen-token-tolerance",
+        default_value_t = 0
+    )]
+    input_vary: usize,
 
-    /// Token length sampling mode for generation: fixed or lognormal
-    #[arg(long, default_value = "fixed")]
-    gen_dist_mode: String,
+    /// Sample input length from log-normal distribution with this mu parameter (mean of underlying normal)
+    #[arg(long = "input-lognorm-mu")]
+    input_lognorm_mu: Option<f64>,
 
-    /// Median token count for lognormal generation mode
-    #[arg(long)]
-    gen_dist_median: Option<f64>,
+    /// Sample input length from log-normal distribution with this median (preferred over mu)
+    #[arg(long = "input-lognorm-median", alias = "gen-dist-median")]
+    input_lognorm_median: Option<f64>,
 
-    /// Sigma for lognormal generation mode
-    #[arg(long, default_value_t = 0.5)]
-    gen_dist_sigma: f64,
+    /// Sample input length from log-normal distribution with this sigma parameter (std dev of underlying normal)
+    #[arg(long = "input-lognorm-sigma", alias = "gen-dist-sigma")]
+    input_lognorm_sigma: Option<f64>,
 
-    /// Maximum token count when using lognormal generation mode
-    #[arg(long)]
-    gen_dist_max: Option<usize>,
+    /// Maximum input tokens when using lognormal sampling (values above this are truncated)
+    #[arg(long = "input-lognorm-max", alias = "gen-dist-max")]
+    input_lognorm_max: Option<usize>,
+
+    /// Deprecated legacy input distribution mode selector
+    #[arg(long = "gen-dist-mode", hide = true)]
+    legacy_gen_dist_mode: Option<String>,
 
     /// Number of concurrent users to spawn (default: 1)
     #[arg(long)]
@@ -144,6 +161,10 @@ struct Args {
     /// Maximum output tokens when using lognormal sampling (values above this are truncated)
     #[arg(long)]
     output_lognorm_max: Option<usize>,
+
+    /// Use SGLang token parameters (min_new_tokens/max_new_tokens) instead of min_tokens/max_tokens
+    #[arg(long)]
+    sglang: bool,
 
     /// Enable verbose mode to print request/response details
     #[arg(long, short)]
@@ -214,6 +235,84 @@ fn run_with_runtime(args: Args) -> Result<()> {
 }
 
 async fn run(args: Args) -> Result<()> {
+    let legacy_input_dist_mode = if let Some(mode) = args.legacy_gen_dist_mode.as_deref() {
+        Some(parse_dist_mode(mode)?)
+    } else {
+        None
+    };
+
+    let input_lognorm_requested = args.input_lognorm_mu.is_some()
+        || args.input_lognorm_median.is_some()
+        || args.input_lognorm_sigma.is_some()
+        || args.input_lognorm_max.is_some();
+
+    if args.input_tokens == 0 && args.input_vary > 0 {
+        return Err(anyhow!("input-vary requires --input-tokens to be set"));
+    }
+
+    if args.input_lognorm_mu.is_some() && args.input_lognorm_median.is_some() {
+        return Err(anyhow!(
+            "provide either --input-lognorm-mu or --input-lognorm-median, not both"
+        ));
+    }
+
+    let input_dist_mode = match legacy_input_dist_mode {
+        Some(DistMode::Fixed) => {
+            if input_lognorm_requested {
+                return Err(anyhow!(
+                    "--gen-dist-mode fixed cannot be combined with --input-lognorm-* flags"
+                ));
+            }
+            DistMode::Fixed
+        }
+        Some(DistMode::LogNormal) => DistMode::LogNormal,
+        None => {
+            if input_lognorm_requested {
+                DistMode::LogNormal
+            } else {
+                DistMode::Fixed
+            }
+        }
+    };
+
+    if args.input_tokens > 0 && input_dist_mode == DistMode::LogNormal {
+        return Err(anyhow!(
+            "lognormal input sampling cannot be combined with --input-tokens"
+        ));
+    }
+
+    let (input_dist_mu, input_dist_median, input_dist_sigma, input_dist_max) = if input_dist_mode
+        == DistMode::LogNormal
+    {
+        let sigma = if let Some(sigma) = args.input_lognorm_sigma {
+            if sigma <= 0.0 {
+                return Err(anyhow!("input-lognorm-sigma must be greater than zero"));
+            }
+            sigma
+        } else if legacy_input_dist_mode == Some(DistMode::LogNormal) {
+            0.5
+        } else {
+            return Err(anyhow!(
+                "--input-lognorm-sigma is required when using lognormal input generation"
+            ));
+        };
+
+        if let Some(median) = args.input_lognorm_median {
+            if median <= 0.0 {
+                return Err(anyhow!("--input-lognorm-median must be greater than zero"));
+            }
+            (None, Some(median), sigma, args.input_lognorm_max)
+        } else if let Some(mu) = args.input_lognorm_mu {
+            (Some(mu), None, sigma, args.input_lognorm_max)
+        } else {
+            return Err(anyhow!(
+                    "--input-lognorm-median or --input-lognorm-mu is required when using lognormal input generation"
+                ));
+        }
+    } else {
+        (None, None, 0.5, None)
+    };
+
     if let Some(tokens) = args.output_tokens {
         if tokens == 0 {
             return Err(anyhow!("output-tokens must be greater than zero"));
@@ -301,23 +400,27 @@ async fn run(args: Args) -> Result<()> {
         .checked_mul(requests_per_user)
         .ok_or_else(|| anyhow!("users * requests_per_user overflowed"))?;
 
-    let dist_mode = parse_dist_mode(&args.gen_dist_mode)?;
-    let target_tokens = if args.gen_approx_input_tokens > 0 {
-        Some(args.gen_approx_input_tokens)
+    let target_tokens = if args.input_tokens > 0 {
+        Some(args.input_tokens)
     } else {
         None
     };
 
     let gen_opts = GenerateOptions {
         count: total_requests,
-        prefix_overlap: args.gen_prefix_overlap,
+        prefix_overlap: args.input_prefix_overlap,
         target_tokens,
-        token_tolerance: args.gen_token_tolerance,
+        token_tolerance: if args.input_tokens > 0 {
+            Some(args.input_vary)
+        } else {
+            None
+        },
         tokenizer_model: args.model.clone(),
-        dist_mode,
-        dist_median: args.gen_dist_median,
-        dist_sigma: args.gen_dist_sigma,
-        dist_max: args.gen_dist_max,
+        dist_mode: input_dist_mode,
+        dist_mu: input_dist_mu,
+        dist_median: input_dist_median,
+        dist_sigma: input_dist_sigma,
+        dist_max: input_dist_max,
         seed: args.seed,
     };
 
@@ -332,6 +435,7 @@ async fn run(args: Args) -> Result<()> {
         args.output_tokens,
         output_vary,
         args.seed,
+        args.sglang,
     )?;
     let dataset_label = format!(
         "generated (count={}, tokenizer={})",
@@ -383,6 +487,14 @@ async fn run(args: Args) -> Result<()> {
         }
     }
     println!("Request timeout: {}s", args.request_timeout_secs);
+    println!(
+        "Output token params: {}",
+        if args.sglang {
+            "sglang (min_new_tokens/max_new_tokens)"
+        } else {
+            "default (min_tokens/max_tokens)"
+        }
+    );
     println!("Max retries: {}", args.max_retries);
     println!("Retry delay: {}ms", args.retry_delay_ms);
     println!("===============================\n");
@@ -402,7 +514,8 @@ async fn run(args: Args) -> Result<()> {
     .with_request_timeout(Duration::from_secs(args.request_timeout_secs))
     .with_retry(args.max_retries, Duration::from_millis(args.retry_delay_ms))
     .with_verbose(args.verbose)
-    .with_dry_run(args.dry_run);
+    .with_dry_run(args.dry_run)
+    .with_sglang(args.sglang);
 
     if let Some(seed) = args.seed {
         config = config.with_seed(seed);
@@ -448,6 +561,7 @@ async fn run(args: Args) -> Result<()> {
             output_lognorm_mu: args.output_lognorm_mu,
             output_lognorm_sigma: args.output_lognorm_sigma,
             output_lognorm_max: args.output_lognorm_max,
+            sglang: args.sglang,
             request_timeout_secs: args.request_timeout_secs,
             max_retries: args.max_retries,
             retry_delay_ms: args.retry_delay_ms,
@@ -485,6 +599,7 @@ fn apply_output_tokens(
     output_tokens: Option<usize>,
     output_vary: Option<usize>,
     seed: Option<u64>,
+    use_sglang: bool,
 ) -> Result<()> {
     if output_tokens.is_none() {
         return Ok(());
@@ -516,12 +631,21 @@ fn apply_output_tokens(
         }
 
         if let Some(map) = entry.body.as_object_mut() {
-            map.insert("max_tokens".to_string(), json!(final_tokens));
-            map.insert("min_tokens".to_string(), json!(final_tokens));
+            let (max_key, min_key) = output_token_field_names(use_sglang);
+            map.insert(max_key.to_string(), json!(final_tokens));
+            map.insert(min_key.to_string(), json!(final_tokens));
         }
     }
 
     Ok(())
+}
+
+fn output_token_field_names(use_sglang: bool) -> (&'static str, &'static str) {
+    if use_sglang {
+        ("max_new_tokens", "min_new_tokens")
+    } else {
+        ("max_tokens", "min_tokens")
+    }
 }
 
 fn resolve_endpoint(host: &str, endpoint: &str) -> String {
