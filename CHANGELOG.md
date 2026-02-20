@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.3.0](https://github.com/doublewordai/batchbench/compare/v0.2.3...v0.3.0) (2026-02-20)
+
+
+### Features
+
+* simplify input token CLI flags and add SGLang output token mode ([#15](https://github.com/doublewordai/batchbench/issues/15)) ([fdd5200](https://github.com/doublewordai/batchbench/commit/fdd5200ad0da0ab2c0041e0beb7c26d1158e4f47))
+
 ## [0.2.3](https://github.com/doublewordai/batchbench/compare/v0.2.2...v0.2.3) (2026-02-18)
 
 
