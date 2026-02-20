@@ -38,6 +38,8 @@ pub struct BenchmarkConfig {
     pub seed: Option<u64>,
     /// Dry-run mode: skip HTTP and log selected request + token info
     pub dry_run: bool,
+    /// Use SGLang sampling parameter names for output-token constraints
+    pub sglang: bool,
 }
 
 impl BenchmarkConfig {
@@ -97,6 +99,7 @@ impl BenchmarkConfig {
             output_lognorm: None,
             seed: None,
             dry_run: false,
+            sglang: false,
         })
     }
 
@@ -132,6 +135,11 @@ impl BenchmarkConfig {
 
     pub fn with_dry_run(mut self, dry_run: bool) -> Self {
         self.dry_run = dry_run;
+        self
+    }
+
+    pub fn with_sglang(mut self, sglang: bool) -> Self {
+        self.sglang = sglang;
         self
     }
 

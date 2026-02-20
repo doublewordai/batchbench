@@ -25,6 +25,14 @@ struct DryRunRecord {
     tokens: Option<usize>,
 }
 
+fn output_token_field_names(use_sglang: bool) -> (&'static str, &'static str) {
+    if use_sglang {
+        ("max_new_tokens", "min_new_tokens")
+    } else {
+        ("max_tokens", "min_tokens")
+    }
+}
+
 pub async fn run_benchmark(config: BenchmarkConfig) -> Result<BenchmarkReport> {
     let start = Instant::now();
     let client = Client::builder()
@@ -226,17 +234,22 @@ async fn dispatch_request(
         }
 
         if let Some(map) = request_body.as_object_mut() {
-            map.insert("max_tokens".to_string(), serde_json::json!(tokens));
-            map.insert("min_tokens".to_string(), serde_json::json!(tokens));
+            let (max_key, min_key) = output_token_field_names(config.sglang);
+            map.insert(max_key.to_string(), serde_json::json!(tokens));
+            map.insert(min_key.to_string(), serde_json::json!(tokens));
             lognorm_tokens = Some(tokens);
         }
     }
 
     if config.dry_run {
-        // Prefer the most recent token setting in the body (max_tokens/min_tokens)
+        let (max_key, min_key) = output_token_field_names(config.sglang);
         let token_field = request_body
-            .get("max_tokens")
+            .get(max_key)
+            .or_else(|| request_body.get(min_key))
+            .or_else(|| request_body.get("max_tokens"))
             .or_else(|| request_body.get("min_tokens"))
+            .or_else(|| request_body.get("max_new_tokens"))
+            .or_else(|| request_body.get("min_new_tokens"))
             .and_then(|v| v.as_u64())
             .map(|v| v as usize)
             .or(lognorm_tokens);

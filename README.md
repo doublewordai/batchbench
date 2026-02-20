@@ -70,10 +70,13 @@ batchbench \
   --model gpt-4o-mini \
   --users 8 \
   --requests-per-user 2 \
-  --gen-approx-input-tokens 256 \
+  --input-tokens 256 \
   --output-tokens 64 \
   --output-vary 0
 ```
+
+Use `--sglang` to apply output token constraints via `min_new_tokens`/`max_new_tokens`
+instead of `min_tokens`/`max_tokens`.
 
 Press `Ctrl+C` during a run to cancel active requests and print a partial summary.
 

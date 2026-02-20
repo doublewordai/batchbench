@@ -34,6 +34,7 @@ The CLI reuses the library entry points under the hood and prints a `BenchmarkRe
 - `--retry-delay-ms <milliseconds>` Base delay between retries; default `250` milliseconds.
 - `--output-tokens <num>` Force completions to emit exactly `<num>` tokens (sets `max_completion_tokens` and enables `nvext.ignore_eos`).
 - `--output-vary <num>` When used with `--output-tokens`, add a per-request uniform variation in `[-num, +num]` tokens (lower bounded at 1).
+- `--sglang` Use `min_new_tokens` and `max_new_tokens` for output token constraints (default uses `min_tokens` and `max_tokens`).
 
 ### Library Usage
 
