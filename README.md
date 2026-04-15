@@ -75,6 +75,25 @@ batchbench \
   --output-vary 0
 ```
 
+To benchmark a JSONL dataset instead of generated prompts, pass `--dataset-jsonl`.
+Each non-empty line may be one of:
+
+- `{"text": "prompt text", "input_tokens": 123}` to build a chat completion request.
+- `{"body": {...}, "input_tokens": 123}` to send `body` as the request payload.
+- A full request body object, such as `{"model": "...", "messages": [...]}`.
+
+```bash
+batchbench \
+  --dataset-jsonl dataset.jsonl \
+  --model gpt-4o-mini \
+  --users 8 \
+  --requests-per-user 2
+```
+
+The dataset must contain at least `users * requests-per-user` request entries.
+If `--users` is omitted for a dataset run, BatchBench uses as many complete
+request rounds as the dataset can provide for the selected `--requests-per-user`.
+
 Use `--sglang` to apply output token constraints via `min_new_tokens`/`max_new_tokens`
 instead of `min_tokens`/`max_tokens`.
 

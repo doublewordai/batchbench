@@ -10,7 +10,7 @@ The repository includes a ready-to-go CLI that reads prompts from a JSONL file (
 
 ```
 cargo run --bin batchbench -- \
-  --jsonl data/requests.jsonl \
+  --dataset-jsonl data/requests.jsonl \
   --users 32 \
   --model gpt-4o-mini \
   --host https://api.openai.com \
@@ -21,8 +21,8 @@ By default every user issues a single request, so make sure the JSONL file conta
 
 The CLI reuses the library entry points under the hood and prints a `BenchmarkReport` when the run completes.
 
-- `--jsonl <path>` Path to the JSONL input whose objects expose a `text` field (required).
-- `--users <num>` Number of concurrent workers; defaults to the JSONL record count.
+- `--dataset-jsonl <path>` Path to the JSONL input. Each non-empty line may contain a `text` field, a `body` object, or a full request body object. The legacy alias `--jsonl` is also accepted.
+- `--users <num>` Number of concurrent workers. For generated prompts this defaults to `1`; for JSONL datasets this defaults to as many complete request rounds as the dataset can provide for the selected `--requests-per-user`.
 - `--model <name>` Model identifier injected into every request; default `gpt-4o-mini`.
 - `--host <url>` Base host for the API, including scheme; default `https://api.openai.com`.
 - `--endpoint <path-or-url>` Endpoint path or full URL; default `/v1/chat/completions`.

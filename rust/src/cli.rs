@@ -1,5 +1,6 @@
 use std::ffi::OsString;
 use std::fs;
+use std::io::{BufRead, BufReader};
 use std::path::Path;
 use std::time::Duration;
 
@@ -97,6 +98,11 @@ struct Args {
     /// Deprecated legacy input distribution mode selector
     #[arg(long = "gen-dist-mode", hide = true)]
     legacy_gen_dist_mode: Option<String>,
+
+    /// Path to a JSONL dataset. Each line may contain {"text": "..."},
+    /// {"body": {...}}, or a full request body object.
+    #[arg(long, alias = "jsonl")]
+    dataset_jsonl: Option<PathBuf>,
 
     /// Number of concurrent users to spawn (default: 1)
     #[arg(long)]
@@ -245,6 +251,18 @@ async fn run(args: Args) -> Result<()> {
         || args.input_lognorm_median.is_some()
         || args.input_lognorm_sigma.is_some()
         || args.input_lognorm_max.is_some();
+    let dataset_jsonl = args.dataset_jsonl.clone();
+    let input_generation_requested = args.input_tokens > 0
+        || args.input_vary > 0
+        || input_lognorm_requested
+        || args.input_prefix_overlap != 0.0
+        || legacy_input_dist_mode.is_some();
+
+    if dataset_jsonl.is_some() && input_generation_requested {
+        return Err(anyhow!(
+            "--dataset-jsonl cannot be combined with input generation flags"
+        ));
+    }
 
     if args.input_tokens == 0 && args.input_vary > 0 {
         return Err(anyhow!("input-vary requires --input-tokens to be set"));
@@ -390,8 +408,60 @@ async fn run(args: Args) -> Result<()> {
         return Err(anyhow!("requests_per_user must be greater than zero"));
     }
 
-    // Always generate inline: size to users * requests_per_user
-    let user_count = args.users.unwrap_or(1);
+    let (mut request_bodies, dataset_label, dataset_is_generated) =
+        if let Some(dataset_path) = dataset_jsonl.as_ref() {
+            let requests = load_dataset_jsonl(dataset_path, &args.model)?;
+            let label = dataset_path.display().to_string();
+            (requests, label, false)
+        } else {
+            let user_count = args.users.unwrap_or(1);
+            if user_count == 0 {
+                return Err(anyhow!("users must be greater than zero"));
+            }
+            let total_requests = user_count
+                .checked_mul(requests_per_user)
+                .ok_or_else(|| anyhow!("users * requests_per_user overflowed"))?;
+
+            let target_tokens = if args.input_tokens > 0 {
+                Some(args.input_tokens)
+            } else {
+                None
+            };
+
+            let gen_opts = GenerateOptions {
+                count: total_requests,
+                prefix_overlap: args.input_prefix_overlap,
+                target_tokens,
+                token_tolerance: if args.input_tokens > 0 {
+                    Some(args.input_vary)
+                } else {
+                    None
+                },
+                tokenizer_model: args.model.clone(),
+                dist_mode: input_dist_mode,
+                dist_mu: input_dist_mu,
+                dist_median: input_dist_median,
+                dist_sigma: input_dist_sigma,
+                dist_max: input_dist_max,
+                seed: args.seed,
+            };
+
+            let requests = generate_requests(&gen_opts, &args.model)?;
+            let label = format!(
+                "generated (count={}, tokenizer={})",
+                total_requests, args.model
+            );
+            (requests, label, true)
+        };
+
+    let dataset_size = request_bodies.len();
+    let user_count = if dataset_is_generated {
+        args.users.unwrap_or(1)
+    } else if let Some(users) = args.users {
+        users
+    } else {
+        dataset_size / requests_per_user
+    };
     if user_count == 0 {
         return Err(anyhow!("users must be greater than zero"));
     }
@@ -399,32 +469,16 @@ async fn run(args: Args) -> Result<()> {
     let total_requests = user_count
         .checked_mul(requests_per_user)
         .ok_or_else(|| anyhow!("users * requests_per_user overflowed"))?;
+    if total_requests > dataset_size {
+        return Err(anyhow!(
+            "dataset contains {} request entries but benchmark needs {} (users {} * requests-per-user {})",
+            dataset_size,
+            total_requests,
+            user_count,
+            requests_per_user
+        ));
+    }
 
-    let target_tokens = if args.input_tokens > 0 {
-        Some(args.input_tokens)
-    } else {
-        None
-    };
-
-    let gen_opts = GenerateOptions {
-        count: total_requests,
-        prefix_overlap: args.input_prefix_overlap,
-        target_tokens,
-        token_tolerance: if args.input_tokens > 0 {
-            Some(args.input_vary)
-        } else {
-            None
-        },
-        tokenizer_model: args.model.clone(),
-        dist_mode: input_dist_mode,
-        dist_mu: input_dist_mu,
-        dist_median: input_dist_median,
-        dist_sigma: input_dist_sigma,
-        dist_max: input_dist_max,
-        seed: args.seed,
-    };
-
-    let mut request_bodies = generate_requests(&gen_opts, &args.model)?;
     let output_vary = if args.output_tokens.is_some() {
         Some(args.output_vary)
     } else {
@@ -437,11 +491,6 @@ async fn run(args: Args) -> Result<()> {
         args.seed,
         args.sglang,
     )?;
-    let dataset_label = format!(
-        "generated (count={}, tokenizer={})",
-        total_requests, args.model
-    );
-    let dataset_size = request_bodies.len();
 
     // Print input token histogram
     let input_tokens: Vec<usize> = request_bodies.iter().map(|r| r.input_tokens).collect();
@@ -459,7 +508,14 @@ async fn run(args: Args) -> Result<()> {
     println!("Dataset: {}", dataset_label);
     println!("Dataset size: {}", dataset_size);
     println!("Users: {}", user_count);
-    println!("Mode: Deterministic mapping m*N+n into generated dataset");
+    println!(
+        "Mode: Deterministic mapping m*N+n into {}",
+        if dataset_is_generated {
+            "generated dataset"
+        } else {
+            "dataset"
+        }
+    );
     println!("Requests per user: {}", requests_per_user);
     println!("Total requests: {}", total_requests);
     if let Some(tokens) = args.output_tokens {
@@ -591,6 +647,104 @@ fn parse_dist_mode(mode: &str) -> Result<DistMode> {
             other
         )),
     }
+}
+
+fn load_dataset_jsonl(path: &Path, model: &str) -> Result<Vec<RequestEntry>> {
+    let file = fs::File::open(path)
+        .with_context(|| format!("failed to open dataset JSONL {}", path.display()))?;
+    let reader = BufReader::new(file);
+    let mut requests = Vec::new();
+
+    for (line_number, line) in reader.lines().enumerate() {
+        let line_number = line_number + 1;
+        let line = line.with_context(|| {
+            format!(
+                "failed to read line {} from dataset JSONL {}",
+                line_number,
+                path.display()
+            )
+        })?;
+        let trimmed = line.trim();
+        if trimmed.is_empty() {
+            continue;
+        }
+
+        let value: serde_json::Value = serde_json::from_str(trimmed).with_context(|| {
+            format!(
+                "failed to parse dataset JSONL {} line {} as JSON",
+                path.display(),
+                line_number
+            )
+        })?;
+        requests.push(dataset_value_to_request_entry(
+            value,
+            requests.len(),
+            line_number,
+            model,
+        )?);
+    }
+
+    if requests.is_empty() {
+        return Err(anyhow!("dataset JSONL {} is empty", path.display()));
+    }
+
+    Ok(requests)
+}
+
+fn dataset_value_to_request_entry(
+    value: serde_json::Value,
+    line_idx: usize,
+    line_number: usize,
+    model: &str,
+) -> Result<RequestEntry> {
+    let input_tokens = value
+        .get("input_tokens")
+        .and_then(|v| v.as_u64())
+        .map(|v| v as usize)
+        .unwrap_or(0);
+
+    if let Some(body) = value.get("body").cloned() {
+        if !body.is_object() {
+            return Err(anyhow!(
+                "dataset line {} has a body field, but body must be a JSON object",
+                line_number
+            ));
+        }
+        return Ok(RequestEntry {
+            body,
+            line_idx,
+            input_tokens,
+        });
+    }
+
+    if let Some(text) = value.get("text").and_then(|v| v.as_str()) {
+        return Ok(RequestEntry {
+            body: json!({
+                "messages": [
+                    {"role": "user", "content": text}
+                ],
+                "model": model,
+            }),
+            line_idx,
+            input_tokens,
+        });
+    }
+
+    let mut body = value;
+    let Some(map) = body.as_object_mut() else {
+        return Err(anyhow!(
+            "dataset line {} must be a JSON object, or contain a body object or text string",
+            line_number
+        ));
+    };
+    map.remove("input_tokens");
+    map.remove("line_idx");
+
+    Ok(RequestEntry {
+        body,
+        line_idx,
+        input_tokens,
+    })
 }
 
 /// Apply output token settings to generated request bodies, honoring optional variation and seed.
@@ -760,6 +914,52 @@ fn print_histogram(label: &str, data: &[usize], bins: usize, bar_width: usize) {
             count,
             bar_width = bar_width
         );
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn dataset_text_line_becomes_chat_request() {
+        let entry =
+            dataset_value_to_request_entry(json!({"text": "hello", "input_tokens": 3}), 0, 1, "m")
+                .unwrap();
+
+        assert_eq!(entry.line_idx, 0);
+        assert_eq!(entry.input_tokens, 3);
+        assert_eq!(entry.body["model"], "m");
+        assert_eq!(entry.body["messages"][0]["content"], "hello");
+    }
+
+    #[test]
+    fn dataset_body_line_uses_body_object() {
+        let entry = dataset_value_to_request_entry(
+            json!({"body": {"model": "x", "prompt": "hello"}, "input_tokens": 5}),
+            4,
+            5,
+            "ignored",
+        )
+        .unwrap();
+
+        assert_eq!(entry.line_idx, 4);
+        assert_eq!(entry.input_tokens, 5);
+        assert_eq!(entry.body, json!({"model": "x", "prompt": "hello"}));
+    }
+
+    #[test]
+    fn dataset_full_request_line_drops_metadata_fields() {
+        let entry = dataset_value_to_request_entry(
+            json!({"model": "x", "messages": [], "input_tokens": 7, "line_idx": 99}),
+            1,
+            2,
+            "ignored",
+        )
+        .unwrap();
+
+        assert_eq!(entry.input_tokens, 7);
+        assert_eq!(entry.body, json!({"model": "x", "messages": []}));
     }
 }
 
