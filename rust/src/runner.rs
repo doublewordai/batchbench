@@ -14,6 +14,7 @@ use tokio::sync::mpsc;
 use tokio::task::JoinSet;
 
 use crate::config::{BenchmarkConfig, RequestEntry, RunMode};
+use crate::metrics::spawn_metrics_collector;
 use crate::report::{BenchmarkReport, FailureRecord};
 use std::cmp;
 
@@ -33,6 +34,50 @@ fn output_token_field_names(use_sglang: bool) -> (&'static str, &'static str) {
     }
 }
 
+fn apply_json_decoding(body: &mut Value, use_sglang: bool) {
+    let Some(map) = body.as_object_mut() else {
+        return;
+    };
+
+    if use_sglang {
+        map.insert(
+            "response_format".to_string(),
+            serde_json::json!({"type": "json_object"}),
+        );
+        return;
+    }
+
+    let structured_outputs = map
+        .entry("structured_outputs".to_string())
+        .or_insert_with(|| serde_json::json!({}));
+    if !structured_outputs.is_object() {
+        *structured_outputs = serde_json::json!({});
+    }
+
+    structured_outputs
+        .as_object_mut()
+        .expect("structured_outputs was normalized to an object")
+        .insert("json_object".to_string(), serde_json::json!(true));
+}
+
+fn apply_qwen35_disable_thinking(body: &mut Value) {
+    let Some(map) = body.as_object_mut() else {
+        return;
+    };
+
+    let chat_template_kwargs = map
+        .entry("chat_template_kwargs".to_string())
+        .or_insert_with(|| serde_json::json!({}));
+    if !chat_template_kwargs.is_object() {
+        *chat_template_kwargs = serde_json::json!({});
+    }
+
+    chat_template_kwargs
+        .as_object_mut()
+        .expect("chat_template_kwargs was normalized to an object")
+        .insert("enable_thinking".to_string(), serde_json::json!(false));
+}
+
 pub async fn run_benchmark(config: BenchmarkConfig) -> Result<BenchmarkReport> {
     let start = Instant::now();
     let client = Client::builder()
@@ -48,11 +93,20 @@ pub async fn run_benchmark(config: BenchmarkConfig) -> Result<BenchmarkReport> {
 
     let config = Arc::new(config);
 
+    let scrape_handle = if !config.dry_run {
+        match config.metrics.clone() {
+            Some(metrics_config) => Some(spawn_metrics_collector(metrics_config).await?),
+            None => None,
+        }
+    } else {
+        None
+    };
+
     let (event_tx, event_rx) = mpsc::unbounded_channel();
     let (status_tx, status_rx) = mpsc::unbounded_channel();
 
     let metrics_status_tx = status_tx.clone();
-    let metrics_handle = tokio::spawn(async move {
+    let aggregator_handle = tokio::spawn(async move {
         collect_metrics(event_rx, planned_total_requests, metrics_status_tx).await
     });
 
@@ -70,6 +124,7 @@ pub async fn run_benchmark(config: BenchmarkConfig) -> Result<BenchmarkReport> {
     drop(status_tx);
 
     let mut interrupted = false;
+    let mut fatal_error: Option<anyhow::Error> = None;
     let mut ctrl_c = pin!(tokio::signal::ctrl_c());
     while !join_set.is_empty() {
         tokio::select! {
@@ -94,7 +149,8 @@ pub async fn run_benchmark(config: BenchmarkConfig) -> Result<BenchmarkReport> {
                                 if interrupted {
                                     eprintln!("worker exited with error during shutdown: {}", err);
                                 } else {
-                                    return Err(err);
+                                    fatal_error = Some(err);
+                                    join_set.abort_all();
                                 }
                             }
                         }
@@ -103,7 +159,8 @@ pub async fn run_benchmark(config: BenchmarkConfig) -> Result<BenchmarkReport> {
                         if interrupted && err.is_cancelled() {
                             continue;
                         }
-                        return Err(anyhow!("worker task failed: {}", err));
+                        fatal_error = Some(anyhow!("worker task failed: {}", err));
+                        join_set.abort_all();
                     }
                     None => break,
                 }
@@ -111,14 +168,23 @@ pub async fn run_benchmark(config: BenchmarkConfig) -> Result<BenchmarkReport> {
         }
     }
 
-    let aggregator = metrics_handle.await??;
+    let aggregator = aggregator_handle.await??;
     let total_duration = start.elapsed();
 
     tracker_handle
         .await
         .map_err(|err| anyhow!("status tracker task failed: {}", err))?;
 
-    let (report, dry_run_events) = aggregator.finalize(total_duration);
+    let metrics_report = match scrape_handle {
+        Some(handle) => Some(handle.stop().await?),
+        None => None,
+    };
+
+    if let Some(err) = fatal_error {
+        return Err(err);
+    }
+
+    let (report, dry_run_events) = aggregator.finalize(total_duration, metrics_report);
 
     if config.dry_run && !dry_run_events.is_empty() {
         print_sorted_dry_run_events(&dry_run_events);
@@ -203,6 +269,14 @@ async fn dispatch_request(
     })?;
 
     let mut request_body = request_entry.body.clone();
+
+    if config.enable_json_decoding {
+        apply_json_decoding(&mut request_body, config.sglang);
+    }
+
+    if config.qwen35_disable_thinking {
+        apply_qwen35_disable_thinking(&mut request_body);
+    }
 
     // If lognormal output sampling is configured, sample and inject tokens
     let mut lognorm_tokens: Option<usize> = None;
@@ -508,7 +582,11 @@ impl MetricsAggregator {
         Ok(())
     }
 
-    fn finalize(self, total_duration: Duration) -> (BenchmarkReport, Vec<DryRunRecord>) {
+    fn finalize(
+        self,
+        total_duration: Duration,
+        metrics: Option<crate::metrics::MetricsRunReport>,
+    ) -> (BenchmarkReport, Vec<DryRunRecord>) {
         let total_requests = self.successful_requests + self.failed_requests;
         let duration_secs = total_duration.as_secs_f64();
         let prompt_tokens_per_second = if duration_secs > 0.0 {
@@ -547,6 +625,7 @@ impl MetricsAggregator {
             latency_p90,
             latency_p99,
             failures: self.failures,
+            metrics,
         };
 
         (report, self.dry_run_events)
@@ -750,6 +829,88 @@ fn print_histogram(label: &str, data: &[usize], bins: usize, bar_width: usize) {
             bar,
             count,
             bar_width = bar_width
+        );
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use serde_json::json;
+
+    #[test]
+    fn json_decoding_for_sglang_adds_response_format() {
+        let mut body = json!({
+            "model": "m",
+            "messages": [{"role": "user", "content": "ping"}]
+        });
+
+        apply_json_decoding(&mut body, true);
+
+        assert_eq!(body["response_format"], json!({"type": "json_object"}));
+        assert!(body.get("extra_body").is_none());
+    }
+
+    #[test]
+    fn json_decoding_for_vllm_adds_structured_outputs() {
+        let mut body = json!({
+            "model": "m",
+            "messages": [{"role": "user", "content": "ping"}]
+        });
+
+        apply_json_decoding(&mut body, false);
+
+        assert_eq!(body["structured_outputs"]["json_object"], json!(true));
+        assert!(body.get("response_format").is_none());
+    }
+
+    #[test]
+    fn json_decoding_for_vllm_preserves_existing_structured_outputs_fields() {
+        let mut body = json!({
+            "model": "m",
+            "priority": 1,
+            "structured_outputs": {
+                "regex": "[0-9]+"
+            }
+        });
+
+        apply_json_decoding(&mut body, false);
+
+        assert_eq!(body["priority"], json!(1));
+        assert_eq!(body["structured_outputs"]["regex"], json!("[0-9]+"));
+        assert_eq!(body["structured_outputs"]["json_object"], json!(true));
+    }
+
+    #[test]
+    fn qwen35_disable_thinking_adds_chat_template_kwargs() {
+        let mut body = json!({
+            "model": "m",
+            "messages": [{"role": "user", "content": "ping"}]
+        });
+
+        apply_qwen35_disable_thinking(&mut body);
+
+        assert_eq!(
+            body["chat_template_kwargs"]["enable_thinking"],
+            json!(false)
+        );
+    }
+
+    #[test]
+    fn qwen35_disable_thinking_preserves_existing_chat_template_kwargs_fields() {
+        let mut body = json!({
+            "model": "m",
+            "chat_template_kwargs": {
+                "foo": "bar"
+            }
+        });
+
+        apply_qwen35_disable_thinking(&mut body);
+
+        assert_eq!(body["chat_template_kwargs"]["foo"], json!("bar"));
+        assert_eq!(
+            body["chat_template_kwargs"]["enable_thinking"],
+            json!(false)
         );
     }
 }

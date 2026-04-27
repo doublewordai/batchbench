@@ -5,8 +5,8 @@ use std::path::Path;
 use std::time::Duration;
 
 use crate::{
-    generate_requests, run_benchmark, BenchmarkConfig, BenchmarkReport, DistMode, GenerateOptions,
-    RequestEntry, RunMode,
+    generate_requests, resolve_metrics_endpoint, run_benchmark, BenchmarkConfig, BenchmarkReport,
+    DistMode, GenerateOptions, MetricsConfig, RequestEntry, RunMode,
 };
 use anyhow::{anyhow, Context, Result};
 use clap::Parser;
@@ -42,11 +42,19 @@ struct CsvResult {
     output_lognorm_sigma: Option<f64>,
     output_lognorm_max: Option<usize>,
     sglang: bool,
+    enable_json_decoding: bool,
+    qwen35_disable_thinking: bool,
     request_timeout_secs: u64,
     max_retries: usize,
     retry_delay_ms: u64,
     host: String,
     endpoint: String,
+    metrics_enabled: bool,
+    metrics_output_dir: Option<String>,
+    metrics_scrape_count: Option<u64>,
+    metrics_scrape_error_count: Option<u64>,
+    metrics_first_timestamp: Option<String>,
+    metrics_last_timestamp: Option<String>,
 }
 
 #[derive(Parser, Debug)]
@@ -172,6 +180,14 @@ struct Args {
     #[arg(long)]
     sglang: bool,
 
+    /// Enable JSON constrained decoding using provider-specific request fields
+    #[arg(long)]
+    enable_json_decoding: bool,
+
+    /// Add chat_template_kwargs.enable_thinking=false to each request
+    #[arg(long)]
+    qwen35_disable_thinking: bool,
+
     /// Enable verbose mode to print request/response details
     #[arg(long, short)]
     verbose: bool,
@@ -184,6 +200,26 @@ struct Args {
     /// Optional path to write CSV summary output
     #[arg(long)]
     results_csv: Option<PathBuf>,
+
+    /// Directory for Prometheus metrics artifacts; enables scraping when set
+    #[arg(long)]
+    metrics_output_dir: Option<PathBuf>,
+
+    /// Metrics endpoint path or full URL (default: /metrics)
+    #[arg(long, default_value = "/metrics")]
+    metrics_endpoint: String,
+
+    /// Metrics scrape interval in milliseconds
+    #[arg(long, default_value_t = 1000)]
+    metrics_interval_ms: u64,
+
+    /// Metrics scrape request timeout in milliseconds
+    #[arg(long, default_value_t = 2000)]
+    metrics_timeout_ms: u64,
+
+    /// Fail the benchmark if any metrics scrape fails
+    #[arg(long)]
+    metrics_fail_on_error: bool,
 
     /// Random seed for reproducible benchmarking (default: None)
     #[arg(long)]
@@ -398,6 +434,15 @@ async fn run(args: Args) -> Result<()> {
         }
     };
 
+    if args.metrics_output_dir.is_some() {
+        if args.metrics_interval_ms == 0 {
+            return Err(anyhow!("metrics-interval-ms must be greater than zero"));
+        }
+        if args.metrics_timeout_ms == 0 {
+            return Err(anyhow!("metrics-timeout-ms must be greater than zero"));
+        }
+    }
+
     let api_key = args
         .api_key
         .or_else(|| std::env::var(&args.api_key_env).ok());
@@ -551,8 +596,36 @@ async fn run(args: Args) -> Result<()> {
             "default (min_tokens/max_tokens)"
         }
     );
+    println!(
+        "JSON decoding: {}",
+        if args.enable_json_decoding {
+            if args.sglang {
+                "enabled (SGLang response_format)"
+            } else {
+                "enabled (vLLM structured_outputs)"
+            }
+        } else {
+            "disabled"
+        }
+    );
+    println!(
+        "Qwen 3.5 thinking: {}",
+        if args.qwen35_disable_thinking {
+            "disabled (chat_template_kwargs.enable_thinking=false)"
+        } else {
+            "unchanged"
+        }
+    );
     println!("Max retries: {}", args.max_retries);
     println!("Retry delay: {}ms", args.retry_delay_ms);
+    if let Some(metrics_output_dir) = args.metrics_output_dir.as_ref() {
+        let metrics_endpoint = resolve_metrics_endpoint(&args.host, &args.metrics_endpoint)?;
+        println!("Metrics endpoint: {}", metrics_endpoint);
+        println!("Metrics output: {}", metrics_output_dir.display());
+        println!("Metrics interval: {}ms", args.metrics_interval_ms);
+    } else {
+        println!("Metrics scraping: disabled");
+    }
     println!("===============================\n");
 
     let mode = RunMode::Finite { requests_per_user };
@@ -571,7 +644,9 @@ async fn run(args: Args) -> Result<()> {
     .with_retry(args.max_retries, Duration::from_millis(args.retry_delay_ms))
     .with_verbose(args.verbose)
     .with_dry_run(args.dry_run)
-    .with_sglang(args.sglang);
+    .with_sglang(args.sglang)
+    .with_json_decoding(args.enable_json_decoding)
+    .with_qwen35_disable_thinking(args.qwen35_disable_thinking);
 
     if let Some(seed) = args.seed {
         config = config.with_seed(seed);
@@ -581,6 +656,30 @@ async fn run(args: Args) -> Result<()> {
 
     if let Some((mu, sigma, max)) = output_lognorm {
         config = config.with_output_lognorm(mu, sigma, max);
+    }
+
+    if let Some(metrics_output_dir) = args.metrics_output_dir.as_ref() {
+        let metrics_endpoint = resolve_metrics_endpoint(&args.host, &args.metrics_endpoint)?;
+        config = config.with_metrics(MetricsConfig {
+            endpoint: metrics_endpoint,
+            output_dir: metrics_output_dir.clone(),
+            interval: Duration::from_millis(args.metrics_interval_ms),
+            timeout: Duration::from_millis(args.metrics_timeout_ms),
+            fail_on_error: args.metrics_fail_on_error,
+            metadata: json!({
+                "model": args.model.clone(),
+                "dataset_path": dataset_label.clone(),
+                "dataset_size": dataset_size,
+                "users": user_count,
+                "requests_per_user": requests_per_user,
+                "total_requests": total_requests,
+                "host": args.host.clone(),
+                "endpoint": endpoint_for_config.clone(),
+                "sglang": args.sglang,
+                "enable_json_decoding": args.enable_json_decoding,
+                "qwen35_disable_thinking": args.qwen35_disable_thinking,
+            }),
+        });
     }
 
     let start_time = chrono::Utc::now();
@@ -618,11 +717,31 @@ async fn run(args: Args) -> Result<()> {
             output_lognorm_sigma: args.output_lognorm_sigma,
             output_lognorm_max: args.output_lognorm_max,
             sglang: args.sglang,
+            enable_json_decoding: args.enable_json_decoding,
+            qwen35_disable_thinking: args.qwen35_disable_thinking,
             request_timeout_secs: args.request_timeout_secs,
             max_retries: args.max_retries,
             retry_delay_ms: args.retry_delay_ms,
             host: args.host.clone(),
             endpoint: endpoint_for_config.clone(),
+            metrics_enabled: report.metrics.is_some(),
+            metrics_output_dir: report
+                .metrics
+                .as_ref()
+                .map(|metrics| metrics.output_dir.clone()),
+            metrics_scrape_count: report.metrics.as_ref().map(|metrics| metrics.scrape_count),
+            metrics_scrape_error_count: report
+                .metrics
+                .as_ref()
+                .map(|metrics| metrics.scrape_error_count),
+            metrics_first_timestamp: report
+                .metrics
+                .as_ref()
+                .and_then(|metrics| metrics.first_timestamp.clone()),
+            metrics_last_timestamp: report
+                .metrics
+                .as_ref()
+                .and_then(|metrics| metrics.last_timestamp.clone()),
         };
 
         match write_results_csv(csv_path.as_path(), &record) {
@@ -703,13 +822,14 @@ fn dataset_value_to_request_entry(
         .map(|v| v as usize)
         .unwrap_or(0);
 
-    if let Some(body) = value.get("body").cloned() {
+    if let Some(mut body) = value.get("body").cloned() {
         if !body.is_object() {
             return Err(anyhow!(
                 "dataset line {} has a body field, but body must be a JSON object",
                 line_number
             ));
         }
+        apply_request_model(&mut body, model);
         return Ok(RequestEntry {
             body,
             line_idx,
@@ -739,12 +859,19 @@ fn dataset_value_to_request_entry(
     };
     map.remove("input_tokens");
     map.remove("line_idx");
+    map.insert("model".to_string(), json!(model));
 
     Ok(RequestEntry {
         body,
         line_idx,
         input_tokens,
     })
+}
+
+fn apply_request_model(body: &mut serde_json::Value, model: &str) {
+    if let Some(map) = body.as_object_mut() {
+        map.insert("model".to_string(), json!(model));
+    }
 }
 
 /// Apply output token settings to generated request bodies, honoring optional variation and seed.
@@ -848,6 +975,13 @@ fn print_summary(report: &BenchmarkReport) -> Result<()> {
         }
     }
 
+    if let Some(metrics) = report.metrics.as_ref() {
+        println!(
+            "Metrics: {} scrape(s), {} error(s), artifacts at {}",
+            metrics.scrape_count, metrics.scrape_error_count, metrics.output_dir
+        );
+    }
+
     Ok(())
 }
 
@@ -934,32 +1068,65 @@ mod tests {
     }
 
     #[test]
-    fn dataset_body_line_uses_body_object() {
+    fn dataset_body_line_uses_body_object_and_overrides_model() {
         let entry = dataset_value_to_request_entry(
             json!({"body": {"model": "x", "prompt": "hello"}, "input_tokens": 5}),
             4,
             5,
-            "ignored",
+            "runtime-model",
         )
         .unwrap();
 
         assert_eq!(entry.line_idx, 4);
         assert_eq!(entry.input_tokens, 5);
-        assert_eq!(entry.body, json!({"model": "x", "prompt": "hello"}));
+        assert_eq!(
+            entry.body,
+            json!({"model": "runtime-model", "prompt": "hello"})
+        );
     }
 
     #[test]
-    fn dataset_full_request_line_drops_metadata_fields() {
+    fn dataset_body_line_without_model_gets_runtime_model() {
+        let entry = dataset_value_to_request_entry(
+            json!({"body": {"messages": []}, "input_tokens": 5}),
+            4,
+            5,
+            "runtime-model",
+        )
+        .unwrap();
+
+        assert_eq!(
+            entry.body,
+            json!({"model": "runtime-model", "messages": []})
+        );
+    }
+
+    #[test]
+    fn dataset_full_request_line_drops_metadata_fields_and_overrides_model() {
         let entry = dataset_value_to_request_entry(
             json!({"model": "x", "messages": [], "input_tokens": 7, "line_idx": 99}),
             1,
             2,
-            "ignored",
+            "runtime-model",
         )
         .unwrap();
 
         assert_eq!(entry.input_tokens, 7);
-        assert_eq!(entry.body, json!({"model": "x", "messages": []}));
+        assert_eq!(
+            entry.body,
+            json!({"model": "runtime-model", "messages": []})
+        );
+    }
+
+    #[test]
+    fn parse_args_accepts_qwen35_disable_thinking_flag() {
+        let parsed = parse_args(["batchbench", "--qwen35-disable-thinking"]).unwrap();
+
+        let ParsedArgs::Ready(args) = parsed else {
+            panic!("expected parsed args");
+        };
+
+        assert!(args.qwen35_disable_thinking);
     }
 }
 
