@@ -1,0 +1,6383 @@
+---
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: piccolo-k8s-sweep-example-config
+  namespace: specdec
+  labels:
+    app.kubernetes.io/name: batchbench-sweep
+    app.kubernetes.io/component: benchmark
+    batchbench.doubleword.ai/sweep-name: piccolo-k8s-sweep-example
+data:
+  combinations.json: |-
+    [
+      {
+        "index": 0,
+        "variant_name": "baseline",
+        "variant_extra_args": [
+          "--mamba-scheduler-strategy",
+          "extra_buffer"
+        ],
+        "dataset_path": "examples/speed_bench/jsonl/throughput_16k.jsonl",
+        "dataset_slug": "throughput_16k",
+        "run_slug": "000-baseline-throughput_16k"
+      },
+      {
+        "index": 1,
+        "variant_name": "baseline",
+        "variant_extra_args": [
+          "--mamba-scheduler-strategy",
+          "extra_buffer"
+        ],
+        "dataset_path": "examples/speed_bench/jsonl/throughput_1k.jsonl",
+        "dataset_slug": "throughput_1k",
+        "run_slug": "001-baseline-throughput_1k"
+      },
+      {
+        "index": 2,
+        "variant_name": "baseline",
+        "variant_extra_args": [
+          "--mamba-scheduler-strategy",
+          "extra_buffer"
+        ],
+        "dataset_path": "examples/speed_bench/jsonl/throughput_2k.jsonl",
+        "dataset_slug": "throughput_2k",
+        "run_slug": "002-baseline-throughput_2k"
+      },
+      {
+        "index": 3,
+        "variant_name": "baseline",
+        "variant_extra_args": [
+          "--mamba-scheduler-strategy",
+          "extra_buffer"
+        ],
+        "dataset_path": "examples/speed_bench/jsonl/throughput_32k.jsonl",
+        "dataset_slug": "throughput_32k",
+        "run_slug": "003-baseline-throughput_32k"
+      },
+      {
+        "index": 4,
+        "variant_name": "baseline",
+        "variant_extra_args": [
+          "--mamba-scheduler-strategy",
+          "extra_buffer"
+        ],
+        "dataset_path": "examples/speed_bench/jsonl/throughput_8k.jsonl",
+        "dataset_slug": "throughput_8k",
+        "run_slug": "004-baseline-throughput_8k"
+      },
+      {
+        "index": 5,
+        "variant_name": "baseline",
+        "variant_extra_args": [
+          "--mamba-scheduler-strategy",
+          "extra_buffer"
+        ],
+        "dataset_path": "examples/json_mode_eval/jsonl/train.jsonl",
+        "dataset_slug": "train",
+        "run_slug": "005-baseline-train"
+      },
+      {
+        "index": 6,
+        "variant_name": "mtp-s2-k1-d3",
+        "variant_extra_args": [
+          "--speculative-algorithm",
+          "EAGLE",
+          "--speculative-num-steps",
+          "2",
+          "--speculative-eagle-topk",
+          "1",
+          "--speculative-num-draft-tokens",
+          "3",
+          "--mamba-scheduler-strategy",
+          "extra_buffer"
+        ],
+        "dataset_path": "examples/speed_bench/jsonl/throughput_16k.jsonl",
+        "dataset_slug": "throughput_16k",
+        "run_slug": "006-mtp-s2-k1-d3-throughput_16k"
+      },
+      {
+        "index": 7,
+        "variant_name": "mtp-s2-k1-d3",
+        "variant_extra_args": [
+          "--speculative-algorithm",
+          "EAGLE",
+          "--speculative-num-steps",
+          "2",
+          "--speculative-eagle-topk",
+          "1",
+          "--speculative-num-draft-tokens",
+          "3",
+          "--mamba-scheduler-strategy",
+          "extra_buffer"
+        ],
+        "dataset_path": "examples/speed_bench/jsonl/throughput_1k.jsonl",
+        "dataset_slug": "throughput_1k",
+        "run_slug": "007-mtp-s2-k1-d3-throughput_1k"
+      },
+      {
+        "index": 8,
+        "variant_name": "mtp-s2-k1-d3",
+        "variant_extra_args": [
+          "--speculative-algorithm",
+          "EAGLE",
+          "--speculative-num-steps",
+          "2",
+          "--speculative-eagle-topk",
+          "1",
+          "--speculative-num-draft-tokens",
+          "3",
+          "--mamba-scheduler-strategy",
+          "extra_buffer"
+        ],
+        "dataset_path": "examples/speed_bench/jsonl/throughput_2k.jsonl",
+        "dataset_slug": "throughput_2k",
+        "run_slug": "008-mtp-s2-k1-d3-throughput_2k"
+      },
+      {
+        "index": 9,
+        "variant_name": "mtp-s2-k1-d3",
+        "variant_extra_args": [
+          "--speculative-algorithm",
+          "EAGLE",
+          "--speculative-num-steps",
+          "2",
+          "--speculative-eagle-topk",
+          "1",
+          "--speculative-num-draft-tokens",
+          "3",
+          "--mamba-scheduler-strategy",
+          "extra_buffer"
+        ],
+        "dataset_path": "examples/speed_bench/jsonl/throughput_32k.jsonl",
+        "dataset_slug": "throughput_32k",
+        "run_slug": "009-mtp-s2-k1-d3-throughput_32k"
+      },
+      {
+        "index": 10,
+        "variant_name": "mtp-s2-k1-d3",
+        "variant_extra_args": [
+          "--speculative-algorithm",
+          "EAGLE",
+          "--speculative-num-steps",
+          "2",
+          "--speculative-eagle-topk",
+          "1",
+          "--speculative-num-draft-tokens",
+          "3",
+          "--mamba-scheduler-strategy",
+          "extra_buffer"
+        ],
+        "dataset_path": "examples/speed_bench/jsonl/throughput_8k.jsonl",
+        "dataset_slug": "throughput_8k",
+        "run_slug": "010-mtp-s2-k1-d3-throughput_8k"
+      },
+      {
+        "index": 11,
+        "variant_name": "mtp-s2-k1-d3",
+        "variant_extra_args": [
+          "--speculative-algorithm",
+          "EAGLE",
+          "--speculative-num-steps",
+          "2",
+          "--speculative-eagle-topk",
+          "1",
+          "--speculative-num-draft-tokens",
+          "3",
+          "--mamba-scheduler-strategy",
+          "extra_buffer"
+        ],
+        "dataset_path": "examples/json_mode_eval/jsonl/train.jsonl",
+        "dataset_slug": "train",
+        "run_slug": "011-mtp-s2-k1-d3-train"
+      },
+      {
+        "index": 12,
+        "variant_name": "mtp-s2-k1-d4",
+        "variant_extra_args": [
+          "--speculative-algorithm",
+          "EAGLE",
+          "--speculative-num-steps",
+          "2",
+          "--speculative-eagle-topk",
+          "1",
+          "--speculative-num-draft-tokens",
+          "4",
+          "--mamba-scheduler-strategy",
+          "extra_buffer"
+        ],
+        "dataset_path": "examples/speed_bench/jsonl/throughput_16k.jsonl",
+        "dataset_slug": "throughput_16k",
+        "run_slug": "012-mtp-s2-k1-d4-throughput_16k"
+      },
+      {
+        "index": 13,
+        "variant_name": "mtp-s2-k1-d4",
+        "variant_extra_args": [
+          "--speculative-algorithm",
+          "EAGLE",
+          "--speculative-num-steps",
+          "2",
+          "--speculative-eagle-topk",
+          "1",
+          "--speculative-num-draft-tokens",
+          "4",
+          "--mamba-scheduler-strategy",
+          "extra_buffer"
+        ],
+        "dataset_path": "examples/speed_bench/jsonl/throughput_1k.jsonl",
+        "dataset_slug": "throughput_1k",
+        "run_slug": "013-mtp-s2-k1-d4-throughput_1k"
+      },
+      {
+        "index": 14,
+        "variant_name": "mtp-s2-k1-d4",
+        "variant_extra_args": [
+          "--speculative-algorithm",
+          "EAGLE",
+          "--speculative-num-steps",
+          "2",
+          "--speculative-eagle-topk",
+          "1",
+          "--speculative-num-draft-tokens",
+          "4",
+          "--mamba-scheduler-strategy",
+          "extra_buffer"
+        ],
+        "dataset_path": "examples/speed_bench/jsonl/throughput_2k.jsonl",
+        "dataset_slug": "throughput_2k",
+        "run_slug": "014-mtp-s2-k1-d4-throughput_2k"
+      },
+      {
+        "index": 15,
+        "variant_name": "mtp-s2-k1-d4",
+        "variant_extra_args": [
+          "--speculative-algorithm",
+          "EAGLE",
+          "--speculative-num-steps",
+          "2",
+          "--speculative-eagle-topk",
+          "1",
+          "--speculative-num-draft-tokens",
+          "4",
+          "--mamba-scheduler-strategy",
+          "extra_buffer"
+        ],
+        "dataset_path": "examples/speed_bench/jsonl/throughput_32k.jsonl",
+        "dataset_slug": "throughput_32k",
+        "run_slug": "015-mtp-s2-k1-d4-throughput_32k"
+      },
+      {
+        "index": 16,
+        "variant_name": "mtp-s2-k1-d4",
+        "variant_extra_args": [
+          "--speculative-algorithm",
+          "EAGLE",
+          "--speculative-num-steps",
+          "2",
+          "--speculative-eagle-topk",
+          "1",
+          "--speculative-num-draft-tokens",
+          "4",
+          "--mamba-scheduler-strategy",
+          "extra_buffer"
+        ],
+        "dataset_path": "examples/speed_bench/jsonl/throughput_8k.jsonl",
+        "dataset_slug": "throughput_8k",
+        "run_slug": "016-mtp-s2-k1-d4-throughput_8k"
+      },
+      {
+        "index": 17,
+        "variant_name": "mtp-s2-k1-d4",
+        "variant_extra_args": [
+          "--speculative-algorithm",
+          "EAGLE",
+          "--speculative-num-steps",
+          "2",
+          "--speculative-eagle-topk",
+          "1",
+          "--speculative-num-draft-tokens",
+          "4",
+          "--mamba-scheduler-strategy",
+          "extra_buffer"
+        ],
+        "dataset_path": "examples/json_mode_eval/jsonl/train.jsonl",
+        "dataset_slug": "train",
+        "run_slug": "017-mtp-s2-k1-d4-train"
+      },
+      {
+        "index": 18,
+        "variant_name": "mtp-s2-k1-d5",
+        "variant_extra_args": [
+          "--speculative-algorithm",
+          "EAGLE",
+          "--speculative-num-steps",
+          "2",
+          "--speculative-eagle-topk",
+          "1",
+          "--speculative-num-draft-tokens",
+          "5",
+          "--mamba-scheduler-strategy",
+          "extra_buffer"
+        ],
+        "dataset_path": "examples/speed_bench/jsonl/throughput_16k.jsonl",
+        "dataset_slug": "throughput_16k",
+        "run_slug": "018-mtp-s2-k1-d5-throughput_16k"
+      },
+      {
+        "index": 19,
+        "variant_name": "mtp-s2-k1-d5",
+        "variant_extra_args": [
+          "--speculative-algorithm",
+          "EAGLE",
+          "--speculative-num-steps",
+          "2",
+          "--speculative-eagle-topk",
+          "1",
+          "--speculative-num-draft-tokens",
+          "5",
+          "--mamba-scheduler-strategy",
+          "extra_buffer"
+        ],
+        "dataset_path": "examples/speed_bench/jsonl/throughput_1k.jsonl",
+        "dataset_slug": "throughput_1k",
+        "run_slug": "019-mtp-s2-k1-d5-throughput_1k"
+      },
+      {
+        "index": 20,
+        "variant_name": "mtp-s2-k1-d5",
+        "variant_extra_args": [
+          "--speculative-algorithm",
+          "EAGLE",
+          "--speculative-num-steps",
+          "2",
+          "--speculative-eagle-topk",
+          "1",
+          "--speculative-num-draft-tokens",
+          "5",
+          "--mamba-scheduler-strategy",
+          "extra_buffer"
+        ],
+        "dataset_path": "examples/speed_bench/jsonl/throughput_2k.jsonl",
+        "dataset_slug": "throughput_2k",
+        "run_slug": "020-mtp-s2-k1-d5-throughput_2k"
+      },
+      {
+        "index": 21,
+        "variant_name": "mtp-s2-k1-d5",
+        "variant_extra_args": [
+          "--speculative-algorithm",
+          "EAGLE",
+          "--speculative-num-steps",
+          "2",
+          "--speculative-eagle-topk",
+          "1",
+          "--speculative-num-draft-tokens",
+          "5",
+          "--mamba-scheduler-strategy",
+          "extra_buffer"
+        ],
+        "dataset_path": "examples/speed_bench/jsonl/throughput_32k.jsonl",
+        "dataset_slug": "throughput_32k",
+        "run_slug": "021-mtp-s2-k1-d5-throughput_32k"
+      },
+      {
+        "index": 22,
+        "variant_name": "mtp-s2-k1-d5",
+        "variant_extra_args": [
+          "--speculative-algorithm",
+          "EAGLE",
+          "--speculative-num-steps",
+          "2",
+          "--speculative-eagle-topk",
+          "1",
+          "--speculative-num-draft-tokens",
+          "5",
+          "--mamba-scheduler-strategy",
+          "extra_buffer"
+        ],
+        "dataset_path": "examples/speed_bench/jsonl/throughput_8k.jsonl",
+        "dataset_slug": "throughput_8k",
+        "run_slug": "022-mtp-s2-k1-d5-throughput_8k"
+      },
+      {
+        "index": 23,
+        "variant_name": "mtp-s2-k1-d5",
+        "variant_extra_args": [
+          "--speculative-algorithm",
+          "EAGLE",
+          "--speculative-num-steps",
+          "2",
+          "--speculative-eagle-topk",
+          "1",
+          "--speculative-num-draft-tokens",
+          "5",
+          "--mamba-scheduler-strategy",
+          "extra_buffer"
+        ],
+        "dataset_path": "examples/json_mode_eval/jsonl/train.jsonl",
+        "dataset_slug": "train",
+        "run_slug": "023-mtp-s2-k1-d5-train"
+      },
+      {
+        "index": 24,
+        "variant_name": "mtp-s2-k1-d6",
+        "variant_extra_args": [
+          "--speculative-algorithm",
+          "EAGLE",
+          "--speculative-num-steps",
+          "2",
+          "--speculative-eagle-topk",
+          "1",
+          "--speculative-num-draft-tokens",
+          "6",
+          "--mamba-scheduler-strategy",
+          "extra_buffer"
+        ],
+        "dataset_path": "examples/speed_bench/jsonl/throughput_16k.jsonl",
+        "dataset_slug": "throughput_16k",
+        "run_slug": "024-mtp-s2-k1-d6-throughput_16k"
+      },
+      {
+        "index": 25,
+        "variant_name": "mtp-s2-k1-d6",
+        "variant_extra_args": [
+          "--speculative-algorithm",
+          "EAGLE",
+          "--speculative-num-steps",
+          "2",
+          "--speculative-eagle-topk",
+          "1",
+          "--speculative-num-draft-tokens",
+          "6",
+          "--mamba-scheduler-strategy",
+          "extra_buffer"
+        ],
+        "dataset_path": "examples/speed_bench/jsonl/throughput_1k.jsonl",
+        "dataset_slug": "throughput_1k",
+        "run_slug": "025-mtp-s2-k1-d6-throughput_1k"
+      },
+      {
+        "index": 26,
+        "variant_name": "mtp-s2-k1-d6",
+        "variant_extra_args": [
+          "--speculative-algorithm",
+          "EAGLE",
+          "--speculative-num-steps",
+          "2",
+          "--speculative-eagle-topk",
+          "1",
+          "--speculative-num-draft-tokens",
+          "6",
+          "--mamba-scheduler-strategy",
+          "extra_buffer"
+        ],
+        "dataset_path": "examples/speed_bench/jsonl/throughput_2k.jsonl",
+        "dataset_slug": "throughput_2k",
+        "run_slug": "026-mtp-s2-k1-d6-throughput_2k"
+      },
+      {
+        "index": 27,
+        "variant_name": "mtp-s2-k1-d6",
+        "variant_extra_args": [
+          "--speculative-algorithm",
+          "EAGLE",
+          "--speculative-num-steps",
+          "2",
+          "--speculative-eagle-topk",
+          "1",
+          "--speculative-num-draft-tokens",
+          "6",
+          "--mamba-scheduler-strategy",
+          "extra_buffer"
+        ],
+        "dataset_path": "examples/speed_bench/jsonl/throughput_32k.jsonl",
+        "dataset_slug": "throughput_32k",
+        "run_slug": "027-mtp-s2-k1-d6-throughput_32k"
+      },
+      {
+        "index": 28,
+        "variant_name": "mtp-s2-k1-d6",
+        "variant_extra_args": [
+          "--speculative-algorithm",
+          "EAGLE",
+          "--speculative-num-steps",
+          "2",
+          "--speculative-eagle-topk",
+          "1",
+          "--speculative-num-draft-tokens",
+          "6",
+          "--mamba-scheduler-strategy",
+          "extra_buffer"
+        ],
+        "dataset_path": "examples/speed_bench/jsonl/throughput_8k.jsonl",
+        "dataset_slug": "throughput_8k",
+        "run_slug": "028-mtp-s2-k1-d6-throughput_8k"
+      },
+      {
+        "index": 29,
+        "variant_name": "mtp-s2-k1-d6",
+        "variant_extra_args": [
+          "--speculative-algorithm",
+          "EAGLE",
+          "--speculative-num-steps",
+          "2",
+          "--speculative-eagle-topk",
+          "1",
+          "--speculative-num-draft-tokens",
+          "6",
+          "--mamba-scheduler-strategy",
+          "extra_buffer"
+        ],
+        "dataset_path": "examples/json_mode_eval/jsonl/train.jsonl",
+        "dataset_slug": "train",
+        "run_slug": "029-mtp-s2-k1-d6-train"
+      },
+      {
+        "index": 30,
+        "variant_name": "mtp-s2-k2-d3",
+        "variant_extra_args": [
+          "--speculative-algorithm",
+          "EAGLE",
+          "--speculative-num-steps",
+          "2",
+          "--speculative-eagle-topk",
+          "2",
+          "--speculative-num-draft-tokens",
+          "3",
+          "--mamba-scheduler-strategy",
+          "extra_buffer"
+        ],
+        "dataset_path": "examples/speed_bench/jsonl/throughput_16k.jsonl",
+        "dataset_slug": "throughput_16k",
+        "run_slug": "030-mtp-s2-k2-d3-throughput_16k"
+      },
+      {
+        "index": 31,
+        "variant_name": "mtp-s2-k2-d3",
+        "variant_extra_args": [
+          "--speculative-algorithm",
+          "EAGLE",
+          "--speculative-num-steps",
+          "2",
+          "--speculative-eagle-topk",
+          "2",
+          "--speculative-num-draft-tokens",
+          "3",
+          "--mamba-scheduler-strategy",
+          "extra_buffer"
+        ],
+        "dataset_path": "examples/speed_bench/jsonl/throughput_1k.jsonl",
+        "dataset_slug": "throughput_1k",
+        "run_slug": "031-mtp-s2-k2-d3-throughput_1k"
+      },
+      {
+        "index": 32,
+        "variant_name": "mtp-s2-k2-d3",
+        "variant_extra_args": [
+          "--speculative-algorithm",
+          "EAGLE",
+          "--speculative-num-steps",
+          "2",
+          "--speculative-eagle-topk",
+          "2",
+          "--speculative-num-draft-tokens",
+          "3",
+          "--mamba-scheduler-strategy",
+          "extra_buffer"
+        ],
+        "dataset_path": "examples/speed_bench/jsonl/throughput_2k.jsonl",
+        "dataset_slug": "throughput_2k",
+        "run_slug": "032-mtp-s2-k2-d3-throughput_2k"
+      },
+      {
+        "index": 33,
+        "variant_name": "mtp-s2-k2-d3",
+        "variant_extra_args": [
+          "--speculative-algorithm",
+          "EAGLE",
+          "--speculative-num-steps",
+          "2",
+          "--speculative-eagle-topk",
+          "2",
+          "--speculative-num-draft-tokens",
+          "3",
+          "--mamba-scheduler-strategy",
+          "extra_buffer"
+        ],
+        "dataset_path": "examples/speed_bench/jsonl/throughput_32k.jsonl",
+        "dataset_slug": "throughput_32k",
+        "run_slug": "033-mtp-s2-k2-d3-throughput_32k"
+      },
+      {
+        "index": 34,
+        "variant_name": "mtp-s2-k2-d3",
+        "variant_extra_args": [
+          "--speculative-algorithm",
+          "EAGLE",
+          "--speculative-num-steps",
+          "2",
+          "--speculative-eagle-topk",
+          "2",
+          "--speculative-num-draft-tokens",
+          "3",
+          "--mamba-scheduler-strategy",
+          "extra_buffer"
+        ],
+        "dataset_path": "examples/speed_bench/jsonl/throughput_8k.jsonl",
+        "dataset_slug": "throughput_8k",
+        "run_slug": "034-mtp-s2-k2-d3-throughput_8k"
+      },
+      {
+        "index": 35,
+        "variant_name": "mtp-s2-k2-d3",
+        "variant_extra_args": [
+          "--speculative-algorithm",
+          "EAGLE",
+          "--speculative-num-steps",
+          "2",
+          "--speculative-eagle-topk",
+          "2",
+          "--speculative-num-draft-tokens",
+          "3",
+          "--mamba-scheduler-strategy",
+          "extra_buffer"
+        ],
+        "dataset_path": "examples/json_mode_eval/jsonl/train.jsonl",
+        "dataset_slug": "train",
+        "run_slug": "035-mtp-s2-k2-d3-train"
+      },
+      {
+        "index": 36,
+        "variant_name": "mtp-s2-k2-d4",
+        "variant_extra_args": [
+          "--speculative-algorithm",
+          "EAGLE",
+          "--speculative-num-steps",
+          "2",
+          "--speculative-eagle-topk",
+          "2",
+          "--speculative-num-draft-tokens",
+          "4",
+          "--mamba-scheduler-strategy",
+          "extra_buffer"
+        ],
+        "dataset_path": "examples/speed_bench/jsonl/throughput_16k.jsonl",
+        "dataset_slug": "throughput_16k",
+        "run_slug": "036-mtp-s2-k2-d4-throughput_16k"
+      },
+      {
+        "index": 37,
+        "variant_name": "mtp-s2-k2-d4",
+        "variant_extra_args": [
+          "--speculative-algorithm",
+          "EAGLE",
+          "--speculative-num-steps",
+          "2",
+          "--speculative-eagle-topk",
+          "2",
+          "--speculative-num-draft-tokens",
+          "4",
+          "--mamba-scheduler-strategy",
+          "extra_buffer"
+        ],
+        "dataset_path": "examples/speed_bench/jsonl/throughput_1k.jsonl",
+        "dataset_slug": "throughput_1k",
+        "run_slug": "037-mtp-s2-k2-d4-throughput_1k"
+      },
+      {
+        "index": 38,
+        "variant_name": "mtp-s2-k2-d4",
+        "variant_extra_args": [
+          "--speculative-algorithm",
+          "EAGLE",
+          "--speculative-num-steps",
+          "2",
+          "--speculative-eagle-topk",
+          "2",
+          "--speculative-num-draft-tokens",
+          "4",
+          "--mamba-scheduler-strategy",
+          "extra_buffer"
+        ],
+        "dataset_path": "examples/speed_bench/jsonl/throughput_2k.jsonl",
+        "dataset_slug": "throughput_2k",
+        "run_slug": "038-mtp-s2-k2-d4-throughput_2k"
+      },
+      {
+        "index": 39,
+        "variant_name": "mtp-s2-k2-d4",
+        "variant_extra_args": [
+          "--speculative-algorithm",
+          "EAGLE",
+          "--speculative-num-steps",
+          "2",
+          "--speculative-eagle-topk",
+          "2",
+          "--speculative-num-draft-tokens",
+          "4",
+          "--mamba-scheduler-strategy",
+          "extra_buffer"
+        ],
+        "dataset_path": "examples/speed_bench/jsonl/throughput_32k.jsonl",
+        "dataset_slug": "throughput_32k",
+        "run_slug": "039-mtp-s2-k2-d4-throughput_32k"
+      },
+      {
+        "index": 40,
+        "variant_name": "mtp-s2-k2-d4",
+        "variant_extra_args": [
+          "--speculative-algorithm",
+          "EAGLE",
+          "--speculative-num-steps",
+          "2",
+          "--speculative-eagle-topk",
+          "2",
+          "--speculative-num-draft-tokens",
+          "4",
+          "--mamba-scheduler-strategy",
+          "extra_buffer"
+        ],
+        "dataset_path": "examples/speed_bench/jsonl/throughput_8k.jsonl",
+        "dataset_slug": "throughput_8k",
+        "run_slug": "040-mtp-s2-k2-d4-throughput_8k"
+      },
+      {
+        "index": 41,
+        "variant_name": "mtp-s2-k2-d4",
+        "variant_extra_args": [
+          "--speculative-algorithm",
+          "EAGLE",
+          "--speculative-num-steps",
+          "2",
+          "--speculative-eagle-topk",
+          "2",
+          "--speculative-num-draft-tokens",
+          "4",
+          "--mamba-scheduler-strategy",
+          "extra_buffer"
+        ],
+        "dataset_path": "examples/json_mode_eval/jsonl/train.jsonl",
+        "dataset_slug": "train",
+        "run_slug": "041-mtp-s2-k2-d4-train"
+      },
+      {
+        "index": 42,
+        "variant_name": "mtp-s2-k2-d5",
+        "variant_extra_args": [
+          "--speculative-algorithm",
+          "EAGLE",
+          "--speculative-num-steps",
+          "2",
+          "--speculative-eagle-topk",
+          "2",
+          "--speculative-num-draft-tokens",
+          "5",
+          "--mamba-scheduler-strategy",
+          "extra_buffer"
+        ],
+        "dataset_path": "examples/speed_bench/jsonl/throughput_16k.jsonl",
+        "dataset_slug": "throughput_16k",
+        "run_slug": "042-mtp-s2-k2-d5-throughput_16k"
+      },
+      {
+        "index": 43,
+        "variant_name": "mtp-s2-k2-d5",
+        "variant_extra_args": [
+          "--speculative-algorithm",
+          "EAGLE",
+          "--speculative-num-steps",
+          "2",
+          "--speculative-eagle-topk",
+          "2",
+          "--speculative-num-draft-tokens",
+          "5",
+          "--mamba-scheduler-strategy",
+          "extra_buffer"
+        ],
+        "dataset_path": "examples/speed_bench/jsonl/throughput_1k.jsonl",
+        "dataset_slug": "throughput_1k",
+        "run_slug": "043-mtp-s2-k2-d5-throughput_1k"
+      },
+      {
+        "index": 44,
+        "variant_name": "mtp-s2-k2-d5",
+        "variant_extra_args": [
+          "--speculative-algorithm",
+          "EAGLE",
+          "--speculative-num-steps",
+          "2",
+          "--speculative-eagle-topk",
+          "2",
+          "--speculative-num-draft-tokens",
+          "5",
+          "--mamba-scheduler-strategy",
+          "extra_buffer"
+        ],
+        "dataset_path": "examples/speed_bench/jsonl/throughput_2k.jsonl",
+        "dataset_slug": "throughput_2k",
+        "run_slug": "044-mtp-s2-k2-d5-throughput_2k"
+      },
+      {
+        "index": 45,
+        "variant_name": "mtp-s2-k2-d5",
+        "variant_extra_args": [
+          "--speculative-algorithm",
+          "EAGLE",
+          "--speculative-num-steps",
+          "2",
+          "--speculative-eagle-topk",
+          "2",
+          "--speculative-num-draft-tokens",
+          "5",
+          "--mamba-scheduler-strategy",
+          "extra_buffer"
+        ],
+        "dataset_path": "examples/speed_bench/jsonl/throughput_32k.jsonl",
+        "dataset_slug": "throughput_32k",
+        "run_slug": "045-mtp-s2-k2-d5-throughput_32k"
+      },
+      {
+        "index": 46,
+        "variant_name": "mtp-s2-k2-d5",
+        "variant_extra_args": [
+          "--speculative-algorithm",
+          "EAGLE",
+          "--speculative-num-steps",
+          "2",
+          "--speculative-eagle-topk",
+          "2",
+          "--speculative-num-draft-tokens",
+          "5",
+          "--mamba-scheduler-strategy",
+          "extra_buffer"
+        ],
+        "dataset_path": "examples/speed_bench/jsonl/throughput_8k.jsonl",
+        "dataset_slug": "throughput_8k",
+        "run_slug": "046-mtp-s2-k2-d5-throughput_8k"
+      },
+      {
+        "index": 47,
+        "variant_name": "mtp-s2-k2-d5",
+        "variant_extra_args": [
+          "--speculative-algorithm",
+          "EAGLE",
+          "--speculative-num-steps",
+          "2",
+          "--speculative-eagle-topk",
+          "2",
+          "--speculative-num-draft-tokens",
+          "5",
+          "--mamba-scheduler-strategy",
+          "extra_buffer"
+        ],
+        "dataset_path": "examples/json_mode_eval/jsonl/train.jsonl",
+        "dataset_slug": "train",
+        "run_slug": "047-mtp-s2-k2-d5-train"
+      },
+      {
+        "index": 48,
+        "variant_name": "mtp-s2-k2-d6",
+        "variant_extra_args": [
+          "--speculative-algorithm",
+          "EAGLE",
+          "--speculative-num-steps",
+          "2",
+          "--speculative-eagle-topk",
+          "2",
+          "--speculative-num-draft-tokens",
+          "6",
+          "--mamba-scheduler-strategy",
+          "extra_buffer"
+        ],
+        "dataset_path": "examples/speed_bench/jsonl/throughput_16k.jsonl",
+        "dataset_slug": "throughput_16k",
+        "run_slug": "048-mtp-s2-k2-d6-throughput_16k"
+      },
+      {
+        "index": 49,
+        "variant_name": "mtp-s2-k2-d6",
+        "variant_extra_args": [
+          "--speculative-algorithm",
+          "EAGLE",
+          "--speculative-num-steps",
+          "2",
+          "--speculative-eagle-topk",
+          "2",
+          "--speculative-num-draft-tokens",
+          "6",
+          "--mamba-scheduler-strategy",
+          "extra_buffer"
+        ],
+        "dataset_path": "examples/speed_bench/jsonl/throughput_1k.jsonl",
+        "dataset_slug": "throughput_1k",
+        "run_slug": "049-mtp-s2-k2-d6-throughput_1k"
+      },
+      {
+        "index": 50,
+        "variant_name": "mtp-s2-k2-d6",
+        "variant_extra_args": [
+          "--speculative-algorithm",
+          "EAGLE",
+          "--speculative-num-steps",
+          "2",
+          "--speculative-eagle-topk",
+          "2",
+          "--speculative-num-draft-tokens",
+          "6",
+          "--mamba-scheduler-strategy",
+          "extra_buffer"
+        ],
+        "dataset_path": "examples/speed_bench/jsonl/throughput_2k.jsonl",
+        "dataset_slug": "throughput_2k",
+        "run_slug": "050-mtp-s2-k2-d6-throughput_2k"
+      },
+      {
+        "index": 51,
+        "variant_name": "mtp-s2-k2-d6",
+        "variant_extra_args": [
+          "--speculative-algorithm",
+          "EAGLE",
+          "--speculative-num-steps",
+          "2",
+          "--speculative-eagle-topk",
+          "2",
+          "--speculative-num-draft-tokens",
+          "6",
+          "--mamba-scheduler-strategy",
+          "extra_buffer"
+        ],
+        "dataset_path": "examples/speed_bench/jsonl/throughput_32k.jsonl",
+        "dataset_slug": "throughput_32k",
+        "run_slug": "051-mtp-s2-k2-d6-throughput_32k"
+      },
+      {
+        "index": 52,
+        "variant_name": "mtp-s2-k2-d6",
+        "variant_extra_args": [
+          "--speculative-algorithm",
+          "EAGLE",
+          "--speculative-num-steps",
+          "2",
+          "--speculative-eagle-topk",
+          "2",
+          "--speculative-num-draft-tokens",
+          "6",
+          "--mamba-scheduler-strategy",
+          "extra_buffer"
+        ],
+        "dataset_path": "examples/speed_bench/jsonl/throughput_8k.jsonl",
+        "dataset_slug": "throughput_8k",
+        "run_slug": "052-mtp-s2-k2-d6-throughput_8k"
+      },
+      {
+        "index": 53,
+        "variant_name": "mtp-s2-k2-d6",
+        "variant_extra_args": [
+          "--speculative-algorithm",
+          "EAGLE",
+          "--speculative-num-steps",
+          "2",
+          "--speculative-eagle-topk",
+          "2",
+          "--speculative-num-draft-tokens",
+          "6",
+          "--mamba-scheduler-strategy",
+          "extra_buffer"
+        ],
+        "dataset_path": "examples/json_mode_eval/jsonl/train.jsonl",
+        "dataset_slug": "train",
+        "run_slug": "053-mtp-s2-k2-d6-train"
+      },
+      {
+        "index": 54,
+        "variant_name": "mtp-s2-k3-d3",
+        "variant_extra_args": [
+          "--speculative-algorithm",
+          "EAGLE",
+          "--speculative-num-steps",
+          "2",
+          "--speculative-eagle-topk",
+          "3",
+          "--speculative-num-draft-tokens",
+          "3",
+          "--mamba-scheduler-strategy",
+          "extra_buffer"
+        ],
+        "dataset_path": "examples/speed_bench/jsonl/throughput_16k.jsonl",
+        "dataset_slug": "throughput_16k",
+        "run_slug": "054-mtp-s2-k3-d3-throughput_16k"
+      },
+      {
+        "index": 55,
+        "variant_name": "mtp-s2-k3-d3",
+        "variant_extra_args": [
+          "--speculative-algorithm",
+          "EAGLE",
+          "--speculative-num-steps",
+          "2",
+          "--speculative-eagle-topk",
+          "3",
+          "--speculative-num-draft-tokens",
+          "3",
+          "--mamba-scheduler-strategy",
+          "extra_buffer"
+        ],
+        "dataset_path": "examples/speed_bench/jsonl/throughput_1k.jsonl",
+        "dataset_slug": "throughput_1k",
+        "run_slug": "055-mtp-s2-k3-d3-throughput_1k"
+      },
+      {
+        "index": 56,
+        "variant_name": "mtp-s2-k3-d3",
+        "variant_extra_args": [
+          "--speculative-algorithm",
+          "EAGLE",
+          "--speculative-num-steps",
+          "2",
+          "--speculative-eagle-topk",
+          "3",
+          "--speculative-num-draft-tokens",
+          "3",
+          "--mamba-scheduler-strategy",
+          "extra_buffer"
+        ],
+        "dataset_path": "examples/speed_bench/jsonl/throughput_2k.jsonl",
+        "dataset_slug": "throughput_2k",
+        "run_slug": "056-mtp-s2-k3-d3-throughput_2k"
+      },
+      {
+        "index": 57,
+        "variant_name": "mtp-s2-k3-d3",
+        "variant_extra_args": [
+          "--speculative-algorithm",
+          "EAGLE",
+          "--speculative-num-steps",
+          "2",
+          "--speculative-eagle-topk",
+          "3",
+          "--speculative-num-draft-tokens",
+          "3",
+          "--mamba-scheduler-strategy",
+          "extra_buffer"
+        ],
+        "dataset_path": "examples/speed_bench/jsonl/throughput_32k.jsonl",
+        "dataset_slug": "throughput_32k",
+        "run_slug": "057-mtp-s2-k3-d3-throughput_32k"
+      },
+      {
+        "index": 58,
+        "variant_name": "mtp-s2-k3-d3",
+        "variant_extra_args": [
+          "--speculative-algorithm",
+          "EAGLE",
+          "--speculative-num-steps",
+          "2",
+          "--speculative-eagle-topk",
+          "3",
+          "--speculative-num-draft-tokens",
+          "3",
+          "--mamba-scheduler-strategy",
+          "extra_buffer"
+        ],
+        "dataset_path": "examples/speed_bench/jsonl/throughput_8k.jsonl",
+        "dataset_slug": "throughput_8k",
+        "run_slug": "058-mtp-s2-k3-d3-throughput_8k"
+      },
+      {
+        "index": 59,
+        "variant_name": "mtp-s2-k3-d3",
+        "variant_extra_args": [
+          "--speculative-algorithm",
+          "EAGLE",
+          "--speculative-num-steps",
+          "2",
+          "--speculative-eagle-topk",
+          "3",
+          "--speculative-num-draft-tokens",
+          "3",
+          "--mamba-scheduler-strategy",
+          "extra_buffer"
+        ],
+        "dataset_path": "examples/json_mode_eval/jsonl/train.jsonl",
+        "dataset_slug": "train",
+        "run_slug": "059-mtp-s2-k3-d3-train"
+      },
+      {
+        "index": 60,
+        "variant_name": "mtp-s2-k3-d4",
+        "variant_extra_args": [
+          "--speculative-algorithm",
+          "EAGLE",
+          "--speculative-num-steps",
+          "2",
+          "--speculative-eagle-topk",
+          "3",
+          "--speculative-num-draft-tokens",
+          "4",
+          "--mamba-scheduler-strategy",
+          "extra_buffer"
+        ],
+        "dataset_path": "examples/speed_bench/jsonl/throughput_16k.jsonl",
+        "dataset_slug": "throughput_16k",
+        "run_slug": "060-mtp-s2-k3-d4-throughput_16k"
+      },
+      {
+        "index": 61,
+        "variant_name": "mtp-s2-k3-d4",
+        "variant_extra_args": [
+          "--speculative-algorithm",
+          "EAGLE",
+          "--speculative-num-steps",
+          "2",
+          "--speculative-eagle-topk",
+          "3",
+          "--speculative-num-draft-tokens",
+          "4",
+          "--mamba-scheduler-strategy",
+          "extra_buffer"
+        ],
+        "dataset_path": "examples/speed_bench/jsonl/throughput_1k.jsonl",
+        "dataset_slug": "throughput_1k",
+        "run_slug": "061-mtp-s2-k3-d4-throughput_1k"
+      },
+      {
+        "index": 62,
+        "variant_name": "mtp-s2-k3-d4",
+        "variant_extra_args": [
+          "--speculative-algorithm",
+          "EAGLE",
+          "--speculative-num-steps",
+          "2",
+          "--speculative-eagle-topk",
+          "3",
+          "--speculative-num-draft-tokens",
+          "4",
+          "--mamba-scheduler-strategy",
+          "extra_buffer"
+        ],
+        "dataset_path": "examples/speed_bench/jsonl/throughput_2k.jsonl",
+        "dataset_slug": "throughput_2k",
+        "run_slug": "062-mtp-s2-k3-d4-throughput_2k"
+      },
+      {
+        "index": 63,
+        "variant_name": "mtp-s2-k3-d4",
+        "variant_extra_args": [
+          "--speculative-algorithm",
+          "EAGLE",
+          "--speculative-num-steps",
+          "2",
+          "--speculative-eagle-topk",
+          "3",
+          "--speculative-num-draft-tokens",
+          "4",
+          "--mamba-scheduler-strategy",
+          "extra_buffer"
+        ],
+        "dataset_path": "examples/speed_bench/jsonl/throughput_32k.jsonl",
+        "dataset_slug": "throughput_32k",
+        "run_slug": "063-mtp-s2-k3-d4-throughput_32k"
+      },
+      {
+        "index": 64,
+        "variant_name": "mtp-s2-k3-d4",
+        "variant_extra_args": [
+          "--speculative-algorithm",
+          "EAGLE",
+          "--speculative-num-steps",
+          "2",
+          "--speculative-eagle-topk",
+          "3",
+          "--speculative-num-draft-tokens",
+          "4",
+          "--mamba-scheduler-strategy",
+          "extra_buffer"
+        ],
+        "dataset_path": "examples/speed_bench/jsonl/throughput_8k.jsonl",
+        "dataset_slug": "throughput_8k",
+        "run_slug": "064-mtp-s2-k3-d4-throughput_8k"
+      },
+      {
+        "index": 65,
+        "variant_name": "mtp-s2-k3-d4",
+        "variant_extra_args": [
+          "--speculative-algorithm",
+          "EAGLE",
+          "--speculative-num-steps",
+          "2",
+          "--speculative-eagle-topk",
+          "3",
+          "--speculative-num-draft-tokens",
+          "4",
+          "--mamba-scheduler-strategy",
+          "extra_buffer"
+        ],
+        "dataset_path": "examples/json_mode_eval/jsonl/train.jsonl",
+        "dataset_slug": "train",
+        "run_slug": "065-mtp-s2-k3-d4-train"
+      },
+      {
+        "index": 66,
+        "variant_name": "mtp-s2-k3-d5",
+        "variant_extra_args": [
+          "--speculative-algorithm",
+          "EAGLE",
+          "--speculative-num-steps",
+          "2",
+          "--speculative-eagle-topk",
+          "3",
+          "--speculative-num-draft-tokens",
+          "5",
+          "--mamba-scheduler-strategy",
+          "extra_buffer"
+        ],
+        "dataset_path": "examples/speed_bench/jsonl/throughput_16k.jsonl",
+        "dataset_slug": "throughput_16k",
+        "run_slug": "066-mtp-s2-k3-d5-throughput_16k"
+      },
+      {
+        "index": 67,
+        "variant_name": "mtp-s2-k3-d5",
+        "variant_extra_args": [
+          "--speculative-algorithm",
+          "EAGLE",
+          "--speculative-num-steps",
+          "2",
+          "--speculative-eagle-topk",
+          "3",
+          "--speculative-num-draft-tokens",
+          "5",
+          "--mamba-scheduler-strategy",
+          "extra_buffer"
+        ],
+        "dataset_path": "examples/speed_bench/jsonl/throughput_1k.jsonl",
+        "dataset_slug": "throughput_1k",
+        "run_slug": "067-mtp-s2-k3-d5-throughput_1k"
+      },
+      {
+        "index": 68,
+        "variant_name": "mtp-s2-k3-d5",
+        "variant_extra_args": [
+          "--speculative-algorithm",
+          "EAGLE",
+          "--speculative-num-steps",
+          "2",
+          "--speculative-eagle-topk",
+          "3",
+          "--speculative-num-draft-tokens",
+          "5",
+          "--mamba-scheduler-strategy",
+          "extra_buffer"
+        ],
+        "dataset_path": "examples/speed_bench/jsonl/throughput_2k.jsonl",
+        "dataset_slug": "throughput_2k",
+        "run_slug": "068-mtp-s2-k3-d5-throughput_2k"
+      },
+      {
+        "index": 69,
+        "variant_name": "mtp-s2-k3-d5",
+        "variant_extra_args": [
+          "--speculative-algorithm",
+          "EAGLE",
+          "--speculative-num-steps",
+          "2",
+          "--speculative-eagle-topk",
+          "3",
+          "--speculative-num-draft-tokens",
+          "5",
+          "--mamba-scheduler-strategy",
+          "extra_buffer"
+        ],
+        "dataset_path": "examples/speed_bench/jsonl/throughput_32k.jsonl",
+        "dataset_slug": "throughput_32k",
+        "run_slug": "069-mtp-s2-k3-d5-throughput_32k"
+      },
+      {
+        "index": 70,
+        "variant_name": "mtp-s2-k3-d5",
+        "variant_extra_args": [
+          "--speculative-algorithm",
+          "EAGLE",
+          "--speculative-num-steps",
+          "2",
+          "--speculative-eagle-topk",
+          "3",
+          "--speculative-num-draft-tokens",
+          "5",
+          "--mamba-scheduler-strategy",
+          "extra_buffer"
+        ],
+        "dataset_path": "examples/speed_bench/jsonl/throughput_8k.jsonl",
+        "dataset_slug": "throughput_8k",
+        "run_slug": "070-mtp-s2-k3-d5-throughput_8k"
+      },
+      {
+        "index": 71,
+        "variant_name": "mtp-s2-k3-d5",
+        "variant_extra_args": [
+          "--speculative-algorithm",
+          "EAGLE",
+          "--speculative-num-steps",
+          "2",
+          "--speculative-eagle-topk",
+          "3",
+          "--speculative-num-draft-tokens",
+          "5",
+          "--mamba-scheduler-strategy",
+          "extra_buffer"
+        ],
+        "dataset_path": "examples/json_mode_eval/jsonl/train.jsonl",
+        "dataset_slug": "train",
+        "run_slug": "071-mtp-s2-k3-d5-train"
+      },
+      {
+        "index": 72,
+        "variant_name": "mtp-s2-k3-d6",
+        "variant_extra_args": [
+          "--speculative-algorithm",
+          "EAGLE",
+          "--speculative-num-steps",
+          "2",
+          "--speculative-eagle-topk",
+          "3",
+          "--speculative-num-draft-tokens",
+          "6",
+          "--mamba-scheduler-strategy",
+          "extra_buffer"
+        ],
+        "dataset_path": "examples/speed_bench/jsonl/throughput_16k.jsonl",
+        "dataset_slug": "throughput_16k",
+        "run_slug": "072-mtp-s2-k3-d6-throughput_16k"
+      },
+      {
+        "index": 73,
+        "variant_name": "mtp-s2-k3-d6",
+        "variant_extra_args": [
+          "--speculative-algorithm",
+          "EAGLE",
+          "--speculative-num-steps",
+          "2",
+          "--speculative-eagle-topk",
+          "3",
+          "--speculative-num-draft-tokens",
+          "6",
+          "--mamba-scheduler-strategy",
+          "extra_buffer"
+        ],
+        "dataset_path": "examples/speed_bench/jsonl/throughput_1k.jsonl",
+        "dataset_slug": "throughput_1k",
+        "run_slug": "073-mtp-s2-k3-d6-throughput_1k"
+      },
+      {
+        "index": 74,
+        "variant_name": "mtp-s2-k3-d6",
+        "variant_extra_args": [
+          "--speculative-algorithm",
+          "EAGLE",
+          "--speculative-num-steps",
+          "2",
+          "--speculative-eagle-topk",
+          "3",
+          "--speculative-num-draft-tokens",
+          "6",
+          "--mamba-scheduler-strategy",
+          "extra_buffer"
+        ],
+        "dataset_path": "examples/speed_bench/jsonl/throughput_2k.jsonl",
+        "dataset_slug": "throughput_2k",
+        "run_slug": "074-mtp-s2-k3-d6-throughput_2k"
+      },
+      {
+        "index": 75,
+        "variant_name": "mtp-s2-k3-d6",
+        "variant_extra_args": [
+          "--speculative-algorithm",
+          "EAGLE",
+          "--speculative-num-steps",
+          "2",
+          "--speculative-eagle-topk",
+          "3",
+          "--speculative-num-draft-tokens",
+          "6",
+          "--mamba-scheduler-strategy",
+          "extra_buffer"
+        ],
+        "dataset_path": "examples/speed_bench/jsonl/throughput_32k.jsonl",
+        "dataset_slug": "throughput_32k",
+        "run_slug": "075-mtp-s2-k3-d6-throughput_32k"
+      },
+      {
+        "index": 76,
+        "variant_name": "mtp-s2-k3-d6",
+        "variant_extra_args": [
+          "--speculative-algorithm",
+          "EAGLE",
+          "--speculative-num-steps",
+          "2",
+          "--speculative-eagle-topk",
+          "3",
+          "--speculative-num-draft-tokens",
+          "6",
+          "--mamba-scheduler-strategy",
+          "extra_buffer"
+        ],
+        "dataset_path": "examples/speed_bench/jsonl/throughput_8k.jsonl",
+        "dataset_slug": "throughput_8k",
+        "run_slug": "076-mtp-s2-k3-d6-throughput_8k"
+      },
+      {
+        "index": 77,
+        "variant_name": "mtp-s2-k3-d6",
+        "variant_extra_args": [
+          "--speculative-algorithm",
+          "EAGLE",
+          "--speculative-num-steps",
+          "2",
+          "--speculative-eagle-topk",
+          "3",
+          "--speculative-num-draft-tokens",
+          "6",
+          "--mamba-scheduler-strategy",
+          "extra_buffer"
+        ],
+        "dataset_path": "examples/json_mode_eval/jsonl/train.jsonl",
+        "dataset_slug": "train",
+        "run_slug": "077-mtp-s2-k3-d6-train"
+      },
+      {
+        "index": 78,
+        "variant_name": "mtp-s3-k1-d3",
+        "variant_extra_args": [
+          "--speculative-algorithm",
+          "EAGLE",
+          "--speculative-num-steps",
+          "3",
+          "--speculative-eagle-topk",
+          "1",
+          "--speculative-num-draft-tokens",
+          "3",
+          "--mamba-scheduler-strategy",
+          "extra_buffer"
+        ],
+        "dataset_path": "examples/speed_bench/jsonl/throughput_16k.jsonl",
+        "dataset_slug": "throughput_16k",
+        "run_slug": "078-mtp-s3-k1-d3-throughput_16k"
+      },
+      {
+        "index": 79,
+        "variant_name": "mtp-s3-k1-d3",
+        "variant_extra_args": [
+          "--speculative-algorithm",
+          "EAGLE",
+          "--speculative-num-steps",
+          "3",
+          "--speculative-eagle-topk",
+          "1",
+          "--speculative-num-draft-tokens",
+          "3",
+          "--mamba-scheduler-strategy",
+          "extra_buffer"
+        ],
+        "dataset_path": "examples/speed_bench/jsonl/throughput_1k.jsonl",
+        "dataset_slug": "throughput_1k",
+        "run_slug": "079-mtp-s3-k1-d3-throughput_1k"
+      },
+      {
+        "index": 80,
+        "variant_name": "mtp-s3-k1-d3",
+        "variant_extra_args": [
+          "--speculative-algorithm",
+          "EAGLE",
+          "--speculative-num-steps",
+          "3",
+          "--speculative-eagle-topk",
+          "1",
+          "--speculative-num-draft-tokens",
+          "3",
+          "--mamba-scheduler-strategy",
+          "extra_buffer"
+        ],
+        "dataset_path": "examples/speed_bench/jsonl/throughput_2k.jsonl",
+        "dataset_slug": "throughput_2k",
+        "run_slug": "080-mtp-s3-k1-d3-throughput_2k"
+      },
+      {
+        "index": 81,
+        "variant_name": "mtp-s3-k1-d3",
+        "variant_extra_args": [
+          "--speculative-algorithm",
+          "EAGLE",
+          "--speculative-num-steps",
+          "3",
+          "--speculative-eagle-topk",
+          "1",
+          "--speculative-num-draft-tokens",
+          "3",
+          "--mamba-scheduler-strategy",
+          "extra_buffer"
+        ],
+        "dataset_path": "examples/speed_bench/jsonl/throughput_32k.jsonl",
+        "dataset_slug": "throughput_32k",
+        "run_slug": "081-mtp-s3-k1-d3-throughput_32k"
+      },
+      {
+        "index": 82,
+        "variant_name": "mtp-s3-k1-d3",
+        "variant_extra_args": [
+          "--speculative-algorithm",
+          "EAGLE",
+          "--speculative-num-steps",
+          "3",
+          "--speculative-eagle-topk",
+          "1",
+          "--speculative-num-draft-tokens",
+          "3",
+          "--mamba-scheduler-strategy",
+          "extra_buffer"
+        ],
+        "dataset_path": "examples/speed_bench/jsonl/throughput_8k.jsonl",
+        "dataset_slug": "throughput_8k",
+        "run_slug": "082-mtp-s3-k1-d3-throughput_8k"
+      },
+      {
+        "index": 83,
+        "variant_name": "mtp-s3-k1-d3",
+        "variant_extra_args": [
+          "--speculative-algorithm",
+          "EAGLE",
+          "--speculative-num-steps",
+          "3",
+          "--speculative-eagle-topk",
+          "1",
+          "--speculative-num-draft-tokens",
+          "3",
+          "--mamba-scheduler-strategy",
+          "extra_buffer"
+        ],
+        "dataset_path": "examples/json_mode_eval/jsonl/train.jsonl",
+        "dataset_slug": "train",
+        "run_slug": "083-mtp-s3-k1-d3-train"
+      },
+      {
+        "index": 84,
+        "variant_name": "mtp-s3-k1-d4",
+        "variant_extra_args": [
+          "--speculative-algorithm",
+          "EAGLE",
+          "--speculative-num-steps",
+          "3",
+          "--speculative-eagle-topk",
+          "1",
+          "--speculative-num-draft-tokens",
+          "4",
+          "--mamba-scheduler-strategy",
+          "extra_buffer"
+        ],
+        "dataset_path": "examples/speed_bench/jsonl/throughput_16k.jsonl",
+        "dataset_slug": "throughput_16k",
+        "run_slug": "084-mtp-s3-k1-d4-throughput_16k"
+      },
+      {
+        "index": 85,
+        "variant_name": "mtp-s3-k1-d4",
+        "variant_extra_args": [
+          "--speculative-algorithm",
+          "EAGLE",
+          "--speculative-num-steps",
+          "3",
+          "--speculative-eagle-topk",
+          "1",
+          "--speculative-num-draft-tokens",
+          "4",
+          "--mamba-scheduler-strategy",
+          "extra_buffer"
+        ],
+        "dataset_path": "examples/speed_bench/jsonl/throughput_1k.jsonl",
+        "dataset_slug": "throughput_1k",
+        "run_slug": "085-mtp-s3-k1-d4-throughput_1k"
+      },
+      {
+        "index": 86,
+        "variant_name": "mtp-s3-k1-d4",
+        "variant_extra_args": [
+          "--speculative-algorithm",
+          "EAGLE",
+          "--speculative-num-steps",
+          "3",
+          "--speculative-eagle-topk",
+          "1",
+          "--speculative-num-draft-tokens",
+          "4",
+          "--mamba-scheduler-strategy",
+          "extra_buffer"
+        ],
+        "dataset_path": "examples/speed_bench/jsonl/throughput_2k.jsonl",
+        "dataset_slug": "throughput_2k",
+        "run_slug": "086-mtp-s3-k1-d4-throughput_2k"
+      },
+      {
+        "index": 87,
+        "variant_name": "mtp-s3-k1-d4",
+        "variant_extra_args": [
+          "--speculative-algorithm",
+          "EAGLE",
+          "--speculative-num-steps",
+          "3",
+          "--speculative-eagle-topk",
+          "1",
+          "--speculative-num-draft-tokens",
+          "4",
+          "--mamba-scheduler-strategy",
+          "extra_buffer"
+        ],
+        "dataset_path": "examples/speed_bench/jsonl/throughput_32k.jsonl",
+        "dataset_slug": "throughput_32k",
+        "run_slug": "087-mtp-s3-k1-d4-throughput_32k"
+      },
+      {
+        "index": 88,
+        "variant_name": "mtp-s3-k1-d4",
+        "variant_extra_args": [
+          "--speculative-algorithm",
+          "EAGLE",
+          "--speculative-num-steps",
+          "3",
+          "--speculative-eagle-topk",
+          "1",
+          "--speculative-num-draft-tokens",
+          "4",
+          "--mamba-scheduler-strategy",
+          "extra_buffer"
+        ],
+        "dataset_path": "examples/speed_bench/jsonl/throughput_8k.jsonl",
+        "dataset_slug": "throughput_8k",
+        "run_slug": "088-mtp-s3-k1-d4-throughput_8k"
+      },
+      {
+        "index": 89,
+        "variant_name": "mtp-s3-k1-d4",
+        "variant_extra_args": [
+          "--speculative-algorithm",
+          "EAGLE",
+          "--speculative-num-steps",
+          "3",
+          "--speculative-eagle-topk",
+          "1",
+          "--speculative-num-draft-tokens",
+          "4",
+          "--mamba-scheduler-strategy",
+          "extra_buffer"
+        ],
+        "dataset_path": "examples/json_mode_eval/jsonl/train.jsonl",
+        "dataset_slug": "train",
+        "run_slug": "089-mtp-s3-k1-d4-train"
+      },
+      {
+        "index": 90,
+        "variant_name": "mtp-s3-k1-d5",
+        "variant_extra_args": [
+          "--speculative-algorithm",
+          "EAGLE",
+          "--speculative-num-steps",
+          "3",
+          "--speculative-eagle-topk",
+          "1",
+          "--speculative-num-draft-tokens",
+          "5",
+          "--mamba-scheduler-strategy",
+          "extra_buffer"
+        ],
+        "dataset_path": "examples/speed_bench/jsonl/throughput_16k.jsonl",
+        "dataset_slug": "throughput_16k",
+        "run_slug": "090-mtp-s3-k1-d5-throughput_16k"
+      },
+      {
+        "index": 91,
+        "variant_name": "mtp-s3-k1-d5",
+        "variant_extra_args": [
+          "--speculative-algorithm",
+          "EAGLE",
+          "--speculative-num-steps",
+          "3",
+          "--speculative-eagle-topk",
+          "1",
+          "--speculative-num-draft-tokens",
+          "5",
+          "--mamba-scheduler-strategy",
+          "extra_buffer"
+        ],
+        "dataset_path": "examples/speed_bench/jsonl/throughput_1k.jsonl",
+        "dataset_slug": "throughput_1k",
+        "run_slug": "091-mtp-s3-k1-d5-throughput_1k"
+      },
+      {
+        "index": 92,
+        "variant_name": "mtp-s3-k1-d5",
+        "variant_extra_args": [
+          "--speculative-algorithm",
+          "EAGLE",
+          "--speculative-num-steps",
+          "3",
+          "--speculative-eagle-topk",
+          "1",
+          "--speculative-num-draft-tokens",
+          "5",
+          "--mamba-scheduler-strategy",
+          "extra_buffer"
+        ],
+        "dataset_path": "examples/speed_bench/jsonl/throughput_2k.jsonl",
+        "dataset_slug": "throughput_2k",
+        "run_slug": "092-mtp-s3-k1-d5-throughput_2k"
+      },
+      {
+        "index": 93,
+        "variant_name": "mtp-s3-k1-d5",
+        "variant_extra_args": [
+          "--speculative-algorithm",
+          "EAGLE",
+          "--speculative-num-steps",
+          "3",
+          "--speculative-eagle-topk",
+          "1",
+          "--speculative-num-draft-tokens",
+          "5",
+          "--mamba-scheduler-strategy",
+          "extra_buffer"
+        ],
+        "dataset_path": "examples/speed_bench/jsonl/throughput_32k.jsonl",
+        "dataset_slug": "throughput_32k",
+        "run_slug": "093-mtp-s3-k1-d5-throughput_32k"
+      },
+      {
+        "index": 94,
+        "variant_name": "mtp-s3-k1-d5",
+        "variant_extra_args": [
+          "--speculative-algorithm",
+          "EAGLE",
+          "--speculative-num-steps",
+          "3",
+          "--speculative-eagle-topk",
+          "1",
+          "--speculative-num-draft-tokens",
+          "5",
+          "--mamba-scheduler-strategy",
+          "extra_buffer"
+        ],
+        "dataset_path": "examples/speed_bench/jsonl/throughput_8k.jsonl",
+        "dataset_slug": "throughput_8k",
+        "run_slug": "094-mtp-s3-k1-d5-throughput_8k"
+      },
+      {
+        "index": 95,
+        "variant_name": "mtp-s3-k1-d5",
+        "variant_extra_args": [
+          "--speculative-algorithm",
+          "EAGLE",
+          "--speculative-num-steps",
+          "3",
+          "--speculative-eagle-topk",
+          "1",
+          "--speculative-num-draft-tokens",
+          "5",
+          "--mamba-scheduler-strategy",
+          "extra_buffer"
+        ],
+        "dataset_path": "examples/json_mode_eval/jsonl/train.jsonl",
+        "dataset_slug": "train",
+        "run_slug": "095-mtp-s3-k1-d5-train"
+      },
+      {
+        "index": 96,
+        "variant_name": "mtp-s3-k1-d6",
+        "variant_extra_args": [
+          "--speculative-algorithm",
+          "EAGLE",
+          "--speculative-num-steps",
+          "3",
+          "--speculative-eagle-topk",
+          "1",
+          "--speculative-num-draft-tokens",
+          "6",
+          "--mamba-scheduler-strategy",
+          "extra_buffer"
+        ],
+        "dataset_path": "examples/speed_bench/jsonl/throughput_16k.jsonl",
+        "dataset_slug": "throughput_16k",
+        "run_slug": "096-mtp-s3-k1-d6-throughput_16k"
+      },
+      {
+        "index": 97,
+        "variant_name": "mtp-s3-k1-d6",
+        "variant_extra_args": [
+          "--speculative-algorithm",
+          "EAGLE",
+          "--speculative-num-steps",
+          "3",
+          "--speculative-eagle-topk",
+          "1",
+          "--speculative-num-draft-tokens",
+          "6",
+          "--mamba-scheduler-strategy",
+          "extra_buffer"
+        ],
+        "dataset_path": "examples/speed_bench/jsonl/throughput_1k.jsonl",
+        "dataset_slug": "throughput_1k",
+        "run_slug": "097-mtp-s3-k1-d6-throughput_1k"
+      },
+      {
+        "index": 98,
+        "variant_name": "mtp-s3-k1-d6",
+        "variant_extra_args": [
+          "--speculative-algorithm",
+          "EAGLE",
+          "--speculative-num-steps",
+          "3",
+          "--speculative-eagle-topk",
+          "1",
+          "--speculative-num-draft-tokens",
+          "6",
+          "--mamba-scheduler-strategy",
+          "extra_buffer"
+        ],
+        "dataset_path": "examples/speed_bench/jsonl/throughput_2k.jsonl",
+        "dataset_slug": "throughput_2k",
+        "run_slug": "098-mtp-s3-k1-d6-throughput_2k"
+      },
+      {
+        "index": 99,
+        "variant_name": "mtp-s3-k1-d6",
+        "variant_extra_args": [
+          "--speculative-algorithm",
+          "EAGLE",
+          "--speculative-num-steps",
+          "3",
+          "--speculative-eagle-topk",
+          "1",
+          "--speculative-num-draft-tokens",
+          "6",
+          "--mamba-scheduler-strategy",
+          "extra_buffer"
+        ],
+        "dataset_path": "examples/speed_bench/jsonl/throughput_32k.jsonl",
+        "dataset_slug": "throughput_32k",
+        "run_slug": "099-mtp-s3-k1-d6-throughput_32k"
+      },
+      {
+        "index": 100,
+        "variant_name": "mtp-s3-k1-d6",
+        "variant_extra_args": [
+          "--speculative-algorithm",
+          "EAGLE",
+          "--speculative-num-steps",
+          "3",
+          "--speculative-eagle-topk",
+          "1",
+          "--speculative-num-draft-tokens",
+          "6",
+          "--mamba-scheduler-strategy",
+          "extra_buffer"
+        ],
+        "dataset_path": "examples/speed_bench/jsonl/throughput_8k.jsonl",
+        "dataset_slug": "throughput_8k",
+        "run_slug": "100-mtp-s3-k1-d6-throughput_8k"
+      },
+      {
+        "index": 101,
+        "variant_name": "mtp-s3-k1-d6",
+        "variant_extra_args": [
+          "--speculative-algorithm",
+          "EAGLE",
+          "--speculative-num-steps",
+          "3",
+          "--speculative-eagle-topk",
+          "1",
+          "--speculative-num-draft-tokens",
+          "6",
+          "--mamba-scheduler-strategy",
+          "extra_buffer"
+        ],
+        "dataset_path": "examples/json_mode_eval/jsonl/train.jsonl",
+        "dataset_slug": "train",
+        "run_slug": "101-mtp-s3-k1-d6-train"
+      },
+      {
+        "index": 102,
+        "variant_name": "mtp-s3-k2-d3",
+        "variant_extra_args": [
+          "--speculative-algorithm",
+          "EAGLE",
+          "--speculative-num-steps",
+          "3",
+          "--speculative-eagle-topk",
+          "2",
+          "--speculative-num-draft-tokens",
+          "3",
+          "--mamba-scheduler-strategy",
+          "extra_buffer"
+        ],
+        "dataset_path": "examples/speed_bench/jsonl/throughput_16k.jsonl",
+        "dataset_slug": "throughput_16k",
+        "run_slug": "102-mtp-s3-k2-d3-throughput_16k"
+      },
+      {
+        "index": 103,
+        "variant_name": "mtp-s3-k2-d3",
+        "variant_extra_args": [
+          "--speculative-algorithm",
+          "EAGLE",
+          "--speculative-num-steps",
+          "3",
+          "--speculative-eagle-topk",
+          "2",
+          "--speculative-num-draft-tokens",
+          "3",
+          "--mamba-scheduler-strategy",
+          "extra_buffer"
+        ],
+        "dataset_path": "examples/speed_bench/jsonl/throughput_1k.jsonl",
+        "dataset_slug": "throughput_1k",
+        "run_slug": "103-mtp-s3-k2-d3-throughput_1k"
+      },
+      {
+        "index": 104,
+        "variant_name": "mtp-s3-k2-d3",
+        "variant_extra_args": [
+          "--speculative-algorithm",
+          "EAGLE",
+          "--speculative-num-steps",
+          "3",
+          "--speculative-eagle-topk",
+          "2",
+          "--speculative-num-draft-tokens",
+          "3",
+          "--mamba-scheduler-strategy",
+          "extra_buffer"
+        ],
+        "dataset_path": "examples/speed_bench/jsonl/throughput_2k.jsonl",
+        "dataset_slug": "throughput_2k",
+        "run_slug": "104-mtp-s3-k2-d3-throughput_2k"
+      },
+      {
+        "index": 105,
+        "variant_name": "mtp-s3-k2-d3",
+        "variant_extra_args": [
+          "--speculative-algorithm",
+          "EAGLE",
+          "--speculative-num-steps",
+          "3",
+          "--speculative-eagle-topk",
+          "2",
+          "--speculative-num-draft-tokens",
+          "3",
+          "--mamba-scheduler-strategy",
+          "extra_buffer"
+        ],
+        "dataset_path": "examples/speed_bench/jsonl/throughput_32k.jsonl",
+        "dataset_slug": "throughput_32k",
+        "run_slug": "105-mtp-s3-k2-d3-throughput_32k"
+      },
+      {
+        "index": 106,
+        "variant_name": "mtp-s3-k2-d3",
+        "variant_extra_args": [
+          "--speculative-algorithm",
+          "EAGLE",
+          "--speculative-num-steps",
+          "3",
+          "--speculative-eagle-topk",
+          "2",
+          "--speculative-num-draft-tokens",
+          "3",
+          "--mamba-scheduler-strategy",
+          "extra_buffer"
+        ],
+        "dataset_path": "examples/speed_bench/jsonl/throughput_8k.jsonl",
+        "dataset_slug": "throughput_8k",
+        "run_slug": "106-mtp-s3-k2-d3-throughput_8k"
+      },
+      {
+        "index": 107,
+        "variant_name": "mtp-s3-k2-d3",
+        "variant_extra_args": [
+          "--speculative-algorithm",
+          "EAGLE",
+          "--speculative-num-steps",
+          "3",
+          "--speculative-eagle-topk",
+          "2",
+          "--speculative-num-draft-tokens",
+          "3",
+          "--mamba-scheduler-strategy",
+          "extra_buffer"
+        ],
+        "dataset_path": "examples/json_mode_eval/jsonl/train.jsonl",
+        "dataset_slug": "train",
+        "run_slug": "107-mtp-s3-k2-d3-train"
+      },
+      {
+        "index": 108,
+        "variant_name": "mtp-s3-k2-d4",
+        "variant_extra_args": [
+          "--speculative-algorithm",
+          "EAGLE",
+          "--speculative-num-steps",
+          "3",
+          "--speculative-eagle-topk",
+          "2",
+          "--speculative-num-draft-tokens",
+          "4",
+          "--mamba-scheduler-strategy",
+          "extra_buffer"
+        ],
+        "dataset_path": "examples/speed_bench/jsonl/throughput_16k.jsonl",
+        "dataset_slug": "throughput_16k",
+        "run_slug": "108-mtp-s3-k2-d4-throughput_16k"
+      },
+      {
+        "index": 109,
+        "variant_name": "mtp-s3-k2-d4",
+        "variant_extra_args": [
+          "--speculative-algorithm",
+          "EAGLE",
+          "--speculative-num-steps",
+          "3",
+          "--speculative-eagle-topk",
+          "2",
+          "--speculative-num-draft-tokens",
+          "4",
+          "--mamba-scheduler-strategy",
+          "extra_buffer"
+        ],
+        "dataset_path": "examples/speed_bench/jsonl/throughput_1k.jsonl",
+        "dataset_slug": "throughput_1k",
+        "run_slug": "109-mtp-s3-k2-d4-throughput_1k"
+      },
+      {
+        "index": 110,
+        "variant_name": "mtp-s3-k2-d4",
+        "variant_extra_args": [
+          "--speculative-algorithm",
+          "EAGLE",
+          "--speculative-num-steps",
+          "3",
+          "--speculative-eagle-topk",
+          "2",
+          "--speculative-num-draft-tokens",
+          "4",
+          "--mamba-scheduler-strategy",
+          "extra_buffer"
+        ],
+        "dataset_path": "examples/speed_bench/jsonl/throughput_2k.jsonl",
+        "dataset_slug": "throughput_2k",
+        "run_slug": "110-mtp-s3-k2-d4-throughput_2k"
+      },
+      {
+        "index": 111,
+        "variant_name": "mtp-s3-k2-d4",
+        "variant_extra_args": [
+          "--speculative-algorithm",
+          "EAGLE",
+          "--speculative-num-steps",
+          "3",
+          "--speculative-eagle-topk",
+          "2",
+          "--speculative-num-draft-tokens",
+          "4",
+          "--mamba-scheduler-strategy",
+          "extra_buffer"
+        ],
+        "dataset_path": "examples/speed_bench/jsonl/throughput_32k.jsonl",
+        "dataset_slug": "throughput_32k",
+        "run_slug": "111-mtp-s3-k2-d4-throughput_32k"
+      },
+      {
+        "index": 112,
+        "variant_name": "mtp-s3-k2-d4",
+        "variant_extra_args": [
+          "--speculative-algorithm",
+          "EAGLE",
+          "--speculative-num-steps",
+          "3",
+          "--speculative-eagle-topk",
+          "2",
+          "--speculative-num-draft-tokens",
+          "4",
+          "--mamba-scheduler-strategy",
+          "extra_buffer"
+        ],
+        "dataset_path": "examples/speed_bench/jsonl/throughput_8k.jsonl",
+        "dataset_slug": "throughput_8k",
+        "run_slug": "112-mtp-s3-k2-d4-throughput_8k"
+      },
+      {
+        "index": 113,
+        "variant_name": "mtp-s3-k2-d4",
+        "variant_extra_args": [
+          "--speculative-algorithm",
+          "EAGLE",
+          "--speculative-num-steps",
+          "3",
+          "--speculative-eagle-topk",
+          "2",
+          "--speculative-num-draft-tokens",
+          "4",
+          "--mamba-scheduler-strategy",
+          "extra_buffer"
+        ],
+        "dataset_path": "examples/json_mode_eval/jsonl/train.jsonl",
+        "dataset_slug": "train",
+        "run_slug": "113-mtp-s3-k2-d4-train"
+      },
+      {
+        "index": 114,
+        "variant_name": "mtp-s3-k2-d5",
+        "variant_extra_args": [
+          "--speculative-algorithm",
+          "EAGLE",
+          "--speculative-num-steps",
+          "3",
+          "--speculative-eagle-topk",
+          "2",
+          "--speculative-num-draft-tokens",
+          "5",
+          "--mamba-scheduler-strategy",
+          "extra_buffer"
+        ],
+        "dataset_path": "examples/speed_bench/jsonl/throughput_16k.jsonl",
+        "dataset_slug": "throughput_16k",
+        "run_slug": "114-mtp-s3-k2-d5-throughput_16k"
+      },
+      {
+        "index": 115,
+        "variant_name": "mtp-s3-k2-d5",
+        "variant_extra_args": [
+          "--speculative-algorithm",
+          "EAGLE",
+          "--speculative-num-steps",
+          "3",
+          "--speculative-eagle-topk",
+          "2",
+          "--speculative-num-draft-tokens",
+          "5",
+          "--mamba-scheduler-strategy",
+          "extra_buffer"
+        ],
+        "dataset_path": "examples/speed_bench/jsonl/throughput_1k.jsonl",
+        "dataset_slug": "throughput_1k",
+        "run_slug": "115-mtp-s3-k2-d5-throughput_1k"
+      },
+      {
+        "index": 116,
+        "variant_name": "mtp-s3-k2-d5",
+        "variant_extra_args": [
+          "--speculative-algorithm",
+          "EAGLE",
+          "--speculative-num-steps",
+          "3",
+          "--speculative-eagle-topk",
+          "2",
+          "--speculative-num-draft-tokens",
+          "5",
+          "--mamba-scheduler-strategy",
+          "extra_buffer"
+        ],
+        "dataset_path": "examples/speed_bench/jsonl/throughput_2k.jsonl",
+        "dataset_slug": "throughput_2k",
+        "run_slug": "116-mtp-s3-k2-d5-throughput_2k"
+      },
+      {
+        "index": 117,
+        "variant_name": "mtp-s3-k2-d5",
+        "variant_extra_args": [
+          "--speculative-algorithm",
+          "EAGLE",
+          "--speculative-num-steps",
+          "3",
+          "--speculative-eagle-topk",
+          "2",
+          "--speculative-num-draft-tokens",
+          "5",
+          "--mamba-scheduler-strategy",
+          "extra_buffer"
+        ],
+        "dataset_path": "examples/speed_bench/jsonl/throughput_32k.jsonl",
+        "dataset_slug": "throughput_32k",
+        "run_slug": "117-mtp-s3-k2-d5-throughput_32k"
+      },
+      {
+        "index": 118,
+        "variant_name": "mtp-s3-k2-d5",
+        "variant_extra_args": [
+          "--speculative-algorithm",
+          "EAGLE",
+          "--speculative-num-steps",
+          "3",
+          "--speculative-eagle-topk",
+          "2",
+          "--speculative-num-draft-tokens",
+          "5",
+          "--mamba-scheduler-strategy",
+          "extra_buffer"
+        ],
+        "dataset_path": "examples/speed_bench/jsonl/throughput_8k.jsonl",
+        "dataset_slug": "throughput_8k",
+        "run_slug": "118-mtp-s3-k2-d5-throughput_8k"
+      },
+      {
+        "index": 119,
+        "variant_name": "mtp-s3-k2-d5",
+        "variant_extra_args": [
+          "--speculative-algorithm",
+          "EAGLE",
+          "--speculative-num-steps",
+          "3",
+          "--speculative-eagle-topk",
+          "2",
+          "--speculative-num-draft-tokens",
+          "5",
+          "--mamba-scheduler-strategy",
+          "extra_buffer"
+        ],
+        "dataset_path": "examples/json_mode_eval/jsonl/train.jsonl",
+        "dataset_slug": "train",
+        "run_slug": "119-mtp-s3-k2-d5-train"
+      },
+      {
+        "index": 120,
+        "variant_name": "mtp-s3-k2-d6",
+        "variant_extra_args": [
+          "--speculative-algorithm",
+          "EAGLE",
+          "--speculative-num-steps",
+          "3",
+          "--speculative-eagle-topk",
+          "2",
+          "--speculative-num-draft-tokens",
+          "6",
+          "--mamba-scheduler-strategy",
+          "extra_buffer"
+        ],
+        "dataset_path": "examples/speed_bench/jsonl/throughput_16k.jsonl",
+        "dataset_slug": "throughput_16k",
+        "run_slug": "120-mtp-s3-k2-d6-throughput_16k"
+      },
+      {
+        "index": 121,
+        "variant_name": "mtp-s3-k2-d6",
+        "variant_extra_args": [
+          "--speculative-algorithm",
+          "EAGLE",
+          "--speculative-num-steps",
+          "3",
+          "--speculative-eagle-topk",
+          "2",
+          "--speculative-num-draft-tokens",
+          "6",
+          "--mamba-scheduler-strategy",
+          "extra_buffer"
+        ],
+        "dataset_path": "examples/speed_bench/jsonl/throughput_1k.jsonl",
+        "dataset_slug": "throughput_1k",
+        "run_slug": "121-mtp-s3-k2-d6-throughput_1k"
+      },
+      {
+        "index": 122,
+        "variant_name": "mtp-s3-k2-d6",
+        "variant_extra_args": [
+          "--speculative-algorithm",
+          "EAGLE",
+          "--speculative-num-steps",
+          "3",
+          "--speculative-eagle-topk",
+          "2",
+          "--speculative-num-draft-tokens",
+          "6",
+          "--mamba-scheduler-strategy",
+          "extra_buffer"
+        ],
+        "dataset_path": "examples/speed_bench/jsonl/throughput_2k.jsonl",
+        "dataset_slug": "throughput_2k",
+        "run_slug": "122-mtp-s3-k2-d6-throughput_2k"
+      },
+      {
+        "index": 123,
+        "variant_name": "mtp-s3-k2-d6",
+        "variant_extra_args": [
+          "--speculative-algorithm",
+          "EAGLE",
+          "--speculative-num-steps",
+          "3",
+          "--speculative-eagle-topk",
+          "2",
+          "--speculative-num-draft-tokens",
+          "6",
+          "--mamba-scheduler-strategy",
+          "extra_buffer"
+        ],
+        "dataset_path": "examples/speed_bench/jsonl/throughput_32k.jsonl",
+        "dataset_slug": "throughput_32k",
+        "run_slug": "123-mtp-s3-k2-d6-throughput_32k"
+      },
+      {
+        "index": 124,
+        "variant_name": "mtp-s3-k2-d6",
+        "variant_extra_args": [
+          "--speculative-algorithm",
+          "EAGLE",
+          "--speculative-num-steps",
+          "3",
+          "--speculative-eagle-topk",
+          "2",
+          "--speculative-num-draft-tokens",
+          "6",
+          "--mamba-scheduler-strategy",
+          "extra_buffer"
+        ],
+        "dataset_path": "examples/speed_bench/jsonl/throughput_8k.jsonl",
+        "dataset_slug": "throughput_8k",
+        "run_slug": "124-mtp-s3-k2-d6-throughput_8k"
+      },
+      {
+        "index": 125,
+        "variant_name": "mtp-s3-k2-d6",
+        "variant_extra_args": [
+          "--speculative-algorithm",
+          "EAGLE",
+          "--speculative-num-steps",
+          "3",
+          "--speculative-eagle-topk",
+          "2",
+          "--speculative-num-draft-tokens",
+          "6",
+          "--mamba-scheduler-strategy",
+          "extra_buffer"
+        ],
+        "dataset_path": "examples/json_mode_eval/jsonl/train.jsonl",
+        "dataset_slug": "train",
+        "run_slug": "125-mtp-s3-k2-d6-train"
+      },
+      {
+        "index": 126,
+        "variant_name": "mtp-s3-k3-d3",
+        "variant_extra_args": [
+          "--speculative-algorithm",
+          "EAGLE",
+          "--speculative-num-steps",
+          "3",
+          "--speculative-eagle-topk",
+          "3",
+          "--speculative-num-draft-tokens",
+          "3",
+          "--mamba-scheduler-strategy",
+          "extra_buffer"
+        ],
+        "dataset_path": "examples/speed_bench/jsonl/throughput_16k.jsonl",
+        "dataset_slug": "throughput_16k",
+        "run_slug": "126-mtp-s3-k3-d3-throughput_16k"
+      },
+      {
+        "index": 127,
+        "variant_name": "mtp-s3-k3-d3",
+        "variant_extra_args": [
+          "--speculative-algorithm",
+          "EAGLE",
+          "--speculative-num-steps",
+          "3",
+          "--speculative-eagle-topk",
+          "3",
+          "--speculative-num-draft-tokens",
+          "3",
+          "--mamba-scheduler-strategy",
+          "extra_buffer"
+        ],
+        "dataset_path": "examples/speed_bench/jsonl/throughput_1k.jsonl",
+        "dataset_slug": "throughput_1k",
+        "run_slug": "127-mtp-s3-k3-d3-throughput_1k"
+      },
+      {
+        "index": 128,
+        "variant_name": "mtp-s3-k3-d3",
+        "variant_extra_args": [
+          "--speculative-algorithm",
+          "EAGLE",
+          "--speculative-num-steps",
+          "3",
+          "--speculative-eagle-topk",
+          "3",
+          "--speculative-num-draft-tokens",
+          "3",
+          "--mamba-scheduler-strategy",
+          "extra_buffer"
+        ],
+        "dataset_path": "examples/speed_bench/jsonl/throughput_2k.jsonl",
+        "dataset_slug": "throughput_2k",
+        "run_slug": "128-mtp-s3-k3-d3-throughput_2k"
+      },
+      {
+        "index": 129,
+        "variant_name": "mtp-s3-k3-d3",
+        "variant_extra_args": [
+          "--speculative-algorithm",
+          "EAGLE",
+          "--speculative-num-steps",
+          "3",
+          "--speculative-eagle-topk",
+          "3",
+          "--speculative-num-draft-tokens",
+          "3",
+          "--mamba-scheduler-strategy",
+          "extra_buffer"
+        ],
+        "dataset_path": "examples/speed_bench/jsonl/throughput_32k.jsonl",
+        "dataset_slug": "throughput_32k",
+        "run_slug": "129-mtp-s3-k3-d3-throughput_32k"
+      },
+      {
+        "index": 130,
+        "variant_name": "mtp-s3-k3-d3",
+        "variant_extra_args": [
+          "--speculative-algorithm",
+          "EAGLE",
+          "--speculative-num-steps",
+          "3",
+          "--speculative-eagle-topk",
+          "3",
+          "--speculative-num-draft-tokens",
+          "3",
+          "--mamba-scheduler-strategy",
+          "extra_buffer"
+        ],
+        "dataset_path": "examples/speed_bench/jsonl/throughput_8k.jsonl",
+        "dataset_slug": "throughput_8k",
+        "run_slug": "130-mtp-s3-k3-d3-throughput_8k"
+      },
+      {
+        "index": 131,
+        "variant_name": "mtp-s3-k3-d3",
+        "variant_extra_args": [
+          "--speculative-algorithm",
+          "EAGLE",
+          "--speculative-num-steps",
+          "3",
+          "--speculative-eagle-topk",
+          "3",
+          "--speculative-num-draft-tokens",
+          "3",
+          "--mamba-scheduler-strategy",
+          "extra_buffer"
+        ],
+        "dataset_path": "examples/json_mode_eval/jsonl/train.jsonl",
+        "dataset_slug": "train",
+        "run_slug": "131-mtp-s3-k3-d3-train"
+      },
+      {
+        "index": 132,
+        "variant_name": "mtp-s3-k3-d4",
+        "variant_extra_args": [
+          "--speculative-algorithm",
+          "EAGLE",
+          "--speculative-num-steps",
+          "3",
+          "--speculative-eagle-topk",
+          "3",
+          "--speculative-num-draft-tokens",
+          "4",
+          "--mamba-scheduler-strategy",
+          "extra_buffer"
+        ],
+        "dataset_path": "examples/speed_bench/jsonl/throughput_16k.jsonl",
+        "dataset_slug": "throughput_16k",
+        "run_slug": "132-mtp-s3-k3-d4-throughput_16k"
+      },
+      {
+        "index": 133,
+        "variant_name": "mtp-s3-k3-d4",
+        "variant_extra_args": [
+          "--speculative-algorithm",
+          "EAGLE",
+          "--speculative-num-steps",
+          "3",
+          "--speculative-eagle-topk",
+          "3",
+          "--speculative-num-draft-tokens",
+          "4",
+          "--mamba-scheduler-strategy",
+          "extra_buffer"
+        ],
+        "dataset_path": "examples/speed_bench/jsonl/throughput_1k.jsonl",
+        "dataset_slug": "throughput_1k",
+        "run_slug": "133-mtp-s3-k3-d4-throughput_1k"
+      },
+      {
+        "index": 134,
+        "variant_name": "mtp-s3-k3-d4",
+        "variant_extra_args": [
+          "--speculative-algorithm",
+          "EAGLE",
+          "--speculative-num-steps",
+          "3",
+          "--speculative-eagle-topk",
+          "3",
+          "--speculative-num-draft-tokens",
+          "4",
+          "--mamba-scheduler-strategy",
+          "extra_buffer"
+        ],
+        "dataset_path": "examples/speed_bench/jsonl/throughput_2k.jsonl",
+        "dataset_slug": "throughput_2k",
+        "run_slug": "134-mtp-s3-k3-d4-throughput_2k"
+      },
+      {
+        "index": 135,
+        "variant_name": "mtp-s3-k3-d4",
+        "variant_extra_args": [
+          "--speculative-algorithm",
+          "EAGLE",
+          "--speculative-num-steps",
+          "3",
+          "--speculative-eagle-topk",
+          "3",
+          "--speculative-num-draft-tokens",
+          "4",
+          "--mamba-scheduler-strategy",
+          "extra_buffer"
+        ],
+        "dataset_path": "examples/speed_bench/jsonl/throughput_32k.jsonl",
+        "dataset_slug": "throughput_32k",
+        "run_slug": "135-mtp-s3-k3-d4-throughput_32k"
+      },
+      {
+        "index": 136,
+        "variant_name": "mtp-s3-k3-d4",
+        "variant_extra_args": [
+          "--speculative-algorithm",
+          "EAGLE",
+          "--speculative-num-steps",
+          "3",
+          "--speculative-eagle-topk",
+          "3",
+          "--speculative-num-draft-tokens",
+          "4",
+          "--mamba-scheduler-strategy",
+          "extra_buffer"
+        ],
+        "dataset_path": "examples/speed_bench/jsonl/throughput_8k.jsonl",
+        "dataset_slug": "throughput_8k",
+        "run_slug": "136-mtp-s3-k3-d4-throughput_8k"
+      },
+      {
+        "index": 137,
+        "variant_name": "mtp-s3-k3-d4",
+        "variant_extra_args": [
+          "--speculative-algorithm",
+          "EAGLE",
+          "--speculative-num-steps",
+          "3",
+          "--speculative-eagle-topk",
+          "3",
+          "--speculative-num-draft-tokens",
+          "4",
+          "--mamba-scheduler-strategy",
+          "extra_buffer"
+        ],
+        "dataset_path": "examples/json_mode_eval/jsonl/train.jsonl",
+        "dataset_slug": "train",
+        "run_slug": "137-mtp-s3-k3-d4-train"
+      },
+      {
+        "index": 138,
+        "variant_name": "mtp-s3-k3-d5",
+        "variant_extra_args": [
+          "--speculative-algorithm",
+          "EAGLE",
+          "--speculative-num-steps",
+          "3",
+          "--speculative-eagle-topk",
+          "3",
+          "--speculative-num-draft-tokens",
+          "5",
+          "--mamba-scheduler-strategy",
+          "extra_buffer"
+        ],
+        "dataset_path": "examples/speed_bench/jsonl/throughput_16k.jsonl",
+        "dataset_slug": "throughput_16k",
+        "run_slug": "138-mtp-s3-k3-d5-throughput_16k"
+      },
+      {
+        "index": 139,
+        "variant_name": "mtp-s3-k3-d5",
+        "variant_extra_args": [
+          "--speculative-algorithm",
+          "EAGLE",
+          "--speculative-num-steps",
+          "3",
+          "--speculative-eagle-topk",
+          "3",
+          "--speculative-num-draft-tokens",
+          "5",
+          "--mamba-scheduler-strategy",
+          "extra_buffer"
+        ],
+        "dataset_path": "examples/speed_bench/jsonl/throughput_1k.jsonl",
+        "dataset_slug": "throughput_1k",
+        "run_slug": "139-mtp-s3-k3-d5-throughput_1k"
+      },
+      {
+        "index": 140,
+        "variant_name": "mtp-s3-k3-d5",
+        "variant_extra_args": [
+          "--speculative-algorithm",
+          "EAGLE",
+          "--speculative-num-steps",
+          "3",
+          "--speculative-eagle-topk",
+          "3",
+          "--speculative-num-draft-tokens",
+          "5",
+          "--mamba-scheduler-strategy",
+          "extra_buffer"
+        ],
+        "dataset_path": "examples/speed_bench/jsonl/throughput_2k.jsonl",
+        "dataset_slug": "throughput_2k",
+        "run_slug": "140-mtp-s3-k3-d5-throughput_2k"
+      },
+      {
+        "index": 141,
+        "variant_name": "mtp-s3-k3-d5",
+        "variant_extra_args": [
+          "--speculative-algorithm",
+          "EAGLE",
+          "--speculative-num-steps",
+          "3",
+          "--speculative-eagle-topk",
+          "3",
+          "--speculative-num-draft-tokens",
+          "5",
+          "--mamba-scheduler-strategy",
+          "extra_buffer"
+        ],
+        "dataset_path": "examples/speed_bench/jsonl/throughput_32k.jsonl",
+        "dataset_slug": "throughput_32k",
+        "run_slug": "141-mtp-s3-k3-d5-throughput_32k"
+      },
+      {
+        "index": 142,
+        "variant_name": "mtp-s3-k3-d5",
+        "variant_extra_args": [
+          "--speculative-algorithm",
+          "EAGLE",
+          "--speculative-num-steps",
+          "3",
+          "--speculative-eagle-topk",
+          "3",
+          "--speculative-num-draft-tokens",
+          "5",
+          "--mamba-scheduler-strategy",
+          "extra_buffer"
+        ],
+        "dataset_path": "examples/speed_bench/jsonl/throughput_8k.jsonl",
+        "dataset_slug": "throughput_8k",
+        "run_slug": "142-mtp-s3-k3-d5-throughput_8k"
+      },
+      {
+        "index": 143,
+        "variant_name": "mtp-s3-k3-d5",
+        "variant_extra_args": [
+          "--speculative-algorithm",
+          "EAGLE",
+          "--speculative-num-steps",
+          "3",
+          "--speculative-eagle-topk",
+          "3",
+          "--speculative-num-draft-tokens",
+          "5",
+          "--mamba-scheduler-strategy",
+          "extra_buffer"
+        ],
+        "dataset_path": "examples/json_mode_eval/jsonl/train.jsonl",
+        "dataset_slug": "train",
+        "run_slug": "143-mtp-s3-k3-d5-train"
+      },
+      {
+        "index": 144,
+        "variant_name": "mtp-s3-k3-d6",
+        "variant_extra_args": [
+          "--speculative-algorithm",
+          "EAGLE",
+          "--speculative-num-steps",
+          "3",
+          "--speculative-eagle-topk",
+          "3",
+          "--speculative-num-draft-tokens",
+          "6",
+          "--mamba-scheduler-strategy",
+          "extra_buffer"
+        ],
+        "dataset_path": "examples/speed_bench/jsonl/throughput_16k.jsonl",
+        "dataset_slug": "throughput_16k",
+        "run_slug": "144-mtp-s3-k3-d6-throughput_16k"
+      },
+      {
+        "index": 145,
+        "variant_name": "mtp-s3-k3-d6",
+        "variant_extra_args": [
+          "--speculative-algorithm",
+          "EAGLE",
+          "--speculative-num-steps",
+          "3",
+          "--speculative-eagle-topk",
+          "3",
+          "--speculative-num-draft-tokens",
+          "6",
+          "--mamba-scheduler-strategy",
+          "extra_buffer"
+        ],
+        "dataset_path": "examples/speed_bench/jsonl/throughput_1k.jsonl",
+        "dataset_slug": "throughput_1k",
+        "run_slug": "145-mtp-s3-k3-d6-throughput_1k"
+      },
+      {
+        "index": 146,
+        "variant_name": "mtp-s3-k3-d6",
+        "variant_extra_args": [
+          "--speculative-algorithm",
+          "EAGLE",
+          "--speculative-num-steps",
+          "3",
+          "--speculative-eagle-topk",
+          "3",
+          "--speculative-num-draft-tokens",
+          "6",
+          "--mamba-scheduler-strategy",
+          "extra_buffer"
+        ],
+        "dataset_path": "examples/speed_bench/jsonl/throughput_2k.jsonl",
+        "dataset_slug": "throughput_2k",
+        "run_slug": "146-mtp-s3-k3-d6-throughput_2k"
+      },
+      {
+        "index": 147,
+        "variant_name": "mtp-s3-k3-d6",
+        "variant_extra_args": [
+          "--speculative-algorithm",
+          "EAGLE",
+          "--speculative-num-steps",
+          "3",
+          "--speculative-eagle-topk",
+          "3",
+          "--speculative-num-draft-tokens",
+          "6",
+          "--mamba-scheduler-strategy",
+          "extra_buffer"
+        ],
+        "dataset_path": "examples/speed_bench/jsonl/throughput_32k.jsonl",
+        "dataset_slug": "throughput_32k",
+        "run_slug": "147-mtp-s3-k3-d6-throughput_32k"
+      },
+      {
+        "index": 148,
+        "variant_name": "mtp-s3-k3-d6",
+        "variant_extra_args": [
+          "--speculative-algorithm",
+          "EAGLE",
+          "--speculative-num-steps",
+          "3",
+          "--speculative-eagle-topk",
+          "3",
+          "--speculative-num-draft-tokens",
+          "6",
+          "--mamba-scheduler-strategy",
+          "extra_buffer"
+        ],
+        "dataset_path": "examples/speed_bench/jsonl/throughput_8k.jsonl",
+        "dataset_slug": "throughput_8k",
+        "run_slug": "148-mtp-s3-k3-d6-throughput_8k"
+      },
+      {
+        "index": 149,
+        "variant_name": "mtp-s3-k3-d6",
+        "variant_extra_args": [
+          "--speculative-algorithm",
+          "EAGLE",
+          "--speculative-num-steps",
+          "3",
+          "--speculative-eagle-topk",
+          "3",
+          "--speculative-num-draft-tokens",
+          "6",
+          "--mamba-scheduler-strategy",
+          "extra_buffer"
+        ],
+        "dataset_path": "examples/json_mode_eval/jsonl/train.jsonl",
+        "dataset_slug": "train",
+        "run_slug": "149-mtp-s3-k3-d6-train"
+      },
+      {
+        "index": 150,
+        "variant_name": "mtp-s4-k1-d3",
+        "variant_extra_args": [
+          "--speculative-algorithm",
+          "EAGLE",
+          "--speculative-num-steps",
+          "4",
+          "--speculative-eagle-topk",
+          "1",
+          "--speculative-num-draft-tokens",
+          "3",
+          "--mamba-scheduler-strategy",
+          "extra_buffer"
+        ],
+        "dataset_path": "examples/speed_bench/jsonl/throughput_16k.jsonl",
+        "dataset_slug": "throughput_16k",
+        "run_slug": "150-mtp-s4-k1-d3-throughput_16k"
+      },
+      {
+        "index": 151,
+        "variant_name": "mtp-s4-k1-d3",
+        "variant_extra_args": [
+          "--speculative-algorithm",
+          "EAGLE",
+          "--speculative-num-steps",
+          "4",
+          "--speculative-eagle-topk",
+          "1",
+          "--speculative-num-draft-tokens",
+          "3",
+          "--mamba-scheduler-strategy",
+          "extra_buffer"
+        ],
+        "dataset_path": "examples/speed_bench/jsonl/throughput_1k.jsonl",
+        "dataset_slug": "throughput_1k",
+        "run_slug": "151-mtp-s4-k1-d3-throughput_1k"
+      },
+      {
+        "index": 152,
+        "variant_name": "mtp-s4-k1-d3",
+        "variant_extra_args": [
+          "--speculative-algorithm",
+          "EAGLE",
+          "--speculative-num-steps",
+          "4",
+          "--speculative-eagle-topk",
+          "1",
+          "--speculative-num-draft-tokens",
+          "3",
+          "--mamba-scheduler-strategy",
+          "extra_buffer"
+        ],
+        "dataset_path": "examples/speed_bench/jsonl/throughput_2k.jsonl",
+        "dataset_slug": "throughput_2k",
+        "run_slug": "152-mtp-s4-k1-d3-throughput_2k"
+      },
+      {
+        "index": 153,
+        "variant_name": "mtp-s4-k1-d3",
+        "variant_extra_args": [
+          "--speculative-algorithm",
+          "EAGLE",
+          "--speculative-num-steps",
+          "4",
+          "--speculative-eagle-topk",
+          "1",
+          "--speculative-num-draft-tokens",
+          "3",
+          "--mamba-scheduler-strategy",
+          "extra_buffer"
+        ],
+        "dataset_path": "examples/speed_bench/jsonl/throughput_32k.jsonl",
+        "dataset_slug": "throughput_32k",
+        "run_slug": "153-mtp-s4-k1-d3-throughput_32k"
+      },
+      {
+        "index": 154,
+        "variant_name": "mtp-s4-k1-d3",
+        "variant_extra_args": [
+          "--speculative-algorithm",
+          "EAGLE",
+          "--speculative-num-steps",
+          "4",
+          "--speculative-eagle-topk",
+          "1",
+          "--speculative-num-draft-tokens",
+          "3",
+          "--mamba-scheduler-strategy",
+          "extra_buffer"
+        ],
+        "dataset_path": "examples/speed_bench/jsonl/throughput_8k.jsonl",
+        "dataset_slug": "throughput_8k",
+        "run_slug": "154-mtp-s4-k1-d3-throughput_8k"
+      },
+      {
+        "index": 155,
+        "variant_name": "mtp-s4-k1-d3",
+        "variant_extra_args": [
+          "--speculative-algorithm",
+          "EAGLE",
+          "--speculative-num-steps",
+          "4",
+          "--speculative-eagle-topk",
+          "1",
+          "--speculative-num-draft-tokens",
+          "3",
+          "--mamba-scheduler-strategy",
+          "extra_buffer"
+        ],
+        "dataset_path": "examples/json_mode_eval/jsonl/train.jsonl",
+        "dataset_slug": "train",
+        "run_slug": "155-mtp-s4-k1-d3-train"
+      },
+      {
+        "index": 156,
+        "variant_name": "mtp-s4-k1-d4",
+        "variant_extra_args": [
+          "--speculative-algorithm",
+          "EAGLE",
+          "--speculative-num-steps",
+          "4",
+          "--speculative-eagle-topk",
+          "1",
+          "--speculative-num-draft-tokens",
+          "4",
+          "--mamba-scheduler-strategy",
+          "extra_buffer"
+        ],
+        "dataset_path": "examples/speed_bench/jsonl/throughput_16k.jsonl",
+        "dataset_slug": "throughput_16k",
+        "run_slug": "156-mtp-s4-k1-d4-throughput_16k"
+      },
+      {
+        "index": 157,
+        "variant_name": "mtp-s4-k1-d4",
+        "variant_extra_args": [
+          "--speculative-algorithm",
+          "EAGLE",
+          "--speculative-num-steps",
+          "4",
+          "--speculative-eagle-topk",
+          "1",
+          "--speculative-num-draft-tokens",
+          "4",
+          "--mamba-scheduler-strategy",
+          "extra_buffer"
+        ],
+        "dataset_path": "examples/speed_bench/jsonl/throughput_1k.jsonl",
+        "dataset_slug": "throughput_1k",
+        "run_slug": "157-mtp-s4-k1-d4-throughput_1k"
+      },
+      {
+        "index": 158,
+        "variant_name": "mtp-s4-k1-d4",
+        "variant_extra_args": [
+          "--speculative-algorithm",
+          "EAGLE",
+          "--speculative-num-steps",
+          "4",
+          "--speculative-eagle-topk",
+          "1",
+          "--speculative-num-draft-tokens",
+          "4",
+          "--mamba-scheduler-strategy",
+          "extra_buffer"
+        ],
+        "dataset_path": "examples/speed_bench/jsonl/throughput_2k.jsonl",
+        "dataset_slug": "throughput_2k",
+        "run_slug": "158-mtp-s4-k1-d4-throughput_2k"
+      },
+      {
+        "index": 159,
+        "variant_name": "mtp-s4-k1-d4",
+        "variant_extra_args": [
+          "--speculative-algorithm",
+          "EAGLE",
+          "--speculative-num-steps",
+          "4",
+          "--speculative-eagle-topk",
+          "1",
+          "--speculative-num-draft-tokens",
+          "4",
+          "--mamba-scheduler-strategy",
+          "extra_buffer"
+        ],
+        "dataset_path": "examples/speed_bench/jsonl/throughput_32k.jsonl",
+        "dataset_slug": "throughput_32k",
+        "run_slug": "159-mtp-s4-k1-d4-throughput_32k"
+      },
+      {
+        "index": 160,
+        "variant_name": "mtp-s4-k1-d4",
+        "variant_extra_args": [
+          "--speculative-algorithm",
+          "EAGLE",
+          "--speculative-num-steps",
+          "4",
+          "--speculative-eagle-topk",
+          "1",
+          "--speculative-num-draft-tokens",
+          "4",
+          "--mamba-scheduler-strategy",
+          "extra_buffer"
+        ],
+        "dataset_path": "examples/speed_bench/jsonl/throughput_8k.jsonl",
+        "dataset_slug": "throughput_8k",
+        "run_slug": "160-mtp-s4-k1-d4-throughput_8k"
+      },
+      {
+        "index": 161,
+        "variant_name": "mtp-s4-k1-d4",
+        "variant_extra_args": [
+          "--speculative-algorithm",
+          "EAGLE",
+          "--speculative-num-steps",
+          "4",
+          "--speculative-eagle-topk",
+          "1",
+          "--speculative-num-draft-tokens",
+          "4",
+          "--mamba-scheduler-strategy",
+          "extra_buffer"
+        ],
+        "dataset_path": "examples/json_mode_eval/jsonl/train.jsonl",
+        "dataset_slug": "train",
+        "run_slug": "161-mtp-s4-k1-d4-train"
+      },
+      {
+        "index": 162,
+        "variant_name": "mtp-s4-k1-d5",
+        "variant_extra_args": [
+          "--speculative-algorithm",
+          "EAGLE",
+          "--speculative-num-steps",
+          "4",
+          "--speculative-eagle-topk",
+          "1",
+          "--speculative-num-draft-tokens",
+          "5",
+          "--mamba-scheduler-strategy",
+          "extra_buffer"
+        ],
+        "dataset_path": "examples/speed_bench/jsonl/throughput_16k.jsonl",
+        "dataset_slug": "throughput_16k",
+        "run_slug": "162-mtp-s4-k1-d5-throughput_16k"
+      },
+      {
+        "index": 163,
+        "variant_name": "mtp-s4-k1-d5",
+        "variant_extra_args": [
+          "--speculative-algorithm",
+          "EAGLE",
+          "--speculative-num-steps",
+          "4",
+          "--speculative-eagle-topk",
+          "1",
+          "--speculative-num-draft-tokens",
+          "5",
+          "--mamba-scheduler-strategy",
+          "extra_buffer"
+        ],
+        "dataset_path": "examples/speed_bench/jsonl/throughput_1k.jsonl",
+        "dataset_slug": "throughput_1k",
+        "run_slug": "163-mtp-s4-k1-d5-throughput_1k"
+      },
+      {
+        "index": 164,
+        "variant_name": "mtp-s4-k1-d5",
+        "variant_extra_args": [
+          "--speculative-algorithm",
+          "EAGLE",
+          "--speculative-num-steps",
+          "4",
+          "--speculative-eagle-topk",
+          "1",
+          "--speculative-num-draft-tokens",
+          "5",
+          "--mamba-scheduler-strategy",
+          "extra_buffer"
+        ],
+        "dataset_path": "examples/speed_bench/jsonl/throughput_2k.jsonl",
+        "dataset_slug": "throughput_2k",
+        "run_slug": "164-mtp-s4-k1-d5-throughput_2k"
+      },
+      {
+        "index": 165,
+        "variant_name": "mtp-s4-k1-d5",
+        "variant_extra_args": [
+          "--speculative-algorithm",
+          "EAGLE",
+          "--speculative-num-steps",
+          "4",
+          "--speculative-eagle-topk",
+          "1",
+          "--speculative-num-draft-tokens",
+          "5",
+          "--mamba-scheduler-strategy",
+          "extra_buffer"
+        ],
+        "dataset_path": "examples/speed_bench/jsonl/throughput_32k.jsonl",
+        "dataset_slug": "throughput_32k",
+        "run_slug": "165-mtp-s4-k1-d5-throughput_32k"
+      },
+      {
+        "index": 166,
+        "variant_name": "mtp-s4-k1-d5",
+        "variant_extra_args": [
+          "--speculative-algorithm",
+          "EAGLE",
+          "--speculative-num-steps",
+          "4",
+          "--speculative-eagle-topk",
+          "1",
+          "--speculative-num-draft-tokens",
+          "5",
+          "--mamba-scheduler-strategy",
+          "extra_buffer"
+        ],
+        "dataset_path": "examples/speed_bench/jsonl/throughput_8k.jsonl",
+        "dataset_slug": "throughput_8k",
+        "run_slug": "166-mtp-s4-k1-d5-throughput_8k"
+      },
+      {
+        "index": 167,
+        "variant_name": "mtp-s4-k1-d5",
+        "variant_extra_args": [
+          "--speculative-algorithm",
+          "EAGLE",
+          "--speculative-num-steps",
+          "4",
+          "--speculative-eagle-topk",
+          "1",
+          "--speculative-num-draft-tokens",
+          "5",
+          "--mamba-scheduler-strategy",
+          "extra_buffer"
+        ],
+        "dataset_path": "examples/json_mode_eval/jsonl/train.jsonl",
+        "dataset_slug": "train",
+        "run_slug": "167-mtp-s4-k1-d5-train"
+      },
+      {
+        "index": 168,
+        "variant_name": "mtp-s4-k1-d6",
+        "variant_extra_args": [
+          "--speculative-algorithm",
+          "EAGLE",
+          "--speculative-num-steps",
+          "4",
+          "--speculative-eagle-topk",
+          "1",
+          "--speculative-num-draft-tokens",
+          "6",
+          "--mamba-scheduler-strategy",
+          "extra_buffer"
+        ],
+        "dataset_path": "examples/speed_bench/jsonl/throughput_16k.jsonl",
+        "dataset_slug": "throughput_16k",
+        "run_slug": "168-mtp-s4-k1-d6-throughput_16k"
+      },
+      {
+        "index": 169,
+        "variant_name": "mtp-s4-k1-d6",
+        "variant_extra_args": [
+          "--speculative-algorithm",
+          "EAGLE",
+          "--speculative-num-steps",
+          "4",
+          "--speculative-eagle-topk",
+          "1",
+          "--speculative-num-draft-tokens",
+          "6",
+          "--mamba-scheduler-strategy",
+          "extra_buffer"
+        ],
+        "dataset_path": "examples/speed_bench/jsonl/throughput_1k.jsonl",
+        "dataset_slug": "throughput_1k",
+        "run_slug": "169-mtp-s4-k1-d6-throughput_1k"
+      },
+      {
+        "index": 170,
+        "variant_name": "mtp-s4-k1-d6",
+        "variant_extra_args": [
+          "--speculative-algorithm",
+          "EAGLE",
+          "--speculative-num-steps",
+          "4",
+          "--speculative-eagle-topk",
+          "1",
+          "--speculative-num-draft-tokens",
+          "6",
+          "--mamba-scheduler-strategy",
+          "extra_buffer"
+        ],
+        "dataset_path": "examples/speed_bench/jsonl/throughput_2k.jsonl",
+        "dataset_slug": "throughput_2k",
+        "run_slug": "170-mtp-s4-k1-d6-throughput_2k"
+      },
+      {
+        "index": 171,
+        "variant_name": "mtp-s4-k1-d6",
+        "variant_extra_args": [
+          "--speculative-algorithm",
+          "EAGLE",
+          "--speculative-num-steps",
+          "4",
+          "--speculative-eagle-topk",
+          "1",
+          "--speculative-num-draft-tokens",
+          "6",
+          "--mamba-scheduler-strategy",
+          "extra_buffer"
+        ],
+        "dataset_path": "examples/speed_bench/jsonl/throughput_32k.jsonl",
+        "dataset_slug": "throughput_32k",
+        "run_slug": "171-mtp-s4-k1-d6-throughput_32k"
+      },
+      {
+        "index": 172,
+        "variant_name": "mtp-s4-k1-d6",
+        "variant_extra_args": [
+          "--speculative-algorithm",
+          "EAGLE",
+          "--speculative-num-steps",
+          "4",
+          "--speculative-eagle-topk",
+          "1",
+          "--speculative-num-draft-tokens",
+          "6",
+          "--mamba-scheduler-strategy",
+          "extra_buffer"
+        ],
+        "dataset_path": "examples/speed_bench/jsonl/throughput_8k.jsonl",
+        "dataset_slug": "throughput_8k",
+        "run_slug": "172-mtp-s4-k1-d6-throughput_8k"
+      },
+      {
+        "index": 173,
+        "variant_name": "mtp-s4-k1-d6",
+        "variant_extra_args": [
+          "--speculative-algorithm",
+          "EAGLE",
+          "--speculative-num-steps",
+          "4",
+          "--speculative-eagle-topk",
+          "1",
+          "--speculative-num-draft-tokens",
+          "6",
+          "--mamba-scheduler-strategy",
+          "extra_buffer"
+        ],
+        "dataset_path": "examples/json_mode_eval/jsonl/train.jsonl",
+        "dataset_slug": "train",
+        "run_slug": "173-mtp-s4-k1-d6-train"
+      },
+      {
+        "index": 174,
+        "variant_name": "mtp-s4-k2-d3",
+        "variant_extra_args": [
+          "--speculative-algorithm",
+          "EAGLE",
+          "--speculative-num-steps",
+          "4",
+          "--speculative-eagle-topk",
+          "2",
+          "--speculative-num-draft-tokens",
+          "3",
+          "--mamba-scheduler-strategy",
+          "extra_buffer"
+        ],
+        "dataset_path": "examples/speed_bench/jsonl/throughput_16k.jsonl",
+        "dataset_slug": "throughput_16k",
+        "run_slug": "174-mtp-s4-k2-d3-throughput_16k"
+      },
+      {
+        "index": 175,
+        "variant_name": "mtp-s4-k2-d3",
+        "variant_extra_args": [
+          "--speculative-algorithm",
+          "EAGLE",
+          "--speculative-num-steps",
+          "4",
+          "--speculative-eagle-topk",
+          "2",
+          "--speculative-num-draft-tokens",
+          "3",
+          "--mamba-scheduler-strategy",
+          "extra_buffer"
+        ],
+        "dataset_path": "examples/speed_bench/jsonl/throughput_1k.jsonl",
+        "dataset_slug": "throughput_1k",
+        "run_slug": "175-mtp-s4-k2-d3-throughput_1k"
+      },
+      {
+        "index": 176,
+        "variant_name": "mtp-s4-k2-d3",
+        "variant_extra_args": [
+          "--speculative-algorithm",
+          "EAGLE",
+          "--speculative-num-steps",
+          "4",
+          "--speculative-eagle-topk",
+          "2",
+          "--speculative-num-draft-tokens",
+          "3",
+          "--mamba-scheduler-strategy",
+          "extra_buffer"
+        ],
+        "dataset_path": "examples/speed_bench/jsonl/throughput_2k.jsonl",
+        "dataset_slug": "throughput_2k",
+        "run_slug": "176-mtp-s4-k2-d3-throughput_2k"
+      },
+      {
+        "index": 177,
+        "variant_name": "mtp-s4-k2-d3",
+        "variant_extra_args": [
+          "--speculative-algorithm",
+          "EAGLE",
+          "--speculative-num-steps",
+          "4",
+          "--speculative-eagle-topk",
+          "2",
+          "--speculative-num-draft-tokens",
+          "3",
+          "--mamba-scheduler-strategy",
+          "extra_buffer"
+        ],
+        "dataset_path": "examples/speed_bench/jsonl/throughput_32k.jsonl",
+        "dataset_slug": "throughput_32k",
+        "run_slug": "177-mtp-s4-k2-d3-throughput_32k"
+      },
+      {
+        "index": 178,
+        "variant_name": "mtp-s4-k2-d3",
+        "variant_extra_args": [
+          "--speculative-algorithm",
+          "EAGLE",
+          "--speculative-num-steps",
+          "4",
+          "--speculative-eagle-topk",
+          "2",
+          "--speculative-num-draft-tokens",
+          "3",
+          "--mamba-scheduler-strategy",
+          "extra_buffer"
+        ],
+        "dataset_path": "examples/speed_bench/jsonl/throughput_8k.jsonl",
+        "dataset_slug": "throughput_8k",
+        "run_slug": "178-mtp-s4-k2-d3-throughput_8k"
+      },
+      {
+        "index": 179,
+        "variant_name": "mtp-s4-k2-d3",
+        "variant_extra_args": [
+          "--speculative-algorithm",
+          "EAGLE",
+          "--speculative-num-steps",
+          "4",
+          "--speculative-eagle-topk",
+          "2",
+          "--speculative-num-draft-tokens",
+          "3",
+          "--mamba-scheduler-strategy",
+          "extra_buffer"
+        ],
+        "dataset_path": "examples/json_mode_eval/jsonl/train.jsonl",
+        "dataset_slug": "train",
+        "run_slug": "179-mtp-s4-k2-d3-train"
+      },
+      {
+        "index": 180,
+        "variant_name": "mtp-s4-k2-d4",
+        "variant_extra_args": [
+          "--speculative-algorithm",
+          "EAGLE",
+          "--speculative-num-steps",
+          "4",
+          "--speculative-eagle-topk",
+          "2",
+          "--speculative-num-draft-tokens",
+          "4",
+          "--mamba-scheduler-strategy",
+          "extra_buffer"
+        ],
+        "dataset_path": "examples/speed_bench/jsonl/throughput_16k.jsonl",
+        "dataset_slug": "throughput_16k",
+        "run_slug": "180-mtp-s4-k2-d4-throughput_16k"
+      },
+      {
+        "index": 181,
+        "variant_name": "mtp-s4-k2-d4",
+        "variant_extra_args": [
+          "--speculative-algorithm",
+          "EAGLE",
+          "--speculative-num-steps",
+          "4",
+          "--speculative-eagle-topk",
+          "2",
+          "--speculative-num-draft-tokens",
+          "4",
+          "--mamba-scheduler-strategy",
+          "extra_buffer"
+        ],
+        "dataset_path": "examples/speed_bench/jsonl/throughput_1k.jsonl",
+        "dataset_slug": "throughput_1k",
+        "run_slug": "181-mtp-s4-k2-d4-throughput_1k"
+      },
+      {
+        "index": 182,
+        "variant_name": "mtp-s4-k2-d4",
+        "variant_extra_args": [
+          "--speculative-algorithm",
+          "EAGLE",
+          "--speculative-num-steps",
+          "4",
+          "--speculative-eagle-topk",
+          "2",
+          "--speculative-num-draft-tokens",
+          "4",
+          "--mamba-scheduler-strategy",
+          "extra_buffer"
+        ],
+        "dataset_path": "examples/speed_bench/jsonl/throughput_2k.jsonl",
+        "dataset_slug": "throughput_2k",
+        "run_slug": "182-mtp-s4-k2-d4-throughput_2k"
+      },
+      {
+        "index": 183,
+        "variant_name": "mtp-s4-k2-d4",
+        "variant_extra_args": [
+          "--speculative-algorithm",
+          "EAGLE",
+          "--speculative-num-steps",
+          "4",
+          "--speculative-eagle-topk",
+          "2",
+          "--speculative-num-draft-tokens",
+          "4",
+          "--mamba-scheduler-strategy",
+          "extra_buffer"
+        ],
+        "dataset_path": "examples/speed_bench/jsonl/throughput_32k.jsonl",
+        "dataset_slug": "throughput_32k",
+        "run_slug": "183-mtp-s4-k2-d4-throughput_32k"
+      },
+      {
+        "index": 184,
+        "variant_name": "mtp-s4-k2-d4",
+        "variant_extra_args": [
+          "--speculative-algorithm",
+          "EAGLE",
+          "--speculative-num-steps",
+          "4",
+          "--speculative-eagle-topk",
+          "2",
+          "--speculative-num-draft-tokens",
+          "4",
+          "--mamba-scheduler-strategy",
+          "extra_buffer"
+        ],
+        "dataset_path": "examples/speed_bench/jsonl/throughput_8k.jsonl",
+        "dataset_slug": "throughput_8k",
+        "run_slug": "184-mtp-s4-k2-d4-throughput_8k"
+      },
+      {
+        "index": 185,
+        "variant_name": "mtp-s4-k2-d4",
+        "variant_extra_args": [
+          "--speculative-algorithm",
+          "EAGLE",
+          "--speculative-num-steps",
+          "4",
+          "--speculative-eagle-topk",
+          "2",
+          "--speculative-num-draft-tokens",
+          "4",
+          "--mamba-scheduler-strategy",
+          "extra_buffer"
+        ],
+        "dataset_path": "examples/json_mode_eval/jsonl/train.jsonl",
+        "dataset_slug": "train",
+        "run_slug": "185-mtp-s4-k2-d4-train"
+      },
+      {
+        "index": 186,
+        "variant_name": "mtp-s4-k2-d5",
+        "variant_extra_args": [
+          "--speculative-algorithm",
+          "EAGLE",
+          "--speculative-num-steps",
+          "4",
+          "--speculative-eagle-topk",
+          "2",
+          "--speculative-num-draft-tokens",
+          "5",
+          "--mamba-scheduler-strategy",
+          "extra_buffer"
+        ],
+        "dataset_path": "examples/speed_bench/jsonl/throughput_16k.jsonl",
+        "dataset_slug": "throughput_16k",
+        "run_slug": "186-mtp-s4-k2-d5-throughput_16k"
+      },
+      {
+        "index": 187,
+        "variant_name": "mtp-s4-k2-d5",
+        "variant_extra_args": [
+          "--speculative-algorithm",
+          "EAGLE",
+          "--speculative-num-steps",
+          "4",
+          "--speculative-eagle-topk",
+          "2",
+          "--speculative-num-draft-tokens",
+          "5",
+          "--mamba-scheduler-strategy",
+          "extra_buffer"
+        ],
+        "dataset_path": "examples/speed_bench/jsonl/throughput_1k.jsonl",
+        "dataset_slug": "throughput_1k",
+        "run_slug": "187-mtp-s4-k2-d5-throughput_1k"
+      },
+      {
+        "index": 188,
+        "variant_name": "mtp-s4-k2-d5",
+        "variant_extra_args": [
+          "--speculative-algorithm",
+          "EAGLE",
+          "--speculative-num-steps",
+          "4",
+          "--speculative-eagle-topk",
+          "2",
+          "--speculative-num-draft-tokens",
+          "5",
+          "--mamba-scheduler-strategy",
+          "extra_buffer"
+        ],
+        "dataset_path": "examples/speed_bench/jsonl/throughput_2k.jsonl",
+        "dataset_slug": "throughput_2k",
+        "run_slug": "188-mtp-s4-k2-d5-throughput_2k"
+      },
+      {
+        "index": 189,
+        "variant_name": "mtp-s4-k2-d5",
+        "variant_extra_args": [
+          "--speculative-algorithm",
+          "EAGLE",
+          "--speculative-num-steps",
+          "4",
+          "--speculative-eagle-topk",
+          "2",
+          "--speculative-num-draft-tokens",
+          "5",
+          "--mamba-scheduler-strategy",
+          "extra_buffer"
+        ],
+        "dataset_path": "examples/speed_bench/jsonl/throughput_32k.jsonl",
+        "dataset_slug": "throughput_32k",
+        "run_slug": "189-mtp-s4-k2-d5-throughput_32k"
+      },
+      {
+        "index": 190,
+        "variant_name": "mtp-s4-k2-d5",
+        "variant_extra_args": [
+          "--speculative-algorithm",
+          "EAGLE",
+          "--speculative-num-steps",
+          "4",
+          "--speculative-eagle-topk",
+          "2",
+          "--speculative-num-draft-tokens",
+          "5",
+          "--mamba-scheduler-strategy",
+          "extra_buffer"
+        ],
+        "dataset_path": "examples/speed_bench/jsonl/throughput_8k.jsonl",
+        "dataset_slug": "throughput_8k",
+        "run_slug": "190-mtp-s4-k2-d5-throughput_8k"
+      },
+      {
+        "index": 191,
+        "variant_name": "mtp-s4-k2-d5",
+        "variant_extra_args": [
+          "--speculative-algorithm",
+          "EAGLE",
+          "--speculative-num-steps",
+          "4",
+          "--speculative-eagle-topk",
+          "2",
+          "--speculative-num-draft-tokens",
+          "5",
+          "--mamba-scheduler-strategy",
+          "extra_buffer"
+        ],
+        "dataset_path": "examples/json_mode_eval/jsonl/train.jsonl",
+        "dataset_slug": "train",
+        "run_slug": "191-mtp-s4-k2-d5-train"
+      },
+      {
+        "index": 192,
+        "variant_name": "mtp-s4-k2-d6",
+        "variant_extra_args": [
+          "--speculative-algorithm",
+          "EAGLE",
+          "--speculative-num-steps",
+          "4",
+          "--speculative-eagle-topk",
+          "2",
+          "--speculative-num-draft-tokens",
+          "6",
+          "--mamba-scheduler-strategy",
+          "extra_buffer"
+        ],
+        "dataset_path": "examples/speed_bench/jsonl/throughput_16k.jsonl",
+        "dataset_slug": "throughput_16k",
+        "run_slug": "192-mtp-s4-k2-d6-throughput_16k"
+      },
+      {
+        "index": 193,
+        "variant_name": "mtp-s4-k2-d6",
+        "variant_extra_args": [
+          "--speculative-algorithm",
+          "EAGLE",
+          "--speculative-num-steps",
+          "4",
+          "--speculative-eagle-topk",
+          "2",
+          "--speculative-num-draft-tokens",
+          "6",
+          "--mamba-scheduler-strategy",
+          "extra_buffer"
+        ],
+        "dataset_path": "examples/speed_bench/jsonl/throughput_1k.jsonl",
+        "dataset_slug": "throughput_1k",
+        "run_slug": "193-mtp-s4-k2-d6-throughput_1k"
+      },
+      {
+        "index": 194,
+        "variant_name": "mtp-s4-k2-d6",
+        "variant_extra_args": [
+          "--speculative-algorithm",
+          "EAGLE",
+          "--speculative-num-steps",
+          "4",
+          "--speculative-eagle-topk",
+          "2",
+          "--speculative-num-draft-tokens",
+          "6",
+          "--mamba-scheduler-strategy",
+          "extra_buffer"
+        ],
+        "dataset_path": "examples/speed_bench/jsonl/throughput_2k.jsonl",
+        "dataset_slug": "throughput_2k",
+        "run_slug": "194-mtp-s4-k2-d6-throughput_2k"
+      },
+      {
+        "index": 195,
+        "variant_name": "mtp-s4-k2-d6",
+        "variant_extra_args": [
+          "--speculative-algorithm",
+          "EAGLE",
+          "--speculative-num-steps",
+          "4",
+          "--speculative-eagle-topk",
+          "2",
+          "--speculative-num-draft-tokens",
+          "6",
+          "--mamba-scheduler-strategy",
+          "extra_buffer"
+        ],
+        "dataset_path": "examples/speed_bench/jsonl/throughput_32k.jsonl",
+        "dataset_slug": "throughput_32k",
+        "run_slug": "195-mtp-s4-k2-d6-throughput_32k"
+      },
+      {
+        "index": 196,
+        "variant_name": "mtp-s4-k2-d6",
+        "variant_extra_args": [
+          "--speculative-algorithm",
+          "EAGLE",
+          "--speculative-num-steps",
+          "4",
+          "--speculative-eagle-topk",
+          "2",
+          "--speculative-num-draft-tokens",
+          "6",
+          "--mamba-scheduler-strategy",
+          "extra_buffer"
+        ],
+        "dataset_path": "examples/speed_bench/jsonl/throughput_8k.jsonl",
+        "dataset_slug": "throughput_8k",
+        "run_slug": "196-mtp-s4-k2-d6-throughput_8k"
+      },
+      {
+        "index": 197,
+        "variant_name": "mtp-s4-k2-d6",
+        "variant_extra_args": [
+          "--speculative-algorithm",
+          "EAGLE",
+          "--speculative-num-steps",
+          "4",
+          "--speculative-eagle-topk",
+          "2",
+          "--speculative-num-draft-tokens",
+          "6",
+          "--mamba-scheduler-strategy",
+          "extra_buffer"
+        ],
+        "dataset_path": "examples/json_mode_eval/jsonl/train.jsonl",
+        "dataset_slug": "train",
+        "run_slug": "197-mtp-s4-k2-d6-train"
+      },
+      {
+        "index": 198,
+        "variant_name": "mtp-s4-k3-d3",
+        "variant_extra_args": [
+          "--speculative-algorithm",
+          "EAGLE",
+          "--speculative-num-steps",
+          "4",
+          "--speculative-eagle-topk",
+          "3",
+          "--speculative-num-draft-tokens",
+          "3",
+          "--mamba-scheduler-strategy",
+          "extra_buffer"
+        ],
+        "dataset_path": "examples/speed_bench/jsonl/throughput_16k.jsonl",
+        "dataset_slug": "throughput_16k",
+        "run_slug": "198-mtp-s4-k3-d3-throughput_16k"
+      },
+      {
+        "index": 199,
+        "variant_name": "mtp-s4-k3-d3",
+        "variant_extra_args": [
+          "--speculative-algorithm",
+          "EAGLE",
+          "--speculative-num-steps",
+          "4",
+          "--speculative-eagle-topk",
+          "3",
+          "--speculative-num-draft-tokens",
+          "3",
+          "--mamba-scheduler-strategy",
+          "extra_buffer"
+        ],
+        "dataset_path": "examples/speed_bench/jsonl/throughput_1k.jsonl",
+        "dataset_slug": "throughput_1k",
+        "run_slug": "199-mtp-s4-k3-d3-throughput_1k"
+      },
+      {
+        "index": 200,
+        "variant_name": "mtp-s4-k3-d3",
+        "variant_extra_args": [
+          "--speculative-algorithm",
+          "EAGLE",
+          "--speculative-num-steps",
+          "4",
+          "--speculative-eagle-topk",
+          "3",
+          "--speculative-num-draft-tokens",
+          "3",
+          "--mamba-scheduler-strategy",
+          "extra_buffer"
+        ],
+        "dataset_path": "examples/speed_bench/jsonl/throughput_2k.jsonl",
+        "dataset_slug": "throughput_2k",
+        "run_slug": "200-mtp-s4-k3-d3-throughput_2k"
+      },
+      {
+        "index": 201,
+        "variant_name": "mtp-s4-k3-d3",
+        "variant_extra_args": [
+          "--speculative-algorithm",
+          "EAGLE",
+          "--speculative-num-steps",
+          "4",
+          "--speculative-eagle-topk",
+          "3",
+          "--speculative-num-draft-tokens",
+          "3",
+          "--mamba-scheduler-strategy",
+          "extra_buffer"
+        ],
+        "dataset_path": "examples/speed_bench/jsonl/throughput_32k.jsonl",
+        "dataset_slug": "throughput_32k",
+        "run_slug": "201-mtp-s4-k3-d3-throughput_32k"
+      },
+      {
+        "index": 202,
+        "variant_name": "mtp-s4-k3-d3",
+        "variant_extra_args": [
+          "--speculative-algorithm",
+          "EAGLE",
+          "--speculative-num-steps",
+          "4",
+          "--speculative-eagle-topk",
+          "3",
+          "--speculative-num-draft-tokens",
+          "3",
+          "--mamba-scheduler-strategy",
+          "extra_buffer"
+        ],
+        "dataset_path": "examples/speed_bench/jsonl/throughput_8k.jsonl",
+        "dataset_slug": "throughput_8k",
+        "run_slug": "202-mtp-s4-k3-d3-throughput_8k"
+      },
+      {
+        "index": 203,
+        "variant_name": "mtp-s4-k3-d3",
+        "variant_extra_args": [
+          "--speculative-algorithm",
+          "EAGLE",
+          "--speculative-num-steps",
+          "4",
+          "--speculative-eagle-topk",
+          "3",
+          "--speculative-num-draft-tokens",
+          "3",
+          "--mamba-scheduler-strategy",
+          "extra_buffer"
+        ],
+        "dataset_path": "examples/json_mode_eval/jsonl/train.jsonl",
+        "dataset_slug": "train",
+        "run_slug": "203-mtp-s4-k3-d3-train"
+      },
+      {
+        "index": 204,
+        "variant_name": "mtp-s4-k3-d4",
+        "variant_extra_args": [
+          "--speculative-algorithm",
+          "EAGLE",
+          "--speculative-num-steps",
+          "4",
+          "--speculative-eagle-topk",
+          "3",
+          "--speculative-num-draft-tokens",
+          "4",
+          "--mamba-scheduler-strategy",
+          "extra_buffer"
+        ],
+        "dataset_path": "examples/speed_bench/jsonl/throughput_16k.jsonl",
+        "dataset_slug": "throughput_16k",
+        "run_slug": "204-mtp-s4-k3-d4-throughput_16k"
+      },
+      {
+        "index": 205,
+        "variant_name": "mtp-s4-k3-d4",
+        "variant_extra_args": [
+          "--speculative-algorithm",
+          "EAGLE",
+          "--speculative-num-steps",
+          "4",
+          "--speculative-eagle-topk",
+          "3",
+          "--speculative-num-draft-tokens",
+          "4",
+          "--mamba-scheduler-strategy",
+          "extra_buffer"
+        ],
+        "dataset_path": "examples/speed_bench/jsonl/throughput_1k.jsonl",
+        "dataset_slug": "throughput_1k",
+        "run_slug": "205-mtp-s4-k3-d4-throughput_1k"
+      },
+      {
+        "index": 206,
+        "variant_name": "mtp-s4-k3-d4",
+        "variant_extra_args": [
+          "--speculative-algorithm",
+          "EAGLE",
+          "--speculative-num-steps",
+          "4",
+          "--speculative-eagle-topk",
+          "3",
+          "--speculative-num-draft-tokens",
+          "4",
+          "--mamba-scheduler-strategy",
+          "extra_buffer"
+        ],
+        "dataset_path": "examples/speed_bench/jsonl/throughput_2k.jsonl",
+        "dataset_slug": "throughput_2k",
+        "run_slug": "206-mtp-s4-k3-d4-throughput_2k"
+      },
+      {
+        "index": 207,
+        "variant_name": "mtp-s4-k3-d4",
+        "variant_extra_args": [
+          "--speculative-algorithm",
+          "EAGLE",
+          "--speculative-num-steps",
+          "4",
+          "--speculative-eagle-topk",
+          "3",
+          "--speculative-num-draft-tokens",
+          "4",
+          "--mamba-scheduler-strategy",
+          "extra_buffer"
+        ],
+        "dataset_path": "examples/speed_bench/jsonl/throughput_32k.jsonl",
+        "dataset_slug": "throughput_32k",
+        "run_slug": "207-mtp-s4-k3-d4-throughput_32k"
+      },
+      {
+        "index": 208,
+        "variant_name": "mtp-s4-k3-d4",
+        "variant_extra_args": [
+          "--speculative-algorithm",
+          "EAGLE",
+          "--speculative-num-steps",
+          "4",
+          "--speculative-eagle-topk",
+          "3",
+          "--speculative-num-draft-tokens",
+          "4",
+          "--mamba-scheduler-strategy",
+          "extra_buffer"
+        ],
+        "dataset_path": "examples/speed_bench/jsonl/throughput_8k.jsonl",
+        "dataset_slug": "throughput_8k",
+        "run_slug": "208-mtp-s4-k3-d4-throughput_8k"
+      },
+      {
+        "index": 209,
+        "variant_name": "mtp-s4-k3-d4",
+        "variant_extra_args": [
+          "--speculative-algorithm",
+          "EAGLE",
+          "--speculative-num-steps",
+          "4",
+          "--speculative-eagle-topk",
+          "3",
+          "--speculative-num-draft-tokens",
+          "4",
+          "--mamba-scheduler-strategy",
+          "extra_buffer"
+        ],
+        "dataset_path": "examples/json_mode_eval/jsonl/train.jsonl",
+        "dataset_slug": "train",
+        "run_slug": "209-mtp-s4-k3-d4-train"
+      },
+      {
+        "index": 210,
+        "variant_name": "mtp-s4-k3-d5",
+        "variant_extra_args": [
+          "--speculative-algorithm",
+          "EAGLE",
+          "--speculative-num-steps",
+          "4",
+          "--speculative-eagle-topk",
+          "3",
+          "--speculative-num-draft-tokens",
+          "5",
+          "--mamba-scheduler-strategy",
+          "extra_buffer"
+        ],
+        "dataset_path": "examples/speed_bench/jsonl/throughput_16k.jsonl",
+        "dataset_slug": "throughput_16k",
+        "run_slug": "210-mtp-s4-k3-d5-throughput_16k"
+      },
+      {
+        "index": 211,
+        "variant_name": "mtp-s4-k3-d5",
+        "variant_extra_args": [
+          "--speculative-algorithm",
+          "EAGLE",
+          "--speculative-num-steps",
+          "4",
+          "--speculative-eagle-topk",
+          "3",
+          "--speculative-num-draft-tokens",
+          "5",
+          "--mamba-scheduler-strategy",
+          "extra_buffer"
+        ],
+        "dataset_path": "examples/speed_bench/jsonl/throughput_1k.jsonl",
+        "dataset_slug": "throughput_1k",
+        "run_slug": "211-mtp-s4-k3-d5-throughput_1k"
+      },
+      {
+        "index": 212,
+        "variant_name": "mtp-s4-k3-d5",
+        "variant_extra_args": [
+          "--speculative-algorithm",
+          "EAGLE",
+          "--speculative-num-steps",
+          "4",
+          "--speculative-eagle-topk",
+          "3",
+          "--speculative-num-draft-tokens",
+          "5",
+          "--mamba-scheduler-strategy",
+          "extra_buffer"
+        ],
+        "dataset_path": "examples/speed_bench/jsonl/throughput_2k.jsonl",
+        "dataset_slug": "throughput_2k",
+        "run_slug": "212-mtp-s4-k3-d5-throughput_2k"
+      },
+      {
+        "index": 213,
+        "variant_name": "mtp-s4-k3-d5",
+        "variant_extra_args": [
+          "--speculative-algorithm",
+          "EAGLE",
+          "--speculative-num-steps",
+          "4",
+          "--speculative-eagle-topk",
+          "3",
+          "--speculative-num-draft-tokens",
+          "5",
+          "--mamba-scheduler-strategy",
+          "extra_buffer"
+        ],
+        "dataset_path": "examples/speed_bench/jsonl/throughput_32k.jsonl",
+        "dataset_slug": "throughput_32k",
+        "run_slug": "213-mtp-s4-k3-d5-throughput_32k"
+      },
+      {
+        "index": 214,
+        "variant_name": "mtp-s4-k3-d5",
+        "variant_extra_args": [
+          "--speculative-algorithm",
+          "EAGLE",
+          "--speculative-num-steps",
+          "4",
+          "--speculative-eagle-topk",
+          "3",
+          "--speculative-num-draft-tokens",
+          "5",
+          "--mamba-scheduler-strategy",
+          "extra_buffer"
+        ],
+        "dataset_path": "examples/speed_bench/jsonl/throughput_8k.jsonl",
+        "dataset_slug": "throughput_8k",
+        "run_slug": "214-mtp-s4-k3-d5-throughput_8k"
+      },
+      {
+        "index": 215,
+        "variant_name": "mtp-s4-k3-d5",
+        "variant_extra_args": [
+          "--speculative-algorithm",
+          "EAGLE",
+          "--speculative-num-steps",
+          "4",
+          "--speculative-eagle-topk",
+          "3",
+          "--speculative-num-draft-tokens",
+          "5",
+          "--mamba-scheduler-strategy",
+          "extra_buffer"
+        ],
+        "dataset_path": "examples/json_mode_eval/jsonl/train.jsonl",
+        "dataset_slug": "train",
+        "run_slug": "215-mtp-s4-k3-d5-train"
+      },
+      {
+        "index": 216,
+        "variant_name": "mtp-s4-k3-d6",
+        "variant_extra_args": [
+          "--speculative-algorithm",
+          "EAGLE",
+          "--speculative-num-steps",
+          "4",
+          "--speculative-eagle-topk",
+          "3",
+          "--speculative-num-draft-tokens",
+          "6",
+          "--mamba-scheduler-strategy",
+          "extra_buffer"
+        ],
+        "dataset_path": "examples/speed_bench/jsonl/throughput_16k.jsonl",
+        "dataset_slug": "throughput_16k",
+        "run_slug": "216-mtp-s4-k3-d6-throughput_16k"
+      },
+      {
+        "index": 217,
+        "variant_name": "mtp-s4-k3-d6",
+        "variant_extra_args": [
+          "--speculative-algorithm",
+          "EAGLE",
+          "--speculative-num-steps",
+          "4",
+          "--speculative-eagle-topk",
+          "3",
+          "--speculative-num-draft-tokens",
+          "6",
+          "--mamba-scheduler-strategy",
+          "extra_buffer"
+        ],
+        "dataset_path": "examples/speed_bench/jsonl/throughput_1k.jsonl",
+        "dataset_slug": "throughput_1k",
+        "run_slug": "217-mtp-s4-k3-d6-throughput_1k"
+      },
+      {
+        "index": 218,
+        "variant_name": "mtp-s4-k3-d6",
+        "variant_extra_args": [
+          "--speculative-algorithm",
+          "EAGLE",
+          "--speculative-num-steps",
+          "4",
+          "--speculative-eagle-topk",
+          "3",
+          "--speculative-num-draft-tokens",
+          "6",
+          "--mamba-scheduler-strategy",
+          "extra_buffer"
+        ],
+        "dataset_path": "examples/speed_bench/jsonl/throughput_2k.jsonl",
+        "dataset_slug": "throughput_2k",
+        "run_slug": "218-mtp-s4-k3-d6-throughput_2k"
+      },
+      {
+        "index": 219,
+        "variant_name": "mtp-s4-k3-d6",
+        "variant_extra_args": [
+          "--speculative-algorithm",
+          "EAGLE",
+          "--speculative-num-steps",
+          "4",
+          "--speculative-eagle-topk",
+          "3",
+          "--speculative-num-draft-tokens",
+          "6",
+          "--mamba-scheduler-strategy",
+          "extra_buffer"
+        ],
+        "dataset_path": "examples/speed_bench/jsonl/throughput_32k.jsonl",
+        "dataset_slug": "throughput_32k",
+        "run_slug": "219-mtp-s4-k3-d6-throughput_32k"
+      },
+      {
+        "index": 220,
+        "variant_name": "mtp-s4-k3-d6",
+        "variant_extra_args": [
+          "--speculative-algorithm",
+          "EAGLE",
+          "--speculative-num-steps",
+          "4",
+          "--speculative-eagle-topk",
+          "3",
+          "--speculative-num-draft-tokens",
+          "6",
+          "--mamba-scheduler-strategy",
+          "extra_buffer"
+        ],
+        "dataset_path": "examples/speed_bench/jsonl/throughput_8k.jsonl",
+        "dataset_slug": "throughput_8k",
+        "run_slug": "220-mtp-s4-k3-d6-throughput_8k"
+      },
+      {
+        "index": 221,
+        "variant_name": "mtp-s4-k3-d6",
+        "variant_extra_args": [
+          "--speculative-algorithm",
+          "EAGLE",
+          "--speculative-num-steps",
+          "4",
+          "--speculative-eagle-topk",
+          "3",
+          "--speculative-num-draft-tokens",
+          "6",
+          "--mamba-scheduler-strategy",
+          "extra_buffer"
+        ],
+        "dataset_path": "examples/json_mode_eval/jsonl/train.jsonl",
+        "dataset_slug": "train",
+        "run_slug": "221-mtp-s4-k3-d6-train"
+      },
+      {
+        "index": 222,
+        "variant_name": "mtp-s5-k1-d3",
+        "variant_extra_args": [
+          "--speculative-algorithm",
+          "EAGLE",
+          "--speculative-num-steps",
+          "5",
+          "--speculative-eagle-topk",
+          "1",
+          "--speculative-num-draft-tokens",
+          "3",
+          "--mamba-scheduler-strategy",
+          "extra_buffer"
+        ],
+        "dataset_path": "examples/speed_bench/jsonl/throughput_16k.jsonl",
+        "dataset_slug": "throughput_16k",
+        "run_slug": "222-mtp-s5-k1-d3-throughput_16k"
+      },
+      {
+        "index": 223,
+        "variant_name": "mtp-s5-k1-d3",
+        "variant_extra_args": [
+          "--speculative-algorithm",
+          "EAGLE",
+          "--speculative-num-steps",
+          "5",
+          "--speculative-eagle-topk",
+          "1",
+          "--speculative-num-draft-tokens",
+          "3",
+          "--mamba-scheduler-strategy",
+          "extra_buffer"
+        ],
+        "dataset_path": "examples/speed_bench/jsonl/throughput_1k.jsonl",
+        "dataset_slug": "throughput_1k",
+        "run_slug": "223-mtp-s5-k1-d3-throughput_1k"
+      },
+      {
+        "index": 224,
+        "variant_name": "mtp-s5-k1-d3",
+        "variant_extra_args": [
+          "--speculative-algorithm",
+          "EAGLE",
+          "--speculative-num-steps",
+          "5",
+          "--speculative-eagle-topk",
+          "1",
+          "--speculative-num-draft-tokens",
+          "3",
+          "--mamba-scheduler-strategy",
+          "extra_buffer"
+        ],
+        "dataset_path": "examples/speed_bench/jsonl/throughput_2k.jsonl",
+        "dataset_slug": "throughput_2k",
+        "run_slug": "224-mtp-s5-k1-d3-throughput_2k"
+      },
+      {
+        "index": 225,
+        "variant_name": "mtp-s5-k1-d3",
+        "variant_extra_args": [
+          "--speculative-algorithm",
+          "EAGLE",
+          "--speculative-num-steps",
+          "5",
+          "--speculative-eagle-topk",
+          "1",
+          "--speculative-num-draft-tokens",
+          "3",
+          "--mamba-scheduler-strategy",
+          "extra_buffer"
+        ],
+        "dataset_path": "examples/speed_bench/jsonl/throughput_32k.jsonl",
+        "dataset_slug": "throughput_32k",
+        "run_slug": "225-mtp-s5-k1-d3-throughput_32k"
+      },
+      {
+        "index": 226,
+        "variant_name": "mtp-s5-k1-d3",
+        "variant_extra_args": [
+          "--speculative-algorithm",
+          "EAGLE",
+          "--speculative-num-steps",
+          "5",
+          "--speculative-eagle-topk",
+          "1",
+          "--speculative-num-draft-tokens",
+          "3",
+          "--mamba-scheduler-strategy",
+          "extra_buffer"
+        ],
+        "dataset_path": "examples/speed_bench/jsonl/throughput_8k.jsonl",
+        "dataset_slug": "throughput_8k",
+        "run_slug": "226-mtp-s5-k1-d3-throughput_8k"
+      },
+      {
+        "index": 227,
+        "variant_name": "mtp-s5-k1-d3",
+        "variant_extra_args": [
+          "--speculative-algorithm",
+          "EAGLE",
+          "--speculative-num-steps",
+          "5",
+          "--speculative-eagle-topk",
+          "1",
+          "--speculative-num-draft-tokens",
+          "3",
+          "--mamba-scheduler-strategy",
+          "extra_buffer"
+        ],
+        "dataset_path": "examples/json_mode_eval/jsonl/train.jsonl",
+        "dataset_slug": "train",
+        "run_slug": "227-mtp-s5-k1-d3-train"
+      },
+      {
+        "index": 228,
+        "variant_name": "mtp-s5-k1-d4",
+        "variant_extra_args": [
+          "--speculative-algorithm",
+          "EAGLE",
+          "--speculative-num-steps",
+          "5",
+          "--speculative-eagle-topk",
+          "1",
+          "--speculative-num-draft-tokens",
+          "4",
+          "--mamba-scheduler-strategy",
+          "extra_buffer"
+        ],
+        "dataset_path": "examples/speed_bench/jsonl/throughput_16k.jsonl",
+        "dataset_slug": "throughput_16k",
+        "run_slug": "228-mtp-s5-k1-d4-throughput_16k"
+      },
+      {
+        "index": 229,
+        "variant_name": "mtp-s5-k1-d4",
+        "variant_extra_args": [
+          "--speculative-algorithm",
+          "EAGLE",
+          "--speculative-num-steps",
+          "5",
+          "--speculative-eagle-topk",
+          "1",
+          "--speculative-num-draft-tokens",
+          "4",
+          "--mamba-scheduler-strategy",
+          "extra_buffer"
+        ],
+        "dataset_path": "examples/speed_bench/jsonl/throughput_1k.jsonl",
+        "dataset_slug": "throughput_1k",
+        "run_slug": "229-mtp-s5-k1-d4-throughput_1k"
+      },
+      {
+        "index": 230,
+        "variant_name": "mtp-s5-k1-d4",
+        "variant_extra_args": [
+          "--speculative-algorithm",
+          "EAGLE",
+          "--speculative-num-steps",
+          "5",
+          "--speculative-eagle-topk",
+          "1",
+          "--speculative-num-draft-tokens",
+          "4",
+          "--mamba-scheduler-strategy",
+          "extra_buffer"
+        ],
+        "dataset_path": "examples/speed_bench/jsonl/throughput_2k.jsonl",
+        "dataset_slug": "throughput_2k",
+        "run_slug": "230-mtp-s5-k1-d4-throughput_2k"
+      },
+      {
+        "index": 231,
+        "variant_name": "mtp-s5-k1-d4",
+        "variant_extra_args": [
+          "--speculative-algorithm",
+          "EAGLE",
+          "--speculative-num-steps",
+          "5",
+          "--speculative-eagle-topk",
+          "1",
+          "--speculative-num-draft-tokens",
+          "4",
+          "--mamba-scheduler-strategy",
+          "extra_buffer"
+        ],
+        "dataset_path": "examples/speed_bench/jsonl/throughput_32k.jsonl",
+        "dataset_slug": "throughput_32k",
+        "run_slug": "231-mtp-s5-k1-d4-throughput_32k"
+      },
+      {
+        "index": 232,
+        "variant_name": "mtp-s5-k1-d4",
+        "variant_extra_args": [
+          "--speculative-algorithm",
+          "EAGLE",
+          "--speculative-num-steps",
+          "5",
+          "--speculative-eagle-topk",
+          "1",
+          "--speculative-num-draft-tokens",
+          "4",
+          "--mamba-scheduler-strategy",
+          "extra_buffer"
+        ],
+        "dataset_path": "examples/speed_bench/jsonl/throughput_8k.jsonl",
+        "dataset_slug": "throughput_8k",
+        "run_slug": "232-mtp-s5-k1-d4-throughput_8k"
+      },
+      {
+        "index": 233,
+        "variant_name": "mtp-s5-k1-d4",
+        "variant_extra_args": [
+          "--speculative-algorithm",
+          "EAGLE",
+          "--speculative-num-steps",
+          "5",
+          "--speculative-eagle-topk",
+          "1",
+          "--speculative-num-draft-tokens",
+          "4",
+          "--mamba-scheduler-strategy",
+          "extra_buffer"
+        ],
+        "dataset_path": "examples/json_mode_eval/jsonl/train.jsonl",
+        "dataset_slug": "train",
+        "run_slug": "233-mtp-s5-k1-d4-train"
+      },
+      {
+        "index": 234,
+        "variant_name": "mtp-s5-k1-d5",
+        "variant_extra_args": [
+          "--speculative-algorithm",
+          "EAGLE",
+          "--speculative-num-steps",
+          "5",
+          "--speculative-eagle-topk",
+          "1",
+          "--speculative-num-draft-tokens",
+          "5",
+          "--mamba-scheduler-strategy",
+          "extra_buffer"
+        ],
+        "dataset_path": "examples/speed_bench/jsonl/throughput_16k.jsonl",
+        "dataset_slug": "throughput_16k",
+        "run_slug": "234-mtp-s5-k1-d5-throughput_16k"
+      },
+      {
+        "index": 235,
+        "variant_name": "mtp-s5-k1-d5",
+        "variant_extra_args": [
+          "--speculative-algorithm",
+          "EAGLE",
+          "--speculative-num-steps",
+          "5",
+          "--speculative-eagle-topk",
+          "1",
+          "--speculative-num-draft-tokens",
+          "5",
+          "--mamba-scheduler-strategy",
+          "extra_buffer"
+        ],
+        "dataset_path": "examples/speed_bench/jsonl/throughput_1k.jsonl",
+        "dataset_slug": "throughput_1k",
+        "run_slug": "235-mtp-s5-k1-d5-throughput_1k"
+      },
+      {
+        "index": 236,
+        "variant_name": "mtp-s5-k1-d5",
+        "variant_extra_args": [
+          "--speculative-algorithm",
+          "EAGLE",
+          "--speculative-num-steps",
+          "5",
+          "--speculative-eagle-topk",
+          "1",
+          "--speculative-num-draft-tokens",
+          "5",
+          "--mamba-scheduler-strategy",
+          "extra_buffer"
+        ],
+        "dataset_path": "examples/speed_bench/jsonl/throughput_2k.jsonl",
+        "dataset_slug": "throughput_2k",
+        "run_slug": "236-mtp-s5-k1-d5-throughput_2k"
+      },
+      {
+        "index": 237,
+        "variant_name": "mtp-s5-k1-d5",
+        "variant_extra_args": [
+          "--speculative-algorithm",
+          "EAGLE",
+          "--speculative-num-steps",
+          "5",
+          "--speculative-eagle-topk",
+          "1",
+          "--speculative-num-draft-tokens",
+          "5",
+          "--mamba-scheduler-strategy",
+          "extra_buffer"
+        ],
+        "dataset_path": "examples/speed_bench/jsonl/throughput_32k.jsonl",
+        "dataset_slug": "throughput_32k",
+        "run_slug": "237-mtp-s5-k1-d5-throughput_32k"
+      },
+      {
+        "index": 238,
+        "variant_name": "mtp-s5-k1-d5",
+        "variant_extra_args": [
+          "--speculative-algorithm",
+          "EAGLE",
+          "--speculative-num-steps",
+          "5",
+          "--speculative-eagle-topk",
+          "1",
+          "--speculative-num-draft-tokens",
+          "5",
+          "--mamba-scheduler-strategy",
+          "extra_buffer"
+        ],
+        "dataset_path": "examples/speed_bench/jsonl/throughput_8k.jsonl",
+        "dataset_slug": "throughput_8k",
+        "run_slug": "238-mtp-s5-k1-d5-throughput_8k"
+      },
+      {
+        "index": 239,
+        "variant_name": "mtp-s5-k1-d5",
+        "variant_extra_args": [
+          "--speculative-algorithm",
+          "EAGLE",
+          "--speculative-num-steps",
+          "5",
+          "--speculative-eagle-topk",
+          "1",
+          "--speculative-num-draft-tokens",
+          "5",
+          "--mamba-scheduler-strategy",
+          "extra_buffer"
+        ],
+        "dataset_path": "examples/json_mode_eval/jsonl/train.jsonl",
+        "dataset_slug": "train",
+        "run_slug": "239-mtp-s5-k1-d5-train"
+      },
+      {
+        "index": 240,
+        "variant_name": "mtp-s5-k1-d6",
+        "variant_extra_args": [
+          "--speculative-algorithm",
+          "EAGLE",
+          "--speculative-num-steps",
+          "5",
+          "--speculative-eagle-topk",
+          "1",
+          "--speculative-num-draft-tokens",
+          "6",
+          "--mamba-scheduler-strategy",
+          "extra_buffer"
+        ],
+        "dataset_path": "examples/speed_bench/jsonl/throughput_16k.jsonl",
+        "dataset_slug": "throughput_16k",
+        "run_slug": "240-mtp-s5-k1-d6-throughput_16k"
+      },
+      {
+        "index": 241,
+        "variant_name": "mtp-s5-k1-d6",
+        "variant_extra_args": [
+          "--speculative-algorithm",
+          "EAGLE",
+          "--speculative-num-steps",
+          "5",
+          "--speculative-eagle-topk",
+          "1",
+          "--speculative-num-draft-tokens",
+          "6",
+          "--mamba-scheduler-strategy",
+          "extra_buffer"
+        ],
+        "dataset_path": "examples/speed_bench/jsonl/throughput_1k.jsonl",
+        "dataset_slug": "throughput_1k",
+        "run_slug": "241-mtp-s5-k1-d6-throughput_1k"
+      },
+      {
+        "index": 242,
+        "variant_name": "mtp-s5-k1-d6",
+        "variant_extra_args": [
+          "--speculative-algorithm",
+          "EAGLE",
+          "--speculative-num-steps",
+          "5",
+          "--speculative-eagle-topk",
+          "1",
+          "--speculative-num-draft-tokens",
+          "6",
+          "--mamba-scheduler-strategy",
+          "extra_buffer"
+        ],
+        "dataset_path": "examples/speed_bench/jsonl/throughput_2k.jsonl",
+        "dataset_slug": "throughput_2k",
+        "run_slug": "242-mtp-s5-k1-d6-throughput_2k"
+      },
+      {
+        "index": 243,
+        "variant_name": "mtp-s5-k1-d6",
+        "variant_extra_args": [
+          "--speculative-algorithm",
+          "EAGLE",
+          "--speculative-num-steps",
+          "5",
+          "--speculative-eagle-topk",
+          "1",
+          "--speculative-num-draft-tokens",
+          "6",
+          "--mamba-scheduler-strategy",
+          "extra_buffer"
+        ],
+        "dataset_path": "examples/speed_bench/jsonl/throughput_32k.jsonl",
+        "dataset_slug": "throughput_32k",
+        "run_slug": "243-mtp-s5-k1-d6-throughput_32k"
+      },
+      {
+        "index": 244,
+        "variant_name": "mtp-s5-k1-d6",
+        "variant_extra_args": [
+          "--speculative-algorithm",
+          "EAGLE",
+          "--speculative-num-steps",
+          "5",
+          "--speculative-eagle-topk",
+          "1",
+          "--speculative-num-draft-tokens",
+          "6",
+          "--mamba-scheduler-strategy",
+          "extra_buffer"
+        ],
+        "dataset_path": "examples/speed_bench/jsonl/throughput_8k.jsonl",
+        "dataset_slug": "throughput_8k",
+        "run_slug": "244-mtp-s5-k1-d6-throughput_8k"
+      },
+      {
+        "index": 245,
+        "variant_name": "mtp-s5-k1-d6",
+        "variant_extra_args": [
+          "--speculative-algorithm",
+          "EAGLE",
+          "--speculative-num-steps",
+          "5",
+          "--speculative-eagle-topk",
+          "1",
+          "--speculative-num-draft-tokens",
+          "6",
+          "--mamba-scheduler-strategy",
+          "extra_buffer"
+        ],
+        "dataset_path": "examples/json_mode_eval/jsonl/train.jsonl",
+        "dataset_slug": "train",
+        "run_slug": "245-mtp-s5-k1-d6-train"
+      },
+      {
+        "index": 246,
+        "variant_name": "mtp-s5-k2-d3",
+        "variant_extra_args": [
+          "--speculative-algorithm",
+          "EAGLE",
+          "--speculative-num-steps",
+          "5",
+          "--speculative-eagle-topk",
+          "2",
+          "--speculative-num-draft-tokens",
+          "3",
+          "--mamba-scheduler-strategy",
+          "extra_buffer"
+        ],
+        "dataset_path": "examples/speed_bench/jsonl/throughput_16k.jsonl",
+        "dataset_slug": "throughput_16k",
+        "run_slug": "246-mtp-s5-k2-d3-throughput_16k"
+      },
+      {
+        "index": 247,
+        "variant_name": "mtp-s5-k2-d3",
+        "variant_extra_args": [
+          "--speculative-algorithm",
+          "EAGLE",
+          "--speculative-num-steps",
+          "5",
+          "--speculative-eagle-topk",
+          "2",
+          "--speculative-num-draft-tokens",
+          "3",
+          "--mamba-scheduler-strategy",
+          "extra_buffer"
+        ],
+        "dataset_path": "examples/speed_bench/jsonl/throughput_1k.jsonl",
+        "dataset_slug": "throughput_1k",
+        "run_slug": "247-mtp-s5-k2-d3-throughput_1k"
+      },
+      {
+        "index": 248,
+        "variant_name": "mtp-s5-k2-d3",
+        "variant_extra_args": [
+          "--speculative-algorithm",
+          "EAGLE",
+          "--speculative-num-steps",
+          "5",
+          "--speculative-eagle-topk",
+          "2",
+          "--speculative-num-draft-tokens",
+          "3",
+          "--mamba-scheduler-strategy",
+          "extra_buffer"
+        ],
+        "dataset_path": "examples/speed_bench/jsonl/throughput_2k.jsonl",
+        "dataset_slug": "throughput_2k",
+        "run_slug": "248-mtp-s5-k2-d3-throughput_2k"
+      },
+      {
+        "index": 249,
+        "variant_name": "mtp-s5-k2-d3",
+        "variant_extra_args": [
+          "--speculative-algorithm",
+          "EAGLE",
+          "--speculative-num-steps",
+          "5",
+          "--speculative-eagle-topk",
+          "2",
+          "--speculative-num-draft-tokens",
+          "3",
+          "--mamba-scheduler-strategy",
+          "extra_buffer"
+        ],
+        "dataset_path": "examples/speed_bench/jsonl/throughput_32k.jsonl",
+        "dataset_slug": "throughput_32k",
+        "run_slug": "249-mtp-s5-k2-d3-throughput_32k"
+      },
+      {
+        "index": 250,
+        "variant_name": "mtp-s5-k2-d3",
+        "variant_extra_args": [
+          "--speculative-algorithm",
+          "EAGLE",
+          "--speculative-num-steps",
+          "5",
+          "--speculative-eagle-topk",
+          "2",
+          "--speculative-num-draft-tokens",
+          "3",
+          "--mamba-scheduler-strategy",
+          "extra_buffer"
+        ],
+        "dataset_path": "examples/speed_bench/jsonl/throughput_8k.jsonl",
+        "dataset_slug": "throughput_8k",
+        "run_slug": "250-mtp-s5-k2-d3-throughput_8k"
+      },
+      {
+        "index": 251,
+        "variant_name": "mtp-s5-k2-d3",
+        "variant_extra_args": [
+          "--speculative-algorithm",
+          "EAGLE",
+          "--speculative-num-steps",
+          "5",
+          "--speculative-eagle-topk",
+          "2",
+          "--speculative-num-draft-tokens",
+          "3",
+          "--mamba-scheduler-strategy",
+          "extra_buffer"
+        ],
+        "dataset_path": "examples/json_mode_eval/jsonl/train.jsonl",
+        "dataset_slug": "train",
+        "run_slug": "251-mtp-s5-k2-d3-train"
+      },
+      {
+        "index": 252,
+        "variant_name": "mtp-s5-k2-d4",
+        "variant_extra_args": [
+          "--speculative-algorithm",
+          "EAGLE",
+          "--speculative-num-steps",
+          "5",
+          "--speculative-eagle-topk",
+          "2",
+          "--speculative-num-draft-tokens",
+          "4",
+          "--mamba-scheduler-strategy",
+          "extra_buffer"
+        ],
+        "dataset_path": "examples/speed_bench/jsonl/throughput_16k.jsonl",
+        "dataset_slug": "throughput_16k",
+        "run_slug": "252-mtp-s5-k2-d4-throughput_16k"
+      },
+      {
+        "index": 253,
+        "variant_name": "mtp-s5-k2-d4",
+        "variant_extra_args": [
+          "--speculative-algorithm",
+          "EAGLE",
+          "--speculative-num-steps",
+          "5",
+          "--speculative-eagle-topk",
+          "2",
+          "--speculative-num-draft-tokens",
+          "4",
+          "--mamba-scheduler-strategy",
+          "extra_buffer"
+        ],
+        "dataset_path": "examples/speed_bench/jsonl/throughput_1k.jsonl",
+        "dataset_slug": "throughput_1k",
+        "run_slug": "253-mtp-s5-k2-d4-throughput_1k"
+      },
+      {
+        "index": 254,
+        "variant_name": "mtp-s5-k2-d4",
+        "variant_extra_args": [
+          "--speculative-algorithm",
+          "EAGLE",
+          "--speculative-num-steps",
+          "5",
+          "--speculative-eagle-topk",
+          "2",
+          "--speculative-num-draft-tokens",
+          "4",
+          "--mamba-scheduler-strategy",
+          "extra_buffer"
+        ],
+        "dataset_path": "examples/speed_bench/jsonl/throughput_2k.jsonl",
+        "dataset_slug": "throughput_2k",
+        "run_slug": "254-mtp-s5-k2-d4-throughput_2k"
+      },
+      {
+        "index": 255,
+        "variant_name": "mtp-s5-k2-d4",
+        "variant_extra_args": [
+          "--speculative-algorithm",
+          "EAGLE",
+          "--speculative-num-steps",
+          "5",
+          "--speculative-eagle-topk",
+          "2",
+          "--speculative-num-draft-tokens",
+          "4",
+          "--mamba-scheduler-strategy",
+          "extra_buffer"
+        ],
+        "dataset_path": "examples/speed_bench/jsonl/throughput_32k.jsonl",
+        "dataset_slug": "throughput_32k",
+        "run_slug": "255-mtp-s5-k2-d4-throughput_32k"
+      },
+      {
+        "index": 256,
+        "variant_name": "mtp-s5-k2-d4",
+        "variant_extra_args": [
+          "--speculative-algorithm",
+          "EAGLE",
+          "--speculative-num-steps",
+          "5",
+          "--speculative-eagle-topk",
+          "2",
+          "--speculative-num-draft-tokens",
+          "4",
+          "--mamba-scheduler-strategy",
+          "extra_buffer"
+        ],
+        "dataset_path": "examples/speed_bench/jsonl/throughput_8k.jsonl",
+        "dataset_slug": "throughput_8k",
+        "run_slug": "256-mtp-s5-k2-d4-throughput_8k"
+      },
+      {
+        "index": 257,
+        "variant_name": "mtp-s5-k2-d4",
+        "variant_extra_args": [
+          "--speculative-algorithm",
+          "EAGLE",
+          "--speculative-num-steps",
+          "5",
+          "--speculative-eagle-topk",
+          "2",
+          "--speculative-num-draft-tokens",
+          "4",
+          "--mamba-scheduler-strategy",
+          "extra_buffer"
+        ],
+        "dataset_path": "examples/json_mode_eval/jsonl/train.jsonl",
+        "dataset_slug": "train",
+        "run_slug": "257-mtp-s5-k2-d4-train"
+      },
+      {
+        "index": 258,
+        "variant_name": "mtp-s5-k2-d5",
+        "variant_extra_args": [
+          "--speculative-algorithm",
+          "EAGLE",
+          "--speculative-num-steps",
+          "5",
+          "--speculative-eagle-topk",
+          "2",
+          "--speculative-num-draft-tokens",
+          "5",
+          "--mamba-scheduler-strategy",
+          "extra_buffer"
+        ],
+        "dataset_path": "examples/speed_bench/jsonl/throughput_16k.jsonl",
+        "dataset_slug": "throughput_16k",
+        "run_slug": "258-mtp-s5-k2-d5-throughput_16k"
+      },
+      {
+        "index": 259,
+        "variant_name": "mtp-s5-k2-d5",
+        "variant_extra_args": [
+          "--speculative-algorithm",
+          "EAGLE",
+          "--speculative-num-steps",
+          "5",
+          "--speculative-eagle-topk",
+          "2",
+          "--speculative-num-draft-tokens",
+          "5",
+          "--mamba-scheduler-strategy",
+          "extra_buffer"
+        ],
+        "dataset_path": "examples/speed_bench/jsonl/throughput_1k.jsonl",
+        "dataset_slug": "throughput_1k",
+        "run_slug": "259-mtp-s5-k2-d5-throughput_1k"
+      },
+      {
+        "index": 260,
+        "variant_name": "mtp-s5-k2-d5",
+        "variant_extra_args": [
+          "--speculative-algorithm",
+          "EAGLE",
+          "--speculative-num-steps",
+          "5",
+          "--speculative-eagle-topk",
+          "2",
+          "--speculative-num-draft-tokens",
+          "5",
+          "--mamba-scheduler-strategy",
+          "extra_buffer"
+        ],
+        "dataset_path": "examples/speed_bench/jsonl/throughput_2k.jsonl",
+        "dataset_slug": "throughput_2k",
+        "run_slug": "260-mtp-s5-k2-d5-throughput_2k"
+      },
+      {
+        "index": 261,
+        "variant_name": "mtp-s5-k2-d5",
+        "variant_extra_args": [
+          "--speculative-algorithm",
+          "EAGLE",
+          "--speculative-num-steps",
+          "5",
+          "--speculative-eagle-topk",
+          "2",
+          "--speculative-num-draft-tokens",
+          "5",
+          "--mamba-scheduler-strategy",
+          "extra_buffer"
+        ],
+        "dataset_path": "examples/speed_bench/jsonl/throughput_32k.jsonl",
+        "dataset_slug": "throughput_32k",
+        "run_slug": "261-mtp-s5-k2-d5-throughput_32k"
+      },
+      {
+        "index": 262,
+        "variant_name": "mtp-s5-k2-d5",
+        "variant_extra_args": [
+          "--speculative-algorithm",
+          "EAGLE",
+          "--speculative-num-steps",
+          "5",
+          "--speculative-eagle-topk",
+          "2",
+          "--speculative-num-draft-tokens",
+          "5",
+          "--mamba-scheduler-strategy",
+          "extra_buffer"
+        ],
+        "dataset_path": "examples/speed_bench/jsonl/throughput_8k.jsonl",
+        "dataset_slug": "throughput_8k",
+        "run_slug": "262-mtp-s5-k2-d5-throughput_8k"
+      },
+      {
+        "index": 263,
+        "variant_name": "mtp-s5-k2-d5",
+        "variant_extra_args": [
+          "--speculative-algorithm",
+          "EAGLE",
+          "--speculative-num-steps",
+          "5",
+          "--speculative-eagle-topk",
+          "2",
+          "--speculative-num-draft-tokens",
+          "5",
+          "--mamba-scheduler-strategy",
+          "extra_buffer"
+        ],
+        "dataset_path": "examples/json_mode_eval/jsonl/train.jsonl",
+        "dataset_slug": "train",
+        "run_slug": "263-mtp-s5-k2-d5-train"
+      },
+      {
+        "index": 264,
+        "variant_name": "mtp-s5-k2-d6",
+        "variant_extra_args": [
+          "--speculative-algorithm",
+          "EAGLE",
+          "--speculative-num-steps",
+          "5",
+          "--speculative-eagle-topk",
+          "2",
+          "--speculative-num-draft-tokens",
+          "6",
+          "--mamba-scheduler-strategy",
+          "extra_buffer"
+        ],
+        "dataset_path": "examples/speed_bench/jsonl/throughput_16k.jsonl",
+        "dataset_slug": "throughput_16k",
+        "run_slug": "264-mtp-s5-k2-d6-throughput_16k"
+      },
+      {
+        "index": 265,
+        "variant_name": "mtp-s5-k2-d6",
+        "variant_extra_args": [
+          "--speculative-algorithm",
+          "EAGLE",
+          "--speculative-num-steps",
+          "5",
+          "--speculative-eagle-topk",
+          "2",
+          "--speculative-num-draft-tokens",
+          "6",
+          "--mamba-scheduler-strategy",
+          "extra_buffer"
+        ],
+        "dataset_path": "examples/speed_bench/jsonl/throughput_1k.jsonl",
+        "dataset_slug": "throughput_1k",
+        "run_slug": "265-mtp-s5-k2-d6-throughput_1k"
+      },
+      {
+        "index": 266,
+        "variant_name": "mtp-s5-k2-d6",
+        "variant_extra_args": [
+          "--speculative-algorithm",
+          "EAGLE",
+          "--speculative-num-steps",
+          "5",
+          "--speculative-eagle-topk",
+          "2",
+          "--speculative-num-draft-tokens",
+          "6",
+          "--mamba-scheduler-strategy",
+          "extra_buffer"
+        ],
+        "dataset_path": "examples/speed_bench/jsonl/throughput_2k.jsonl",
+        "dataset_slug": "throughput_2k",
+        "run_slug": "266-mtp-s5-k2-d6-throughput_2k"
+      },
+      {
+        "index": 267,
+        "variant_name": "mtp-s5-k2-d6",
+        "variant_extra_args": [
+          "--speculative-algorithm",
+          "EAGLE",
+          "--speculative-num-steps",
+          "5",
+          "--speculative-eagle-topk",
+          "2",
+          "--speculative-num-draft-tokens",
+          "6",
+          "--mamba-scheduler-strategy",
+          "extra_buffer"
+        ],
+        "dataset_path": "examples/speed_bench/jsonl/throughput_32k.jsonl",
+        "dataset_slug": "throughput_32k",
+        "run_slug": "267-mtp-s5-k2-d6-throughput_32k"
+      },
+      {
+        "index": 268,
+        "variant_name": "mtp-s5-k2-d6",
+        "variant_extra_args": [
+          "--speculative-algorithm",
+          "EAGLE",
+          "--speculative-num-steps",
+          "5",
+          "--speculative-eagle-topk",
+          "2",
+          "--speculative-num-draft-tokens",
+          "6",
+          "--mamba-scheduler-strategy",
+          "extra_buffer"
+        ],
+        "dataset_path": "examples/speed_bench/jsonl/throughput_8k.jsonl",
+        "dataset_slug": "throughput_8k",
+        "run_slug": "268-mtp-s5-k2-d6-throughput_8k"
+      },
+      {
+        "index": 269,
+        "variant_name": "mtp-s5-k2-d6",
+        "variant_extra_args": [
+          "--speculative-algorithm",
+          "EAGLE",
+          "--speculative-num-steps",
+          "5",
+          "--speculative-eagle-topk",
+          "2",
+          "--speculative-num-draft-tokens",
+          "6",
+          "--mamba-scheduler-strategy",
+          "extra_buffer"
+        ],
+        "dataset_path": "examples/json_mode_eval/jsonl/train.jsonl",
+        "dataset_slug": "train",
+        "run_slug": "269-mtp-s5-k2-d6-train"
+      },
+      {
+        "index": 270,
+        "variant_name": "mtp-s5-k3-d3",
+        "variant_extra_args": [
+          "--speculative-algorithm",
+          "EAGLE",
+          "--speculative-num-steps",
+          "5",
+          "--speculative-eagle-topk",
+          "3",
+          "--speculative-num-draft-tokens",
+          "3",
+          "--mamba-scheduler-strategy",
+          "extra_buffer"
+        ],
+        "dataset_path": "examples/speed_bench/jsonl/throughput_16k.jsonl",
+        "dataset_slug": "throughput_16k",
+        "run_slug": "270-mtp-s5-k3-d3-throughput_16k"
+      },
+      {
+        "index": 271,
+        "variant_name": "mtp-s5-k3-d3",
+        "variant_extra_args": [
+          "--speculative-algorithm",
+          "EAGLE",
+          "--speculative-num-steps",
+          "5",
+          "--speculative-eagle-topk",
+          "3",
+          "--speculative-num-draft-tokens",
+          "3",
+          "--mamba-scheduler-strategy",
+          "extra_buffer"
+        ],
+        "dataset_path": "examples/speed_bench/jsonl/throughput_1k.jsonl",
+        "dataset_slug": "throughput_1k",
+        "run_slug": "271-mtp-s5-k3-d3-throughput_1k"
+      },
+      {
+        "index": 272,
+        "variant_name": "mtp-s5-k3-d3",
+        "variant_extra_args": [
+          "--speculative-algorithm",
+          "EAGLE",
+          "--speculative-num-steps",
+          "5",
+          "--speculative-eagle-topk",
+          "3",
+          "--speculative-num-draft-tokens",
+          "3",
+          "--mamba-scheduler-strategy",
+          "extra_buffer"
+        ],
+        "dataset_path": "examples/speed_bench/jsonl/throughput_2k.jsonl",
+        "dataset_slug": "throughput_2k",
+        "run_slug": "272-mtp-s5-k3-d3-throughput_2k"
+      },
+      {
+        "index": 273,
+        "variant_name": "mtp-s5-k3-d3",
+        "variant_extra_args": [
+          "--speculative-algorithm",
+          "EAGLE",
+          "--speculative-num-steps",
+          "5",
+          "--speculative-eagle-topk",
+          "3",
+          "--speculative-num-draft-tokens",
+          "3",
+          "--mamba-scheduler-strategy",
+          "extra_buffer"
+        ],
+        "dataset_path": "examples/speed_bench/jsonl/throughput_32k.jsonl",
+        "dataset_slug": "throughput_32k",
+        "run_slug": "273-mtp-s5-k3-d3-throughput_32k"
+      },
+      {
+        "index": 274,
+        "variant_name": "mtp-s5-k3-d3",
+        "variant_extra_args": [
+          "--speculative-algorithm",
+          "EAGLE",
+          "--speculative-num-steps",
+          "5",
+          "--speculative-eagle-topk",
+          "3",
+          "--speculative-num-draft-tokens",
+          "3",
+          "--mamba-scheduler-strategy",
+          "extra_buffer"
+        ],
+        "dataset_path": "examples/speed_bench/jsonl/throughput_8k.jsonl",
+        "dataset_slug": "throughput_8k",
+        "run_slug": "274-mtp-s5-k3-d3-throughput_8k"
+      },
+      {
+        "index": 275,
+        "variant_name": "mtp-s5-k3-d3",
+        "variant_extra_args": [
+          "--speculative-algorithm",
+          "EAGLE",
+          "--speculative-num-steps",
+          "5",
+          "--speculative-eagle-topk",
+          "3",
+          "--speculative-num-draft-tokens",
+          "3",
+          "--mamba-scheduler-strategy",
+          "extra_buffer"
+        ],
+        "dataset_path": "examples/json_mode_eval/jsonl/train.jsonl",
+        "dataset_slug": "train",
+        "run_slug": "275-mtp-s5-k3-d3-train"
+      },
+      {
+        "index": 276,
+        "variant_name": "mtp-s5-k3-d4",
+        "variant_extra_args": [
+          "--speculative-algorithm",
+          "EAGLE",
+          "--speculative-num-steps",
+          "5",
+          "--speculative-eagle-topk",
+          "3",
+          "--speculative-num-draft-tokens",
+          "4",
+          "--mamba-scheduler-strategy",
+          "extra_buffer"
+        ],
+        "dataset_path": "examples/speed_bench/jsonl/throughput_16k.jsonl",
+        "dataset_slug": "throughput_16k",
+        "run_slug": "276-mtp-s5-k3-d4-throughput_16k"
+      },
+      {
+        "index": 277,
+        "variant_name": "mtp-s5-k3-d4",
+        "variant_extra_args": [
+          "--speculative-algorithm",
+          "EAGLE",
+          "--speculative-num-steps",
+          "5",
+          "--speculative-eagle-topk",
+          "3",
+          "--speculative-num-draft-tokens",
+          "4",
+          "--mamba-scheduler-strategy",
+          "extra_buffer"
+        ],
+        "dataset_path": "examples/speed_bench/jsonl/throughput_1k.jsonl",
+        "dataset_slug": "throughput_1k",
+        "run_slug": "277-mtp-s5-k3-d4-throughput_1k"
+      },
+      {
+        "index": 278,
+        "variant_name": "mtp-s5-k3-d4",
+        "variant_extra_args": [
+          "--speculative-algorithm",
+          "EAGLE",
+          "--speculative-num-steps",
+          "5",
+          "--speculative-eagle-topk",
+          "3",
+          "--speculative-num-draft-tokens",
+          "4",
+          "--mamba-scheduler-strategy",
+          "extra_buffer"
+        ],
+        "dataset_path": "examples/speed_bench/jsonl/throughput_2k.jsonl",
+        "dataset_slug": "throughput_2k",
+        "run_slug": "278-mtp-s5-k3-d4-throughput_2k"
+      },
+      {
+        "index": 279,
+        "variant_name": "mtp-s5-k3-d4",
+        "variant_extra_args": [
+          "--speculative-algorithm",
+          "EAGLE",
+          "--speculative-num-steps",
+          "5",
+          "--speculative-eagle-topk",
+          "3",
+          "--speculative-num-draft-tokens",
+          "4",
+          "--mamba-scheduler-strategy",
+          "extra_buffer"
+        ],
+        "dataset_path": "examples/speed_bench/jsonl/throughput_32k.jsonl",
+        "dataset_slug": "throughput_32k",
+        "run_slug": "279-mtp-s5-k3-d4-throughput_32k"
+      },
+      {
+        "index": 280,
+        "variant_name": "mtp-s5-k3-d4",
+        "variant_extra_args": [
+          "--speculative-algorithm",
+          "EAGLE",
+          "--speculative-num-steps",
+          "5",
+          "--speculative-eagle-topk",
+          "3",
+          "--speculative-num-draft-tokens",
+          "4",
+          "--mamba-scheduler-strategy",
+          "extra_buffer"
+        ],
+        "dataset_path": "examples/speed_bench/jsonl/throughput_8k.jsonl",
+        "dataset_slug": "throughput_8k",
+        "run_slug": "280-mtp-s5-k3-d4-throughput_8k"
+      },
+      {
+        "index": 281,
+        "variant_name": "mtp-s5-k3-d4",
+        "variant_extra_args": [
+          "--speculative-algorithm",
+          "EAGLE",
+          "--speculative-num-steps",
+          "5",
+          "--speculative-eagle-topk",
+          "3",
+          "--speculative-num-draft-tokens",
+          "4",
+          "--mamba-scheduler-strategy",
+          "extra_buffer"
+        ],
+        "dataset_path": "examples/json_mode_eval/jsonl/train.jsonl",
+        "dataset_slug": "train",
+        "run_slug": "281-mtp-s5-k3-d4-train"
+      },
+      {
+        "index": 282,
+        "variant_name": "mtp-s5-k3-d5",
+        "variant_extra_args": [
+          "--speculative-algorithm",
+          "EAGLE",
+          "--speculative-num-steps",
+          "5",
+          "--speculative-eagle-topk",
+          "3",
+          "--speculative-num-draft-tokens",
+          "5",
+          "--mamba-scheduler-strategy",
+          "extra_buffer"
+        ],
+        "dataset_path": "examples/speed_bench/jsonl/throughput_16k.jsonl",
+        "dataset_slug": "throughput_16k",
+        "run_slug": "282-mtp-s5-k3-d5-throughput_16k"
+      },
+      {
+        "index": 283,
+        "variant_name": "mtp-s5-k3-d5",
+        "variant_extra_args": [
+          "--speculative-algorithm",
+          "EAGLE",
+          "--speculative-num-steps",
+          "5",
+          "--speculative-eagle-topk",
+          "3",
+          "--speculative-num-draft-tokens",
+          "5",
+          "--mamba-scheduler-strategy",
+          "extra_buffer"
+        ],
+        "dataset_path": "examples/speed_bench/jsonl/throughput_1k.jsonl",
+        "dataset_slug": "throughput_1k",
+        "run_slug": "283-mtp-s5-k3-d5-throughput_1k"
+      },
+      {
+        "index": 284,
+        "variant_name": "mtp-s5-k3-d5",
+        "variant_extra_args": [
+          "--speculative-algorithm",
+          "EAGLE",
+          "--speculative-num-steps",
+          "5",
+          "--speculative-eagle-topk",
+          "3",
+          "--speculative-num-draft-tokens",
+          "5",
+          "--mamba-scheduler-strategy",
+          "extra_buffer"
+        ],
+        "dataset_path": "examples/speed_bench/jsonl/throughput_2k.jsonl",
+        "dataset_slug": "throughput_2k",
+        "run_slug": "284-mtp-s5-k3-d5-throughput_2k"
+      },
+      {
+        "index": 285,
+        "variant_name": "mtp-s5-k3-d5",
+        "variant_extra_args": [
+          "--speculative-algorithm",
+          "EAGLE",
+          "--speculative-num-steps",
+          "5",
+          "--speculative-eagle-topk",
+          "3",
+          "--speculative-num-draft-tokens",
+          "5",
+          "--mamba-scheduler-strategy",
+          "extra_buffer"
+        ],
+        "dataset_path": "examples/speed_bench/jsonl/throughput_32k.jsonl",
+        "dataset_slug": "throughput_32k",
+        "run_slug": "285-mtp-s5-k3-d5-throughput_32k"
+      },
+      {
+        "index": 286,
+        "variant_name": "mtp-s5-k3-d5",
+        "variant_extra_args": [
+          "--speculative-algorithm",
+          "EAGLE",
+          "--speculative-num-steps",
+          "5",
+          "--speculative-eagle-topk",
+          "3",
+          "--speculative-num-draft-tokens",
+          "5",
+          "--mamba-scheduler-strategy",
+          "extra_buffer"
+        ],
+        "dataset_path": "examples/speed_bench/jsonl/throughput_8k.jsonl",
+        "dataset_slug": "throughput_8k",
+        "run_slug": "286-mtp-s5-k3-d5-throughput_8k"
+      },
+      {
+        "index": 287,
+        "variant_name": "mtp-s5-k3-d5",
+        "variant_extra_args": [
+          "--speculative-algorithm",
+          "EAGLE",
+          "--speculative-num-steps",
+          "5",
+          "--speculative-eagle-topk",
+          "3",
+          "--speculative-num-draft-tokens",
+          "5",
+          "--mamba-scheduler-strategy",
+          "extra_buffer"
+        ],
+        "dataset_path": "examples/json_mode_eval/jsonl/train.jsonl",
+        "dataset_slug": "train",
+        "run_slug": "287-mtp-s5-k3-d5-train"
+      },
+      {
+        "index": 288,
+        "variant_name": "mtp-s5-k3-d6",
+        "variant_extra_args": [
+          "--speculative-algorithm",
+          "EAGLE",
+          "--speculative-num-steps",
+          "5",
+          "--speculative-eagle-topk",
+          "3",
+          "--speculative-num-draft-tokens",
+          "6",
+          "--mamba-scheduler-strategy",
+          "extra_buffer"
+        ],
+        "dataset_path": "examples/speed_bench/jsonl/throughput_16k.jsonl",
+        "dataset_slug": "throughput_16k",
+        "run_slug": "288-mtp-s5-k3-d6-throughput_16k"
+      },
+      {
+        "index": 289,
+        "variant_name": "mtp-s5-k3-d6",
+        "variant_extra_args": [
+          "--speculative-algorithm",
+          "EAGLE",
+          "--speculative-num-steps",
+          "5",
+          "--speculative-eagle-topk",
+          "3",
+          "--speculative-num-draft-tokens",
+          "6",
+          "--mamba-scheduler-strategy",
+          "extra_buffer"
+        ],
+        "dataset_path": "examples/speed_bench/jsonl/throughput_1k.jsonl",
+        "dataset_slug": "throughput_1k",
+        "run_slug": "289-mtp-s5-k3-d6-throughput_1k"
+      },
+      {
+        "index": 290,
+        "variant_name": "mtp-s5-k3-d6",
+        "variant_extra_args": [
+          "--speculative-algorithm",
+          "EAGLE",
+          "--speculative-num-steps",
+          "5",
+          "--speculative-eagle-topk",
+          "3",
+          "--speculative-num-draft-tokens",
+          "6",
+          "--mamba-scheduler-strategy",
+          "extra_buffer"
+        ],
+        "dataset_path": "examples/speed_bench/jsonl/throughput_2k.jsonl",
+        "dataset_slug": "throughput_2k",
+        "run_slug": "290-mtp-s5-k3-d6-throughput_2k"
+      },
+      {
+        "index": 291,
+        "variant_name": "mtp-s5-k3-d6",
+        "variant_extra_args": [
+          "--speculative-algorithm",
+          "EAGLE",
+          "--speculative-num-steps",
+          "5",
+          "--speculative-eagle-topk",
+          "3",
+          "--speculative-num-draft-tokens",
+          "6",
+          "--mamba-scheduler-strategy",
+          "extra_buffer"
+        ],
+        "dataset_path": "examples/speed_bench/jsonl/throughput_32k.jsonl",
+        "dataset_slug": "throughput_32k",
+        "run_slug": "291-mtp-s5-k3-d6-throughput_32k"
+      },
+      {
+        "index": 292,
+        "variant_name": "mtp-s5-k3-d6",
+        "variant_extra_args": [
+          "--speculative-algorithm",
+          "EAGLE",
+          "--speculative-num-steps",
+          "5",
+          "--speculative-eagle-topk",
+          "3",
+          "--speculative-num-draft-tokens",
+          "6",
+          "--mamba-scheduler-strategy",
+          "extra_buffer"
+        ],
+        "dataset_path": "examples/speed_bench/jsonl/throughput_8k.jsonl",
+        "dataset_slug": "throughput_8k",
+        "run_slug": "292-mtp-s5-k3-d6-throughput_8k"
+      },
+      {
+        "index": 293,
+        "variant_name": "mtp-s5-k3-d6",
+        "variant_extra_args": [
+          "--speculative-algorithm",
+          "EAGLE",
+          "--speculative-num-steps",
+          "5",
+          "--speculative-eagle-topk",
+          "3",
+          "--speculative-num-draft-tokens",
+          "6",
+          "--mamba-scheduler-strategy",
+          "extra_buffer"
+        ],
+        "dataset_path": "examples/json_mode_eval/jsonl/train.jsonl",
+        "dataset_slug": "train",
+        "run_slug": "293-mtp-s5-k3-d6-train"
+      }
+    ]
+  variants.json: |-
+    [
+      {
+        "name": "baseline",
+        "extra_args": [
+          "--mamba-scheduler-strategy",
+          "extra_buffer"
+        ]
+      },
+      {
+        "name": "mtp-s2-k1-d3",
+        "extra_args": [
+          "--speculative-algorithm",
+          "EAGLE",
+          "--speculative-num-steps",
+          "2",
+          "--speculative-eagle-topk",
+          "1",
+          "--speculative-num-draft-tokens",
+          "3",
+          "--mamba-scheduler-strategy",
+          "extra_buffer"
+        ]
+      },
+      {
+        "name": "mtp-s2-k1-d4",
+        "extra_args": [
+          "--speculative-algorithm",
+          "EAGLE",
+          "--speculative-num-steps",
+          "2",
+          "--speculative-eagle-topk",
+          "1",
+          "--speculative-num-draft-tokens",
+          "4",
+          "--mamba-scheduler-strategy",
+          "extra_buffer"
+        ]
+      },
+      {
+        "name": "mtp-s2-k1-d5",
+        "extra_args": [
+          "--speculative-algorithm",
+          "EAGLE",
+          "--speculative-num-steps",
+          "2",
+          "--speculative-eagle-topk",
+          "1",
+          "--speculative-num-draft-tokens",
+          "5",
+          "--mamba-scheduler-strategy",
+          "extra_buffer"
+        ]
+      },
+      {
+        "name": "mtp-s2-k1-d6",
+        "extra_args": [
+          "--speculative-algorithm",
+          "EAGLE",
+          "--speculative-num-steps",
+          "2",
+          "--speculative-eagle-topk",
+          "1",
+          "--speculative-num-draft-tokens",
+          "6",
+          "--mamba-scheduler-strategy",
+          "extra_buffer"
+        ]
+      },
+      {
+        "name": "mtp-s2-k2-d3",
+        "extra_args": [
+          "--speculative-algorithm",
+          "EAGLE",
+          "--speculative-num-steps",
+          "2",
+          "--speculative-eagle-topk",
+          "2",
+          "--speculative-num-draft-tokens",
+          "3",
+          "--mamba-scheduler-strategy",
+          "extra_buffer"
+        ]
+      },
+      {
+        "name": "mtp-s2-k2-d4",
+        "extra_args": [
+          "--speculative-algorithm",
+          "EAGLE",
+          "--speculative-num-steps",
+          "2",
+          "--speculative-eagle-topk",
+          "2",
+          "--speculative-num-draft-tokens",
+          "4",
+          "--mamba-scheduler-strategy",
+          "extra_buffer"
+        ]
+      },
+      {
+        "name": "mtp-s2-k2-d5",
+        "extra_args": [
+          "--speculative-algorithm",
+          "EAGLE",
+          "--speculative-num-steps",
+          "2",
+          "--speculative-eagle-topk",
+          "2",
+          "--speculative-num-draft-tokens",
+          "5",
+          "--mamba-scheduler-strategy",
+          "extra_buffer"
+        ]
+      },
+      {
+        "name": "mtp-s2-k2-d6",
+        "extra_args": [
+          "--speculative-algorithm",
+          "EAGLE",
+          "--speculative-num-steps",
+          "2",
+          "--speculative-eagle-topk",
+          "2",
+          "--speculative-num-draft-tokens",
+          "6",
+          "--mamba-scheduler-strategy",
+          "extra_buffer"
+        ]
+      },
+      {
+        "name": "mtp-s2-k3-d3",
+        "extra_args": [
+          "--speculative-algorithm",
+          "EAGLE",
+          "--speculative-num-steps",
+          "2",
+          "--speculative-eagle-topk",
+          "3",
+          "--speculative-num-draft-tokens",
+          "3",
+          "--mamba-scheduler-strategy",
+          "extra_buffer"
+        ]
+      },
+      {
+        "name": "mtp-s2-k3-d4",
+        "extra_args": [
+          "--speculative-algorithm",
+          "EAGLE",
+          "--speculative-num-steps",
+          "2",
+          "--speculative-eagle-topk",
+          "3",
+          "--speculative-num-draft-tokens",
+          "4",
+          "--mamba-scheduler-strategy",
+          "extra_buffer"
+        ]
+      },
+      {
+        "name": "mtp-s2-k3-d5",
+        "extra_args": [
+          "--speculative-algorithm",
+          "EAGLE",
+          "--speculative-num-steps",
+          "2",
+          "--speculative-eagle-topk",
+          "3",
+          "--speculative-num-draft-tokens",
+          "5",
+          "--mamba-scheduler-strategy",
+          "extra_buffer"
+        ]
+      },
+      {
+        "name": "mtp-s2-k3-d6",
+        "extra_args": [
+          "--speculative-algorithm",
+          "EAGLE",
+          "--speculative-num-steps",
+          "2",
+          "--speculative-eagle-topk",
+          "3",
+          "--speculative-num-draft-tokens",
+          "6",
+          "--mamba-scheduler-strategy",
+          "extra_buffer"
+        ]
+      },
+      {
+        "name": "mtp-s3-k1-d3",
+        "extra_args": [
+          "--speculative-algorithm",
+          "EAGLE",
+          "--speculative-num-steps",
+          "3",
+          "--speculative-eagle-topk",
+          "1",
+          "--speculative-num-draft-tokens",
+          "3",
+          "--mamba-scheduler-strategy",
+          "extra_buffer"
+        ]
+      },
+      {
+        "name": "mtp-s3-k1-d4",
+        "extra_args": [
+          "--speculative-algorithm",
+          "EAGLE",
+          "--speculative-num-steps",
+          "3",
+          "--speculative-eagle-topk",
+          "1",
+          "--speculative-num-draft-tokens",
+          "4",
+          "--mamba-scheduler-strategy",
+          "extra_buffer"
+        ]
+      },
+      {
+        "name": "mtp-s3-k1-d5",
+        "extra_args": [
+          "--speculative-algorithm",
+          "EAGLE",
+          "--speculative-num-steps",
+          "3",
+          "--speculative-eagle-topk",
+          "1",
+          "--speculative-num-draft-tokens",
+          "5",
+          "--mamba-scheduler-strategy",
+          "extra_buffer"
+        ]
+      },
+      {
+        "name": "mtp-s3-k1-d6",
+        "extra_args": [
+          "--speculative-algorithm",
+          "EAGLE",
+          "--speculative-num-steps",
+          "3",
+          "--speculative-eagle-topk",
+          "1",
+          "--speculative-num-draft-tokens",
+          "6",
+          "--mamba-scheduler-strategy",
+          "extra_buffer"
+        ]
+      },
+      {
+        "name": "mtp-s3-k2-d3",
+        "extra_args": [
+          "--speculative-algorithm",
+          "EAGLE",
+          "--speculative-num-steps",
+          "3",
+          "--speculative-eagle-topk",
+          "2",
+          "--speculative-num-draft-tokens",
+          "3",
+          "--mamba-scheduler-strategy",
+          "extra_buffer"
+        ]
+      },
+      {
+        "name": "mtp-s3-k2-d4",
+        "extra_args": [
+          "--speculative-algorithm",
+          "EAGLE",
+          "--speculative-num-steps",
+          "3",
+          "--speculative-eagle-topk",
+          "2",
+          "--speculative-num-draft-tokens",
+          "4",
+          "--mamba-scheduler-strategy",
+          "extra_buffer"
+        ]
+      },
+      {
+        "name": "mtp-s3-k2-d5",
+        "extra_args": [
+          "--speculative-algorithm",
+          "EAGLE",
+          "--speculative-num-steps",
+          "3",
+          "--speculative-eagle-topk",
+          "2",
+          "--speculative-num-draft-tokens",
+          "5",
+          "--mamba-scheduler-strategy",
+          "extra_buffer"
+        ]
+      },
+      {
+        "name": "mtp-s3-k2-d6",
+        "extra_args": [
+          "--speculative-algorithm",
+          "EAGLE",
+          "--speculative-num-steps",
+          "3",
+          "--speculative-eagle-topk",
+          "2",
+          "--speculative-num-draft-tokens",
+          "6",
+          "--mamba-scheduler-strategy",
+          "extra_buffer"
+        ]
+      },
+      {
+        "name": "mtp-s3-k3-d3",
+        "extra_args": [
+          "--speculative-algorithm",
+          "EAGLE",
+          "--speculative-num-steps",
+          "3",
+          "--speculative-eagle-topk",
+          "3",
+          "--speculative-num-draft-tokens",
+          "3",
+          "--mamba-scheduler-strategy",
+          "extra_buffer"
+        ]
+      },
+      {
+        "name": "mtp-s3-k3-d4",
+        "extra_args": [
+          "--speculative-algorithm",
+          "EAGLE",
+          "--speculative-num-steps",
+          "3",
+          "--speculative-eagle-topk",
+          "3",
+          "--speculative-num-draft-tokens",
+          "4",
+          "--mamba-scheduler-strategy",
+          "extra_buffer"
+        ]
+      },
+      {
+        "name": "mtp-s3-k3-d5",
+        "extra_args": [
+          "--speculative-algorithm",
+          "EAGLE",
+          "--speculative-num-steps",
+          "3",
+          "--speculative-eagle-topk",
+          "3",
+          "--speculative-num-draft-tokens",
+          "5",
+          "--mamba-scheduler-strategy",
+          "extra_buffer"
+        ]
+      },
+      {
+        "name": "mtp-s3-k3-d6",
+        "extra_args": [
+          "--speculative-algorithm",
+          "EAGLE",
+          "--speculative-num-steps",
+          "3",
+          "--speculative-eagle-topk",
+          "3",
+          "--speculative-num-draft-tokens",
+          "6",
+          "--mamba-scheduler-strategy",
+          "extra_buffer"
+        ]
+      },
+      {
+        "name": "mtp-s4-k1-d3",
+        "extra_args": [
+          "--speculative-algorithm",
+          "EAGLE",
+          "--speculative-num-steps",
+          "4",
+          "--speculative-eagle-topk",
+          "1",
+          "--speculative-num-draft-tokens",
+          "3",
+          "--mamba-scheduler-strategy",
+          "extra_buffer"
+        ]
+      },
+      {
+        "name": "mtp-s4-k1-d4",
+        "extra_args": [
+          "--speculative-algorithm",
+          "EAGLE",
+          "--speculative-num-steps",
+          "4",
+          "--speculative-eagle-topk",
+          "1",
+          "--speculative-num-draft-tokens",
+          "4",
+          "--mamba-scheduler-strategy",
+          "extra_buffer"
+        ]
+      },
+      {
+        "name": "mtp-s4-k1-d5",
+        "extra_args": [
+          "--speculative-algorithm",
+          "EAGLE",
+          "--speculative-num-steps",
+          "4",
+          "--speculative-eagle-topk",
+          "1",
+          "--speculative-num-draft-tokens",
+          "5",
+          "--mamba-scheduler-strategy",
+          "extra_buffer"
+        ]
+      },
+      {
+        "name": "mtp-s4-k1-d6",
+        "extra_args": [
+          "--speculative-algorithm",
+          "EAGLE",
+          "--speculative-num-steps",
+          "4",
+          "--speculative-eagle-topk",
+          "1",
+          "--speculative-num-draft-tokens",
+          "6",
+          "--mamba-scheduler-strategy",
+          "extra_buffer"
+        ]
+      },
+      {
+        "name": "mtp-s4-k2-d3",
+        "extra_args": [
+          "--speculative-algorithm",
+          "EAGLE",
+          "--speculative-num-steps",
+          "4",
+          "--speculative-eagle-topk",
+          "2",
+          "--speculative-num-draft-tokens",
+          "3",
+          "--mamba-scheduler-strategy",
+          "extra_buffer"
+        ]
+      },
+      {
+        "name": "mtp-s4-k2-d4",
+        "extra_args": [
+          "--speculative-algorithm",
+          "EAGLE",
+          "--speculative-num-steps",
+          "4",
+          "--speculative-eagle-topk",
+          "2",
+          "--speculative-num-draft-tokens",
+          "4",
+          "--mamba-scheduler-strategy",
+          "extra_buffer"
+        ]
+      },
+      {
+        "name": "mtp-s4-k2-d5",
+        "extra_args": [
+          "--speculative-algorithm",
+          "EAGLE",
+          "--speculative-num-steps",
+          "4",
+          "--speculative-eagle-topk",
+          "2",
+          "--speculative-num-draft-tokens",
+          "5",
+          "--mamba-scheduler-strategy",
+          "extra_buffer"
+        ]
+      },
+      {
+        "name": "mtp-s4-k2-d6",
+        "extra_args": [
+          "--speculative-algorithm",
+          "EAGLE",
+          "--speculative-num-steps",
+          "4",
+          "--speculative-eagle-topk",
+          "2",
+          "--speculative-num-draft-tokens",
+          "6",
+          "--mamba-scheduler-strategy",
+          "extra_buffer"
+        ]
+      },
+      {
+        "name": "mtp-s4-k3-d3",
+        "extra_args": [
+          "--speculative-algorithm",
+          "EAGLE",
+          "--speculative-num-steps",
+          "4",
+          "--speculative-eagle-topk",
+          "3",
+          "--speculative-num-draft-tokens",
+          "3",
+          "--mamba-scheduler-strategy",
+          "extra_buffer"
+        ]
+      },
+      {
+        "name": "mtp-s4-k3-d4",
+        "extra_args": [
+          "--speculative-algorithm",
+          "EAGLE",
+          "--speculative-num-steps",
+          "4",
+          "--speculative-eagle-topk",
+          "3",
+          "--speculative-num-draft-tokens",
+          "4",
+          "--mamba-scheduler-strategy",
+          "extra_buffer"
+        ]
+      },
+      {
+        "name": "mtp-s4-k3-d5",
+        "extra_args": [
+          "--speculative-algorithm",
+          "EAGLE",
+          "--speculative-num-steps",
+          "4",
+          "--speculative-eagle-topk",
+          "3",
+          "--speculative-num-draft-tokens",
+          "5",
+          "--mamba-scheduler-strategy",
+          "extra_buffer"
+        ]
+      },
+      {
+        "name": "mtp-s4-k3-d6",
+        "extra_args": [
+          "--speculative-algorithm",
+          "EAGLE",
+          "--speculative-num-steps",
+          "4",
+          "--speculative-eagle-topk",
+          "3",
+          "--speculative-num-draft-tokens",
+          "6",
+          "--mamba-scheduler-strategy",
+          "extra_buffer"
+        ]
+      },
+      {
+        "name": "mtp-s5-k1-d3",
+        "extra_args": [
+          "--speculative-algorithm",
+          "EAGLE",
+          "--speculative-num-steps",
+          "5",
+          "--speculative-eagle-topk",
+          "1",
+          "--speculative-num-draft-tokens",
+          "3",
+          "--mamba-scheduler-strategy",
+          "extra_buffer"
+        ]
+      },
+      {
+        "name": "mtp-s5-k1-d4",
+        "extra_args": [
+          "--speculative-algorithm",
+          "EAGLE",
+          "--speculative-num-steps",
+          "5",
+          "--speculative-eagle-topk",
+          "1",
+          "--speculative-num-draft-tokens",
+          "4",
+          "--mamba-scheduler-strategy",
+          "extra_buffer"
+        ]
+      },
+      {
+        "name": "mtp-s5-k1-d5",
+        "extra_args": [
+          "--speculative-algorithm",
+          "EAGLE",
+          "--speculative-num-steps",
+          "5",
+          "--speculative-eagle-topk",
+          "1",
+          "--speculative-num-draft-tokens",
+          "5",
+          "--mamba-scheduler-strategy",
+          "extra_buffer"
+        ]
+      },
+      {
+        "name": "mtp-s5-k1-d6",
+        "extra_args": [
+          "--speculative-algorithm",
+          "EAGLE",
+          "--speculative-num-steps",
+          "5",
+          "--speculative-eagle-topk",
+          "1",
+          "--speculative-num-draft-tokens",
+          "6",
+          "--mamba-scheduler-strategy",
+          "extra_buffer"
+        ]
+      },
+      {
+        "name": "mtp-s5-k2-d3",
+        "extra_args": [
+          "--speculative-algorithm",
+          "EAGLE",
+          "--speculative-num-steps",
+          "5",
+          "--speculative-eagle-topk",
+          "2",
+          "--speculative-num-draft-tokens",
+          "3",
+          "--mamba-scheduler-strategy",
+          "extra_buffer"
+        ]
+      },
+      {
+        "name": "mtp-s5-k2-d4",
+        "extra_args": [
+          "--speculative-algorithm",
+          "EAGLE",
+          "--speculative-num-steps",
+          "5",
+          "--speculative-eagle-topk",
+          "2",
+          "--speculative-num-draft-tokens",
+          "4",
+          "--mamba-scheduler-strategy",
+          "extra_buffer"
+        ]
+      },
+      {
+        "name": "mtp-s5-k2-d5",
+        "extra_args": [
+          "--speculative-algorithm",
+          "EAGLE",
+          "--speculative-num-steps",
+          "5",
+          "--speculative-eagle-topk",
+          "2",
+          "--speculative-num-draft-tokens",
+          "5",
+          "--mamba-scheduler-strategy",
+          "extra_buffer"
+        ]
+      },
+      {
+        "name": "mtp-s5-k2-d6",
+        "extra_args": [
+          "--speculative-algorithm",
+          "EAGLE",
+          "--speculative-num-steps",
+          "5",
+          "--speculative-eagle-topk",
+          "2",
+          "--speculative-num-draft-tokens",
+          "6",
+          "--mamba-scheduler-strategy",
+          "extra_buffer"
+        ]
+      },
+      {
+        "name": "mtp-s5-k3-d3",
+        "extra_args": [
+          "--speculative-algorithm",
+          "EAGLE",
+          "--speculative-num-steps",
+          "5",
+          "--speculative-eagle-topk",
+          "3",
+          "--speculative-num-draft-tokens",
+          "3",
+          "--mamba-scheduler-strategy",
+          "extra_buffer"
+        ]
+      },
+      {
+        "name": "mtp-s5-k3-d4",
+        "extra_args": [
+          "--speculative-algorithm",
+          "EAGLE",
+          "--speculative-num-steps",
+          "5",
+          "--speculative-eagle-topk",
+          "3",
+          "--speculative-num-draft-tokens",
+          "4",
+          "--mamba-scheduler-strategy",
+          "extra_buffer"
+        ]
+      },
+      {
+        "name": "mtp-s5-k3-d5",
+        "extra_args": [
+          "--speculative-algorithm",
+          "EAGLE",
+          "--speculative-num-steps",
+          "5",
+          "--speculative-eagle-topk",
+          "3",
+          "--speculative-num-draft-tokens",
+          "5",
+          "--mamba-scheduler-strategy",
+          "extra_buffer"
+        ]
+      },
+      {
+        "name": "mtp-s5-k3-d6",
+        "extra_args": [
+          "--speculative-algorithm",
+          "EAGLE",
+          "--speculative-num-steps",
+          "5",
+          "--speculative-eagle-topk",
+          "3",
+          "--speculative-num-draft-tokens",
+          "6",
+          "--mamba-scheduler-strategy",
+          "extra_buffer"
+        ]
+      }
+    ]
+---
+apiVersion: batch/v1
+kind: Job
+metadata:
+  name: piccolo-k8s-sweep-example-job
+  namespace: specdec
+  labels:
+    app.kubernetes.io/name: batchbench-sweep
+    app.kubernetes.io/component: benchmark
+    batchbench.doubleword.ai/sweep-name: piccolo-k8s-sweep-example
+  annotations:
+    batchbench.doubleword.ai/image: tytn/batchbench-sglang-sweep:example
+    batchbench.doubleword.ai/created-at: '2026-04-27T16:56:23+00:00'
+    batchbench.doubleword.ai/git-sha: 6c8524e0b4ea
+spec:
+  completionMode: Indexed
+  completions: 294
+  parallelism: 1
+  backoffLimit: 1
+  template:
+    metadata:
+      labels:
+        app.kubernetes.io/name: batchbench-sweep
+        app.kubernetes.io/component: benchmark
+        batchbench.doubleword.ai/sweep-name: piccolo-k8s-sweep-example
+    spec:
+      restartPolicy: Never
+      runtimeClassName: nvidia
+      priorityClassName: research
+      containers:
+      - name: benchmark
+        image: tytn/batchbench-sglang-sweep:example
+        imagePullPolicy: IfNotPresent
+        env:
+        - name: SWEEP_NAME
+          value: piccolo-k8s-sweep-example
+        - name: OUTPUT_ROOT
+          value: /outputs/piccolo-k8s-sweep-example
+        - name: COMBINATIONS_JSON
+          value: /config/combinations.json
+        - name: SHARED_RESULTS_CSV
+          value: /outputs/piccolo-k8s-sweep-example/results/summary.csv
+        - name: CSV_LOCK_PATH
+          value: /outputs/piccolo-k8s-sweep-example/results/summary.csv.lock
+        - name: REQUEST_TIMEOUT_SECS
+          value: '6000'
+        - name: REQUESTS_PER_USER
+          value: '1'
+        - name: IMAGE_REF
+          value: tytn/batchbench-sglang-sweep:example
+        - name: JOB_COMPLETION_INDEX
+          valueFrom:
+            fieldRef:
+              fieldPath: metadata.annotations['batch.kubernetes.io/job-completion-index']
+        - name: POD_NAME
+          valueFrom:
+            fieldRef:
+              fieldPath: metadata.name
+        - name: NODE_NAME
+          valueFrom:
+            fieldRef:
+              fieldPath: spec.nodeName
+        - name: SGLANG_USE_CUDA_IPC_TRANSPORT
+          value: '0'
+        - name: SGLANG_ENABLE_SPEC_V2
+          value: '1'
+        resources:
+          limits:
+            nvidia.com/gpu: '4'
+            cpu: '64'
+            memory: 512Gi
+          requests:
+            nvidia.com/gpu: '4'
+            cpu: '64'
+            memory: 512Gi
+        volumeMounts:
+        - name: config
+          mountPath: /config
+          readOnly: true
+        - name: outputs
+          mountPath: /outputs
+        - name: cache
+          mountPath: /root/.cache
+        - name: dshm
+          mountPath: /dev/shm
+      volumes:
+      - name: config
+        configMap:
+          name: piccolo-k8s-sweep-example-config
+      - name: outputs
+        hostPath:
+          path: /mnt/raid/batchbench
+          type: DirectoryOrCreate
+      - name: cache
+        hostPath:
+          path: /mnt/raid/cache
+          type: DirectoryOrCreate
+      - name: dshm
+        emptyDir:
+          medium: Memory
+          sizeLimit: 16Gi

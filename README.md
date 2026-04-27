@@ -39,6 +39,7 @@ config = {
         )
     ],
     "dry_run": True,
+    "enable_json_decoding": True,
 }
 
 report = batchbench.run_benchmark(config)
@@ -75,8 +76,59 @@ batchbench \
   --output-vary 0
 ```
 
+To benchmark a JSONL dataset instead of generated prompts, pass `--dataset-jsonl`.
+Each non-empty line may be one of:
+
+- `{"text": "prompt text", "input_tokens": 123}` to build a chat completion request.
+- `{"body": {...}, "input_tokens": 123}` to send `body` as the request payload.
+- A full request body object, such as `{"model": "...", "messages": [...]}`.
+
+The CLI `--model` value is injected into every request body at runtime. This means
+dataset rows can omit `model`, and any `model` present in the JSONL is overridden
+by the value passed to `batchbench --model`.
+
+```bash
+batchbench \
+  --dataset-jsonl dataset.jsonl \
+  --model gpt-4o-mini \
+  --users 8 \
+  --requests-per-user 2
+```
+
+The dataset must contain at least `users * requests-per-user` request entries.
+If `--users` is omitted for a dataset run, BatchBench uses as many complete
+request rounds as the dataset can provide for the selected `--requests-per-user`.
+
 Use `--sglang` to apply output token constraints via `min_new_tokens`/`max_new_tokens`
 instead of `min_tokens`/`max_tokens`.
+
+Use `--enable-json-decoding` to request JSON constrained decoding. With `--sglang`,
+BatchBench adds `response_format: {"type": "json_object"}`. Without `--sglang`, it
+adds vLLM `structured_outputs.json_object: true`, equivalent to passing that value
+through the OpenAI SDK's `extra_body`.
+
+Use `--qwen35-disable-thinking` to add
+`chat_template_kwargs: {"enable_thinking": false}` to each request.
+
+Use `--metrics-output-dir` to scrape Prometheus metrics from the benchmarked
+server while the benchmark runs. BatchBench defaults to `--metrics-endpoint
+/metrics`, resolved against `--host`; pass a full URL or another path such as
+`/v1/metrics` if your deployment exposes metrics elsewhere.
+
+```bash
+batchbench \
+  --dataset-jsonl dataset.jsonl \
+  --host http://127.0.0.1:3000 \
+  --model Qwen/Qwen3.6-27B \
+  --users 8 \
+  --requests-per-user 2 \
+  --metrics-output-dir runs/qwen/metrics
+```
+
+Metrics artifacts include raw Prometheus scrape payloads (`raw.promjsonl`),
+parsed long-form samples (`samples.csv`), run metadata (`metadata.json`), and a
+compact derived summary (`summary.json`). SGLang must be launched with
+`--enable-metrics`; vLLM and SGLang both commonly expose metrics at `/metrics`.
 
 Press `Ctrl+C` during a run to cancel active requests and print a partial summary.
 

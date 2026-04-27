@@ -52,6 +52,18 @@ The config file is the interface for setting instance, vLLM, and benchmark args.
 
 **Note**: Always include `results-csv: /tmp/results.csv` in the benchmark config so results are saved and fetched from the remote instance.
 
+To collect server metrics during the benchmark, add BatchBench's metrics flags
+under `benchmark`. The harness passes them through to the Rust CLI and copies
+the resulting directory back to `results/<model>/<config-hash>/metrics/`.
+
+```yaml
+benchmark:
+  results-csv: /tmp/results.csv
+  metrics-output-dir: /tmp/batchbench-metrics
+  metrics-endpoint: /metrics
+  metrics-interval-ms: 1000
+```
+
 ## Architecture
 
 The harness accepts either a single config file or a directory of configs (all `*.yaml` files in that directory).

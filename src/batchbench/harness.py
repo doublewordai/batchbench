@@ -11,11 +11,15 @@ This script:
 """
 
 import argparse
+import base64
 import hashlib
+import io
 import json
 import os
 import re
+import shlex
 import sys
+import tarfile
 import time
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from dataclasses import dataclass
@@ -449,7 +453,33 @@ def run_benchmark(env: RemoteEnvironment, config: dict, run_dir: Path) -> None:
                 f.write(stdout)
             print(f"Results saved to: {local_results}")
 
+    remote_metrics = bench_cfg.get("metrics-output-dir")
+    if remote_metrics:
+        fetch_metrics_artifacts(env, remote_metrics, run_dir / "metrics")
+
     print("\nBenchmark complete!")
+
+
+def fetch_metrics_artifacts(env: RemoteEnvironment, remote_dir: str, local_dir: Path) -> None:
+    """Save BatchBench metrics artifacts from container to local run directory."""
+    print("\nSaving metrics artifacts...")
+    quoted_remote_dir = shlex.quote(remote_dir)
+    cmd = f"test -d {quoted_remote_dir} && tar -C {quoted_remote_dir} -czf - . | base64 -w0"
+    stdout, _, rc = env.exec(cmd, timeout=120)
+    if rc != 0 or not stdout.strip():
+        print("Warning: Could not retrieve metrics artifacts")
+        return
+
+    local_dir.mkdir(parents=True, exist_ok=True)
+    archive = base64.b64decode(stdout.strip())
+    local_root = local_dir.resolve()
+    with tarfile.open(fileobj=io.BytesIO(archive), mode="r:gz") as tar:
+        for member in tar.getmembers():
+            target = (local_dir / member.name).resolve()
+            if not target.is_relative_to(local_root):
+                raise PipelineError(f"Unsafe metrics archive path: {member.name}")
+        tar.extractall(local_dir)
+    print(f"Metrics artifacts saved to: {local_dir}")
 
 
 def wait_for_vllm_ready(env: RemoteEnvironment, port: int, timeout: int) -> None:

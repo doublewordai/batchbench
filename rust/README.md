@@ -10,7 +10,7 @@ The repository includes a ready-to-go CLI that reads prompts from a JSONL file (
 
 ```
 cargo run --bin batchbench -- \
-  --jsonl data/requests.jsonl \
+  --dataset-jsonl data/requests.jsonl \
   --users 32 \
   --model gpt-4o-mini \
   --host https://api.openai.com \
@@ -21,9 +21,9 @@ By default every user issues a single request, so make sure the JSONL file conta
 
 The CLI reuses the library entry points under the hood and prints a `BenchmarkReport` when the run completes.
 
-- `--jsonl <path>` Path to the JSONL input whose objects expose a `text` field (required).
-- `--users <num>` Number of concurrent workers; defaults to the JSONL record count.
-- `--model <name>` Model identifier injected into every request; default `gpt-4o-mini`.
+- `--dataset-jsonl <path>` Path to the JSONL input. Each non-empty line may contain a `text` field, a `body` object, or a full request body object. The legacy alias `--jsonl` is also accepted.
+- `--users <num>` Number of concurrent workers. For generated prompts this defaults to `1`; for JSONL datasets this defaults to as many complete request rounds as the dataset can provide for the selected `--requests-per-user`.
+- `--model <name>` Model identifier injected into every request, overriding any `model` field in JSONL request bodies; default `gpt-4o-mini`.
 - `--host <url>` Base host for the API, including scheme; default `https://api.openai.com`.
 - `--endpoint <path-or-url>` Endpoint path or full URL; default `/v1/chat/completions`.
 - `--requests-per-user <num>` Iterations each worker performs before stopping; default `1`.
@@ -35,6 +35,8 @@ The CLI reuses the library entry points under the hood and prints a `BenchmarkRe
 - `--output-tokens <num>` Force completions to emit exactly `<num>` tokens (sets `max_completion_tokens` and enables `nvext.ignore_eos`).
 - `--output-vary <num>` When used with `--output-tokens`, add a per-request uniform variation in `[-num, +num]` tokens (lower bounded at 1).
 - `--sglang` Use `min_new_tokens` and `max_new_tokens` for output token constraints (default uses `min_tokens` and `max_tokens`).
+- `--enable-json-decoding` Enable JSON constrained decoding. With `--sglang`, requests include `response_format: {"type": "json_object"}`. Without `--sglang`, requests include vLLM `structured_outputs.json_object: true`, equivalent to passing that value through the OpenAI SDK's `extra_body`.
+- `--metrics-output-dir <path>` Enable Prometheus scraping from the benchmarked server and write raw scrapes, parsed samples, metadata, and a summary to `<path>`. The default metrics endpoint is `/metrics`; override it with `--metrics-endpoint`.
 
 ### Library Usage
 
@@ -102,6 +104,7 @@ The CLI reuses the library entry points under the hood and prints a `BenchmarkRe
 - Derived throughput metrics, such as tokens-per-second and requests-per-second.
 - Latency percentiles (p50/p90/p99) across all successful requests.
 - A list of `FailureRecord` items capturing the last error seen per failed request.
+- Optional `MetricsRunReport` scrape counts and artifact location when metrics scraping is enabled.
 
 Use these fields to build dashboards, generate CSVs, or trigger alerts after a run.
 

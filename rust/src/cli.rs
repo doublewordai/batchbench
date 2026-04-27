@@ -1,11 +1,12 @@
 use std::ffi::OsString;
 use std::fs;
+use std::io::{BufRead, BufReader};
 use std::path::Path;
 use std::time::Duration;
 
 use crate::{
-    generate_requests, run_benchmark, BenchmarkConfig, BenchmarkReport, DistMode, GenerateOptions,
-    RequestEntry, RunMode,
+    generate_requests, resolve_metrics_endpoint, run_benchmark, BenchmarkConfig, BenchmarkReport,
+    DistMode, GenerateOptions, MetricsConfig, RequestEntry, RunMode,
 };
 use anyhow::{anyhow, Context, Result};
 use clap::Parser;
@@ -41,11 +42,19 @@ struct CsvResult {
     output_lognorm_sigma: Option<f64>,
     output_lognorm_max: Option<usize>,
     sglang: bool,
+    enable_json_decoding: bool,
+    qwen35_disable_thinking: bool,
     request_timeout_secs: u64,
     max_retries: usize,
     retry_delay_ms: u64,
     host: String,
     endpoint: String,
+    metrics_enabled: bool,
+    metrics_output_dir: Option<String>,
+    metrics_scrape_count: Option<u64>,
+    metrics_scrape_error_count: Option<u64>,
+    metrics_first_timestamp: Option<String>,
+    metrics_last_timestamp: Option<String>,
 }
 
 #[derive(Parser, Debug)]
@@ -97,6 +106,11 @@ struct Args {
     /// Deprecated legacy input distribution mode selector
     #[arg(long = "gen-dist-mode", hide = true)]
     legacy_gen_dist_mode: Option<String>,
+
+    /// Path to a JSONL dataset. Each line may contain {"text": "..."},
+    /// {"body": {...}}, or a full request body object.
+    #[arg(long, alias = "jsonl")]
+    dataset_jsonl: Option<PathBuf>,
 
     /// Number of concurrent users to spawn (default: 1)
     #[arg(long)]
@@ -166,6 +180,14 @@ struct Args {
     #[arg(long)]
     sglang: bool,
 
+    /// Enable JSON constrained decoding using provider-specific request fields
+    #[arg(long)]
+    enable_json_decoding: bool,
+
+    /// Add chat_template_kwargs.enable_thinking=false to each request
+    #[arg(long)]
+    qwen35_disable_thinking: bool,
+
     /// Enable verbose mode to print request/response details
     #[arg(long, short)]
     verbose: bool,
@@ -178,6 +200,26 @@ struct Args {
     /// Optional path to write CSV summary output
     #[arg(long)]
     results_csv: Option<PathBuf>,
+
+    /// Directory for Prometheus metrics artifacts; enables scraping when set
+    #[arg(long)]
+    metrics_output_dir: Option<PathBuf>,
+
+    /// Metrics endpoint path or full URL (default: /metrics)
+    #[arg(long, default_value = "/metrics")]
+    metrics_endpoint: String,
+
+    /// Metrics scrape interval in milliseconds
+    #[arg(long, default_value_t = 1000)]
+    metrics_interval_ms: u64,
+
+    /// Metrics scrape request timeout in milliseconds
+    #[arg(long, default_value_t = 2000)]
+    metrics_timeout_ms: u64,
+
+    /// Fail the benchmark if any metrics scrape fails
+    #[arg(long)]
+    metrics_fail_on_error: bool,
 
     /// Random seed for reproducible benchmarking (default: None)
     #[arg(long)]
@@ -245,6 +287,18 @@ async fn run(args: Args) -> Result<()> {
         || args.input_lognorm_median.is_some()
         || args.input_lognorm_sigma.is_some()
         || args.input_lognorm_max.is_some();
+    let dataset_jsonl = args.dataset_jsonl.clone();
+    let input_generation_requested = args.input_tokens > 0
+        || args.input_vary > 0
+        || input_lognorm_requested
+        || args.input_prefix_overlap != 0.0
+        || legacy_input_dist_mode.is_some();
+
+    if dataset_jsonl.is_some() && input_generation_requested {
+        return Err(anyhow!(
+            "--dataset-jsonl cannot be combined with input generation flags"
+        ));
+    }
 
     if args.input_tokens == 0 && args.input_vary > 0 {
         return Err(anyhow!("input-vary requires --input-tokens to be set"));
@@ -380,6 +434,15 @@ async fn run(args: Args) -> Result<()> {
         }
     };
 
+    if args.metrics_output_dir.is_some() {
+        if args.metrics_interval_ms == 0 {
+            return Err(anyhow!("metrics-interval-ms must be greater than zero"));
+        }
+        if args.metrics_timeout_ms == 0 {
+            return Err(anyhow!("metrics-timeout-ms must be greater than zero"));
+        }
+    }
+
     let api_key = args
         .api_key
         .or_else(|| std::env::var(&args.api_key_env).ok());
@@ -390,8 +453,60 @@ async fn run(args: Args) -> Result<()> {
         return Err(anyhow!("requests_per_user must be greater than zero"));
     }
 
-    // Always generate inline: size to users * requests_per_user
-    let user_count = args.users.unwrap_or(1);
+    let (mut request_bodies, dataset_label, dataset_is_generated) =
+        if let Some(dataset_path) = dataset_jsonl.as_ref() {
+            let requests = load_dataset_jsonl(dataset_path, &args.model)?;
+            let label = dataset_path.display().to_string();
+            (requests, label, false)
+        } else {
+            let user_count = args.users.unwrap_or(1);
+            if user_count == 0 {
+                return Err(anyhow!("users must be greater than zero"));
+            }
+            let total_requests = user_count
+                .checked_mul(requests_per_user)
+                .ok_or_else(|| anyhow!("users * requests_per_user overflowed"))?;
+
+            let target_tokens = if args.input_tokens > 0 {
+                Some(args.input_tokens)
+            } else {
+                None
+            };
+
+            let gen_opts = GenerateOptions {
+                count: total_requests,
+                prefix_overlap: args.input_prefix_overlap,
+                target_tokens,
+                token_tolerance: if args.input_tokens > 0 {
+                    Some(args.input_vary)
+                } else {
+                    None
+                },
+                tokenizer_model: args.model.clone(),
+                dist_mode: input_dist_mode,
+                dist_mu: input_dist_mu,
+                dist_median: input_dist_median,
+                dist_sigma: input_dist_sigma,
+                dist_max: input_dist_max,
+                seed: args.seed,
+            };
+
+            let requests = generate_requests(&gen_opts, &args.model)?;
+            let label = format!(
+                "generated (count={}, tokenizer={})",
+                total_requests, args.model
+            );
+            (requests, label, true)
+        };
+
+    let dataset_size = request_bodies.len();
+    let user_count = if dataset_is_generated {
+        args.users.unwrap_or(1)
+    } else if let Some(users) = args.users {
+        users
+    } else {
+        dataset_size / requests_per_user
+    };
     if user_count == 0 {
         return Err(anyhow!("users must be greater than zero"));
     }
@@ -399,32 +514,16 @@ async fn run(args: Args) -> Result<()> {
     let total_requests = user_count
         .checked_mul(requests_per_user)
         .ok_or_else(|| anyhow!("users * requests_per_user overflowed"))?;
+    if total_requests > dataset_size {
+        return Err(anyhow!(
+            "dataset contains {} request entries but benchmark needs {} (users {} * requests-per-user {})",
+            dataset_size,
+            total_requests,
+            user_count,
+            requests_per_user
+        ));
+    }
 
-    let target_tokens = if args.input_tokens > 0 {
-        Some(args.input_tokens)
-    } else {
-        None
-    };
-
-    let gen_opts = GenerateOptions {
-        count: total_requests,
-        prefix_overlap: args.input_prefix_overlap,
-        target_tokens,
-        token_tolerance: if args.input_tokens > 0 {
-            Some(args.input_vary)
-        } else {
-            None
-        },
-        tokenizer_model: args.model.clone(),
-        dist_mode: input_dist_mode,
-        dist_mu: input_dist_mu,
-        dist_median: input_dist_median,
-        dist_sigma: input_dist_sigma,
-        dist_max: input_dist_max,
-        seed: args.seed,
-    };
-
-    let mut request_bodies = generate_requests(&gen_opts, &args.model)?;
     let output_vary = if args.output_tokens.is_some() {
         Some(args.output_vary)
     } else {
@@ -437,11 +536,6 @@ async fn run(args: Args) -> Result<()> {
         args.seed,
         args.sglang,
     )?;
-    let dataset_label = format!(
-        "generated (count={}, tokenizer={})",
-        total_requests, args.model
-    );
-    let dataset_size = request_bodies.len();
 
     // Print input token histogram
     let input_tokens: Vec<usize> = request_bodies.iter().map(|r| r.input_tokens).collect();
@@ -459,7 +553,14 @@ async fn run(args: Args) -> Result<()> {
     println!("Dataset: {}", dataset_label);
     println!("Dataset size: {}", dataset_size);
     println!("Users: {}", user_count);
-    println!("Mode: Deterministic mapping m*N+n into generated dataset");
+    println!(
+        "Mode: Deterministic mapping m*N+n into {}",
+        if dataset_is_generated {
+            "generated dataset"
+        } else {
+            "dataset"
+        }
+    );
     println!("Requests per user: {}", requests_per_user);
     println!("Total requests: {}", total_requests);
     if let Some(tokens) = args.output_tokens {
@@ -495,8 +596,36 @@ async fn run(args: Args) -> Result<()> {
             "default (min_tokens/max_tokens)"
         }
     );
+    println!(
+        "JSON decoding: {}",
+        if args.enable_json_decoding {
+            if args.sglang {
+                "enabled (SGLang response_format)"
+            } else {
+                "enabled (vLLM structured_outputs)"
+            }
+        } else {
+            "disabled"
+        }
+    );
+    println!(
+        "Qwen 3.5 thinking: {}",
+        if args.qwen35_disable_thinking {
+            "disabled (chat_template_kwargs.enable_thinking=false)"
+        } else {
+            "unchanged"
+        }
+    );
     println!("Max retries: {}", args.max_retries);
     println!("Retry delay: {}ms", args.retry_delay_ms);
+    if let Some(metrics_output_dir) = args.metrics_output_dir.as_ref() {
+        let metrics_endpoint = resolve_metrics_endpoint(&args.host, &args.metrics_endpoint)?;
+        println!("Metrics endpoint: {}", metrics_endpoint);
+        println!("Metrics output: {}", metrics_output_dir.display());
+        println!("Metrics interval: {}ms", args.metrics_interval_ms);
+    } else {
+        println!("Metrics scraping: disabled");
+    }
     println!("===============================\n");
 
     let mode = RunMode::Finite { requests_per_user };
@@ -515,7 +644,9 @@ async fn run(args: Args) -> Result<()> {
     .with_retry(args.max_retries, Duration::from_millis(args.retry_delay_ms))
     .with_verbose(args.verbose)
     .with_dry_run(args.dry_run)
-    .with_sglang(args.sglang);
+    .with_sglang(args.sglang)
+    .with_json_decoding(args.enable_json_decoding)
+    .with_qwen35_disable_thinking(args.qwen35_disable_thinking);
 
     if let Some(seed) = args.seed {
         config = config.with_seed(seed);
@@ -525,6 +656,30 @@ async fn run(args: Args) -> Result<()> {
 
     if let Some((mu, sigma, max)) = output_lognorm {
         config = config.with_output_lognorm(mu, sigma, max);
+    }
+
+    if let Some(metrics_output_dir) = args.metrics_output_dir.as_ref() {
+        let metrics_endpoint = resolve_metrics_endpoint(&args.host, &args.metrics_endpoint)?;
+        config = config.with_metrics(MetricsConfig {
+            endpoint: metrics_endpoint,
+            output_dir: metrics_output_dir.clone(),
+            interval: Duration::from_millis(args.metrics_interval_ms),
+            timeout: Duration::from_millis(args.metrics_timeout_ms),
+            fail_on_error: args.metrics_fail_on_error,
+            metadata: json!({
+                "model": args.model.clone(),
+                "dataset_path": dataset_label.clone(),
+                "dataset_size": dataset_size,
+                "users": user_count,
+                "requests_per_user": requests_per_user,
+                "total_requests": total_requests,
+                "host": args.host.clone(),
+                "endpoint": endpoint_for_config.clone(),
+                "sglang": args.sglang,
+                "enable_json_decoding": args.enable_json_decoding,
+                "qwen35_disable_thinking": args.qwen35_disable_thinking,
+            }),
+        });
     }
 
     let start_time = chrono::Utc::now();
@@ -562,11 +717,31 @@ async fn run(args: Args) -> Result<()> {
             output_lognorm_sigma: args.output_lognorm_sigma,
             output_lognorm_max: args.output_lognorm_max,
             sglang: args.sglang,
+            enable_json_decoding: args.enable_json_decoding,
+            qwen35_disable_thinking: args.qwen35_disable_thinking,
             request_timeout_secs: args.request_timeout_secs,
             max_retries: args.max_retries,
             retry_delay_ms: args.retry_delay_ms,
             host: args.host.clone(),
             endpoint: endpoint_for_config.clone(),
+            metrics_enabled: report.metrics.is_some(),
+            metrics_output_dir: report
+                .metrics
+                .as_ref()
+                .map(|metrics| metrics.output_dir.clone()),
+            metrics_scrape_count: report.metrics.as_ref().map(|metrics| metrics.scrape_count),
+            metrics_scrape_error_count: report
+                .metrics
+                .as_ref()
+                .map(|metrics| metrics.scrape_error_count),
+            metrics_first_timestamp: report
+                .metrics
+                .as_ref()
+                .and_then(|metrics| metrics.first_timestamp.clone()),
+            metrics_last_timestamp: report
+                .metrics
+                .as_ref()
+                .and_then(|metrics| metrics.last_timestamp.clone()),
         };
 
         match write_results_csv(csv_path.as_path(), &record) {
@@ -590,6 +765,112 @@ fn parse_dist_mode(mode: &str) -> Result<DistMode> {
             "invalid --gen-dist-mode '{}'; use fixed or lognormal",
             other
         )),
+    }
+}
+
+fn load_dataset_jsonl(path: &Path, model: &str) -> Result<Vec<RequestEntry>> {
+    let file = fs::File::open(path)
+        .with_context(|| format!("failed to open dataset JSONL {}", path.display()))?;
+    let reader = BufReader::new(file);
+    let mut requests = Vec::new();
+
+    for (line_number, line) in reader.lines().enumerate() {
+        let line_number = line_number + 1;
+        let line = line.with_context(|| {
+            format!(
+                "failed to read line {} from dataset JSONL {}",
+                line_number,
+                path.display()
+            )
+        })?;
+        let trimmed = line.trim();
+        if trimmed.is_empty() {
+            continue;
+        }
+
+        let value: serde_json::Value = serde_json::from_str(trimmed).with_context(|| {
+            format!(
+                "failed to parse dataset JSONL {} line {} as JSON",
+                path.display(),
+                line_number
+            )
+        })?;
+        requests.push(dataset_value_to_request_entry(
+            value,
+            requests.len(),
+            line_number,
+            model,
+        )?);
+    }
+
+    if requests.is_empty() {
+        return Err(anyhow!("dataset JSONL {} is empty", path.display()));
+    }
+
+    Ok(requests)
+}
+
+fn dataset_value_to_request_entry(
+    value: serde_json::Value,
+    line_idx: usize,
+    line_number: usize,
+    model: &str,
+) -> Result<RequestEntry> {
+    let input_tokens = value
+        .get("input_tokens")
+        .and_then(|v| v.as_u64())
+        .map(|v| v as usize)
+        .unwrap_or(0);
+
+    if let Some(mut body) = value.get("body").cloned() {
+        if !body.is_object() {
+            return Err(anyhow!(
+                "dataset line {} has a body field, but body must be a JSON object",
+                line_number
+            ));
+        }
+        apply_request_model(&mut body, model);
+        return Ok(RequestEntry {
+            body,
+            line_idx,
+            input_tokens,
+        });
+    }
+
+    if let Some(text) = value.get("text").and_then(|v| v.as_str()) {
+        return Ok(RequestEntry {
+            body: json!({
+                "messages": [
+                    {"role": "user", "content": text}
+                ],
+                "model": model,
+            }),
+            line_idx,
+            input_tokens,
+        });
+    }
+
+    let mut body = value;
+    let Some(map) = body.as_object_mut() else {
+        return Err(anyhow!(
+            "dataset line {} must be a JSON object, or contain a body object or text string",
+            line_number
+        ));
+    };
+    map.remove("input_tokens");
+    map.remove("line_idx");
+    map.insert("model".to_string(), json!(model));
+
+    Ok(RequestEntry {
+        body,
+        line_idx,
+        input_tokens,
+    })
+}
+
+fn apply_request_model(body: &mut serde_json::Value, model: &str) {
+    if let Some(map) = body.as_object_mut() {
+        map.insert("model".to_string(), json!(model));
     }
 }
 
@@ -694,6 +975,13 @@ fn print_summary(report: &BenchmarkReport) -> Result<()> {
         }
     }
 
+    if let Some(metrics) = report.metrics.as_ref() {
+        println!(
+            "Metrics: {} scrape(s), {} error(s), artifacts at {}",
+            metrics.scrape_count, metrics.scrape_error_count, metrics.output_dir
+        );
+    }
+
     Ok(())
 }
 
@@ -760,6 +1048,85 @@ fn print_histogram(label: &str, data: &[usize], bins: usize, bar_width: usize) {
             count,
             bar_width = bar_width
         );
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn dataset_text_line_becomes_chat_request() {
+        let entry =
+            dataset_value_to_request_entry(json!({"text": "hello", "input_tokens": 3}), 0, 1, "m")
+                .unwrap();
+
+        assert_eq!(entry.line_idx, 0);
+        assert_eq!(entry.input_tokens, 3);
+        assert_eq!(entry.body["model"], "m");
+        assert_eq!(entry.body["messages"][0]["content"], "hello");
+    }
+
+    #[test]
+    fn dataset_body_line_uses_body_object_and_overrides_model() {
+        let entry = dataset_value_to_request_entry(
+            json!({"body": {"model": "x", "prompt": "hello"}, "input_tokens": 5}),
+            4,
+            5,
+            "runtime-model",
+        )
+        .unwrap();
+
+        assert_eq!(entry.line_idx, 4);
+        assert_eq!(entry.input_tokens, 5);
+        assert_eq!(
+            entry.body,
+            json!({"model": "runtime-model", "prompt": "hello"})
+        );
+    }
+
+    #[test]
+    fn dataset_body_line_without_model_gets_runtime_model() {
+        let entry = dataset_value_to_request_entry(
+            json!({"body": {"messages": []}, "input_tokens": 5}),
+            4,
+            5,
+            "runtime-model",
+        )
+        .unwrap();
+
+        assert_eq!(
+            entry.body,
+            json!({"model": "runtime-model", "messages": []})
+        );
+    }
+
+    #[test]
+    fn dataset_full_request_line_drops_metadata_fields_and_overrides_model() {
+        let entry = dataset_value_to_request_entry(
+            json!({"model": "x", "messages": [], "input_tokens": 7, "line_idx": 99}),
+            1,
+            2,
+            "runtime-model",
+        )
+        .unwrap();
+
+        assert_eq!(entry.input_tokens, 7);
+        assert_eq!(
+            entry.body,
+            json!({"model": "runtime-model", "messages": []})
+        );
+    }
+
+    #[test]
+    fn parse_args_accepts_qwen35_disable_thinking_flag() {
+        let parsed = parse_args(["batchbench", "--qwen35-disable-thinking"]).unwrap();
+
+        let ParsedArgs::Ready(args) = parsed else {
+            panic!("expected parsed args");
+        };
+
+        assert!(args.qwen35_disable_thinking);
     }
 }
 

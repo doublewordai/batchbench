@@ -1,4 +1,5 @@
 use std::collections::HashMap;
+use std::path::PathBuf;
 use std::time::Duration;
 
 use anyhow::{anyhow, Context, Result};
@@ -10,8 +11,9 @@ use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
 use crate::{
-    run_benchmark, run_from_argv, BenchmarkConfig, BenchmarkReport, DistMode, FailureRecord,
-    GenerateOptions, RequestEntry, RunMode,
+    resolve_metrics_endpoint, run_benchmark, run_from_argv, BenchmarkConfig, BenchmarkReport,
+    DistMode, FailureRecord, GenerateOptions, MetricsConfig, MetricsRunReport, RequestEntry,
+    RunMode,
 };
 
 #[derive(Debug, Clone, Deserialize, Serialize)]
@@ -173,9 +175,25 @@ struct PyBenchmarkConfig {
     #[serde(default)]
     sglang: bool,
     #[serde(default)]
+    enable_json_decoding: bool,
+    #[serde(default)]
+    qwen35_disable_thinking: bool,
+    #[serde(default)]
     seed: Option<u64>,
     #[serde(default)]
     dry_run: bool,
+    #[serde(default)]
+    metrics_host: Option<String>,
+    #[serde(default)]
+    metrics_endpoint: Option<String>,
+    #[serde(default)]
+    metrics_output_dir: Option<PathBuf>,
+    #[serde(default)]
+    metrics_interval_ms: Option<u64>,
+    #[serde(default)]
+    metrics_timeout_ms: Option<u64>,
+    #[serde(default)]
+    metrics_fail_on_error: bool,
 }
 
 fn to_benchmark_config(value: PyBenchmarkConfig) -> Result<BenchmarkConfig> {
@@ -220,12 +238,45 @@ fn to_benchmark_config(value: PyBenchmarkConfig) -> Result<BenchmarkConfig> {
         config = config.with_sglang(true);
     }
 
+    if value.enable_json_decoding {
+        config = config.with_json_decoding(true);
+    }
+
+    if value.qwen35_disable_thinking {
+        config = config.with_qwen35_disable_thinking(true);
+    }
+
     if let Some(seed) = value.seed {
         config = config.with_seed(seed);
     }
 
     if value.dry_run {
         config = config.with_dry_run(true);
+    }
+
+    if let Some(metrics_output_dir) = value.metrics_output_dir {
+        let metrics_interval_ms = value.metrics_interval_ms.unwrap_or(1000);
+        if metrics_interval_ms == 0 {
+            return Err(anyhow!("metrics_interval_ms must be greater than zero"));
+        }
+        let metrics_timeout_ms = value.metrics_timeout_ms.unwrap_or(2000);
+        if metrics_timeout_ms == 0 {
+            return Err(anyhow!("metrics_timeout_ms must be greater than zero"));
+        }
+        let metrics_host = value
+            .metrics_host
+            .as_deref()
+            .unwrap_or(config.endpoint.as_str());
+        let metrics_endpoint = value.metrics_endpoint.as_deref().unwrap_or("/metrics");
+        let endpoint = resolve_metrics_endpoint(metrics_host, metrics_endpoint)?;
+        config = config.with_metrics(MetricsConfig {
+            endpoint,
+            output_dir: metrics_output_dir,
+            interval: Duration::from_millis(metrics_interval_ms),
+            timeout: Duration::from_millis(metrics_timeout_ms),
+            fail_on_error: value.metrics_fail_on_error,
+            metadata: serde_json::json!({}),
+        });
     }
 
     for (name, value) in value.headers {
@@ -275,6 +326,7 @@ struct PyBenchmarkReport {
     latency_p90_ms: Option<f64>,
     latency_p99_ms: Option<f64>,
     failures: Vec<PyFailureRecord>,
+    metrics: Option<MetricsRunReport>,
 }
 
 impl From<BenchmarkReport> for PyBenchmarkReport {
@@ -304,6 +356,7 @@ impl From<BenchmarkReport> for PyBenchmarkReport {
                 .into_iter()
                 .map(PyFailureRecord::from)
                 .collect(),
+            metrics: value.metrics,
         }
     }
 }

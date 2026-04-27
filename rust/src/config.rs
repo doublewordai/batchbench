@@ -5,6 +5,8 @@ use reqwest::header::{HeaderMap, HeaderName, HeaderValue, AUTHORIZATION, CONTENT
 use reqwest::Url;
 use serde_json::Value;
 
+use crate::metrics::MetricsConfig;
+
 #[derive(Clone, Debug)]
 pub struct RequestEntry {
     pub body: Value,
@@ -40,6 +42,12 @@ pub struct BenchmarkConfig {
     pub dry_run: bool,
     /// Use SGLang sampling parameter names for output-token constraints
     pub sglang: bool,
+    /// Add provider-specific JSON constrained decoding fields to each request
+    pub enable_json_decoding: bool,
+    /// Disable Qwen 3.5 thinking via chat_template_kwargs.enable_thinking=false
+    pub qwen35_disable_thinking: bool,
+    /// Optional Prometheus metrics scraping configuration
+    pub metrics: Option<MetricsConfig>,
 }
 
 impl BenchmarkConfig {
@@ -100,6 +108,9 @@ impl BenchmarkConfig {
             seed: None,
             dry_run: false,
             sglang: false,
+            enable_json_decoding: false,
+            qwen35_disable_thinking: false,
+            metrics: None,
         })
     }
 
@@ -140,6 +151,21 @@ impl BenchmarkConfig {
 
     pub fn with_sglang(mut self, sglang: bool) -> Self {
         self.sglang = sglang;
+        self
+    }
+
+    pub fn with_json_decoding(mut self, enable_json_decoding: bool) -> Self {
+        self.enable_json_decoding = enable_json_decoding;
+        self
+    }
+
+    pub fn with_qwen35_disable_thinking(mut self, qwen35_disable_thinking: bool) -> Self {
+        self.qwen35_disable_thinking = qwen35_disable_thinking;
+        self
+    }
+
+    pub fn with_metrics(mut self, metrics: MetricsConfig) -> Self {
+        self.metrics = Some(metrics);
         self
     }
 

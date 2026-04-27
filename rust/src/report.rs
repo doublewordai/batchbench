@@ -1,5 +1,7 @@
 use std::time::Duration;
 
+use crate::metrics::MetricsRunReport;
+
 #[derive(Debug, Clone)]
 pub struct FailureRecord {
     pub user_id: usize,
@@ -21,6 +23,7 @@ pub struct BenchmarkReport {
     pub latency_p90: Option<Duration>,
     pub latency_p99: Option<Duration>,
     pub failures: Vec<FailureRecord>,
+    pub metrics: Option<MetricsRunReport>,
 }
 
 impl BenchmarkReport {
