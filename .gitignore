@@ -8,6 +8,7 @@ results.csv
 out/
 data/
 outputs/
+experiments/
 .env
 .venv/
 bench_*/
