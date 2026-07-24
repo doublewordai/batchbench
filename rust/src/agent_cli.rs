@@ -143,6 +143,11 @@ struct Args {
     )]
     tool_call_latency_lognorm_max_ms: Option<usize>,
 
+    /// Stamp each request with an OpenAI `user` field of "<prefix>-<agent_id>",
+    /// so gateways and routers can key session-sticky routing per agent
+    #[arg(long)]
+    user_prefix: Option<String>,
+
     /// API key; when omitted, read --api-key-env
     #[arg(long)]
     api_key: Option<String>,
@@ -374,6 +379,9 @@ async fn run(args: Args) -> Result<()> {
     .with_dry_run(args.dry_run);
     if let Some(tool_call_latency_ms) = tool_call_latency_ms {
         config = config.with_tool_call_latency_ms(tool_call_latency_ms)?;
+    }
+    if let Some(user_prefix) = &args.user_prefix {
+        config = config.with_user_prefix(user_prefix.clone());
     }
     if let Some(seed) = args.seed {
         config = config.with_seed(seed);
