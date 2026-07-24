@@ -1,5 +1,14 @@
 # Changelog
 
+## [0.4.0](https://github.com/doublewordai/batchbench/compare/v0.3.0...v0.4.0) (2026-07-24)
+
+
+### Features
+
+* add --user-prefix for per-agent sticky session routing ([73acb5d](https://github.com/doublewordai/batchbench/commit/73acb5d78fe1c683f2ab350840f1e654b719fcbb))
+* add --user-prefix for per-agent sticky session routing ([9bf939a](https://github.com/doublewordai/batchbench/commit/9bf939af5f7a9b751bd6877198de329a434dffb9))
+* add agent loop benchmarking ([1746fa0](https://github.com/doublewordai/batchbench/commit/1746fa0c2dbeb20f4501d79c854e613e361d98f5))
+
 ## [0.3.0](https://github.com/doublewordai/batchbench/compare/v0.2.3...v0.3.0) (2026-02-20)
 
 
