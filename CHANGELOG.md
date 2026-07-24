@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.4.0](https://github.com/doublewordai/batchbench/compare/v0.3.0...v0.4.0) (2026-07-24)
+
+
+### Features
+
+* add agent loop benchmarking ([1746fa0](https://github.com/doublewordai/batchbench/commit/1746fa0c2dbeb20f4501d79c854e613e361d98f5))
+
 ## [0.3.0](https://github.com/doublewordai/batchbench/compare/v0.2.3...v0.3.0) (2026-02-20)
 
 
