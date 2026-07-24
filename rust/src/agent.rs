@@ -110,6 +110,7 @@ pub struct AgentLoopConfig {
     pub environment_tokens: SampleSpec,
     pub tool_invocations: SampleSpec,
     pub tool_call_latency_ms: Option<SampleSpec>,
+    pub user_prefix: Option<String>,
     pub request_timeout: Duration,
     pub max_retries: usize,
     pub retry_delay: Duration,
@@ -167,6 +168,7 @@ impl AgentLoopConfig {
             environment_tokens,
             tool_invocations,
             tool_call_latency_ms: None,
+            user_prefix: None,
             request_timeout: Duration::from_secs(60),
             max_retries: 2,
             retry_delay: Duration::from_millis(250),
@@ -215,6 +217,11 @@ impl AgentLoopConfig {
 
     pub fn with_seed(mut self, seed: u64) -> Self {
         self.seed = Some(seed);
+        self
+    }
+
+    pub fn with_user_prefix(mut self, user_prefix: impl Into<String>) -> Self {
+        self.user_prefix = Some(user_prefix.into());
         self
     }
 
@@ -558,7 +565,7 @@ async fn run_agent(
             continue;
         }
 
-        let body = build_request_body(&config, &messages, turn.output_tokens);
+        let body = build_request_body(&config, &messages, turn.output_tokens, plan.agent_id);
         match request_with_retries(&client, &config, &body).await {
             Ok(result) => {
                 report.successful_requests += 1;
@@ -606,7 +613,12 @@ async fn run_agent(
     Ok(report)
 }
 
-fn build_request_body(config: &AgentLoopConfig, messages: &[Value], output_tokens: usize) -> Value {
+fn build_request_body(
+    config: &AgentLoopConfig,
+    messages: &[Value],
+    output_tokens: usize,
+    agent_id: usize,
+) -> Value {
     let mut body = json!({
         "model": config.model,
         "messages": messages,
@@ -638,6 +650,9 @@ fn build_request_body(config: &AgentLoopConfig, messages: &[Value], output_token
     if let Some(map) = body.as_object_mut() {
         map.insert(max_key.to_string(), json!(output_tokens));
         map.insert(min_key.to_string(), json!(output_tokens));
+        if let Some(prefix) = &config.user_prefix {
+            map.insert("user".to_string(), json!(format!("{prefix}-{agent_id}")));
+        }
     }
     body
 }
@@ -1022,7 +1037,7 @@ mod tests {
             json!({"role": "tool", "tool_call_id": "call_1", "content": "result"}),
         ];
 
-        let body = build_request_body(&config, &messages, 17);
+        let body = build_request_body(&config, &messages, 17, 0);
         assert_eq!(body["messages"], json!(messages));
         assert_eq!(body["max_tokens"], 17);
         assert_eq!(body["min_tokens"], 17);
@@ -1030,5 +1045,26 @@ mod tests {
             body["tool_choice"]["function"]["name"],
             Value::String("environment".to_string())
         );
+        assert!(body.get("user").is_none());
+    }
+
+    #[test]
+    fn user_prefix_stamps_a_per_agent_user_field() {
+        let config = AgentLoopConfig::try_new(
+            "http://localhost:8000/v1/chat/completions",
+            None,
+            "test-model",
+            2,
+            SampleSpec::fixed(8).unwrap(),
+            SampleSpec::fixed(4).unwrap(),
+            SampleSpec::fixed(6).unwrap(),
+            SampleSpec::fixed(2).unwrap(),
+        )
+        .unwrap()
+        .with_user_prefix("loadtest");
+        let messages = vec![json!({"role": "user", "content": "start"})];
+
+        let body = build_request_body(&config, &messages, 5, 1);
+        assert_eq!(body["user"], Value::String("loadtest-1".to_string()));
     }
 }
