@@ -25,6 +25,7 @@ harness = ["requests>=2.28.0", "paramiko>=3.0.0", "prime"]
 
 [project.scripts]
 batchbench = "batchbench.__main__:main"
+batchbench-agent = "batchbench.agent:main"
 batchbench-harness = "batchbench.harness:main"
 'batchbench.harness' = "batchbench.harness:main"
 

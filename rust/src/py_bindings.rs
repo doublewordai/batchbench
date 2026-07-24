@@ -10,8 +10,8 @@ use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
 use crate::{
-    run_benchmark, run_from_argv, BenchmarkConfig, BenchmarkReport, DistMode, FailureRecord,
-    GenerateOptions, RequestEntry, RunMode,
+    run_agent_from_argv, run_benchmark, run_from_argv, BenchmarkConfig, BenchmarkReport, DistMode,
+    FailureRecord, GenerateOptions, RequestEntry, RunMode,
 };
 
 #[derive(Debug, Clone, Deserialize, Serialize)]
@@ -345,10 +345,17 @@ fn run_cli(py: Python<'_>, argv: Vec<String>) -> PyResult<()> {
         .map_err(to_py_error)
 }
 
+#[pyfunction]
+fn run_agent_cli(py: Python<'_>, argv: Vec<String>) -> PyResult<()> {
+    py.allow_threads(move || run_agent_from_argv(argv))
+        .map_err(to_py_error)
+}
+
 #[pymodule]
 fn _core(_py: Python<'_>, module: &Bound<'_, PyModule>) -> PyResult<()> {
     module.add_function(wrap_pyfunction!(generate_requests_json, module)?)?;
     module.add_function(wrap_pyfunction!(run_benchmark_json, module)?)?;
     module.add_function(wrap_pyfunction!(run_cli, module)?)?;
+    module.add_function(wrap_pyfunction!(run_agent_cli, module)?)?;
     Ok(())
 }

@@ -112,3 +112,30 @@ Use these fields to build dashboards, generate CSVs, or trigger alerts after a r
 - Add integration drivers under `examples/` or an external binary crate to exercise the benchmark end-to-end.
 
 For the main scheduling loop and request orchestration logic, refer to `src/runner.rs`.
+
+## Stateful Agent Loops
+
+The separate `batchbench-agent` binary benchmarks independent, growing agent
+conversations:
+
+```bash
+cargo run --bin batchbench-agent -- \
+  --model Qwen/Qwen3-8B \
+  --host http://localhost:8000 \
+  --agents 8 \
+  --input-tokens 256 \
+  --output-tokens 64 \
+  --environment-tokens 128 \
+  --tool-invocations 6 \
+  --tool-call-latency-ms 250
+```
+
+Each agent sends an initial user prompt, appends the model's assistant/tool-call
+message and a generated tool response, and resends the full history on its next
+turn. Fixed values can be replaced with the corresponding `*-lognorm-median` (or
+`*-lognorm-mu`), `*-lognorm-sigma`, and optional `*-lognorm-max` flags. The report
+includes server-reported total input and output tokens plus the number of input
+tokens expected to hit a perfect per-agent prefix cache. Tool latency can likewise
+be fixed with `--tool-call-latency-ms` or sampled with the
+`--tool-call-latency-lognorm-*` flags; each agent sleeps for that duration before
+continuing after a successful tool call.

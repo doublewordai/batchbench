@@ -80,6 +80,87 @@ instead of `min_tokens`/`max_tokens`.
 
 Press `Ctrl+C` during a run to cancel active requests and print a partial summary.
 
+## Agent-loop benchmark
+
+`batchbench-agent` is a separate entrypoint for stateful agent workloads. It starts
+`--agents` independent loops concurrently. Within each agent, model requests remain
+sequential: the returned assistant message and a synthetic tool/environment response
+are appended to `messages`, then the complete growing conversation is sent again.
+This makes every request after the first one reuse that agent's previous prompt as a
+prefix and exercises server-side KV caching.
+
+Fixed-length example:
+
+```bash
+batchbench-agent \
+  --model Qwen/Qwen3-8B \
+  --host http://localhost:8000 \
+  --agents 16 \
+  --input-tokens 256 \
+  --output-tokens 64 \
+  --environment-tokens 128 \
+  --tool-invocations 8 \
+  --tool-call-latency-ms 250
+```
+
+Log-normal example:
+
+```bash
+batchbench-agent \
+  --model Qwen/Qwen3-8B \
+  --host http://localhost:8000 \
+  --agents 16 \
+  --input-lognorm-median 256 \
+  --input-lognorm-sigma 0.5 \
+  --input-lognorm-max 2048 \
+  --output-lognorm-median 64 \
+  --output-lognorm-sigma 0.4 \
+  --output-lognorm-max 512 \
+  --environment-lognorm-median 128 \
+  --environment-lognorm-sigma 0.6 \
+  --environment-lognorm-max 1024 \
+  --tool-invocations-lognorm-median 8 \
+  --tool-invocations-lognorm-sigma 0.3 \
+  --tool-invocations-lognorm-max 32 \
+  --tool-call-latency-lognorm-median-ms 250 \
+  --tool-call-latency-lognorm-sigma 0.5 \
+  --tool-call-latency-lognorm-max-ms 2000 \
+  --seed 42
+```
+
+Each log-normal family accepts either `*-lognorm-median` or `*-lognorm-mu`,
+requires `*-lognorm-sigma`, and optionally accepts `*-lognorm-max`. Samples are
+independent between agents and turns; `--seed` makes the sampled workload
+reproducible. `--tokenizer-model` can be supplied when the endpoint's model name is
+not also a Hugging Face tokenizer identifier.
+
+Tool-call latency defaults to zero. Set a fixed delay with
+`--tool-call-latency-ms`, or sample milliseconds independently for every invocation
+with `--tool-call-latency-lognorm-median-ms` (or
+`--tool-call-latency-lognorm-mu`), `--tool-call-latency-lognorm-sigma`, and the
+optional `--tool-call-latency-lognorm-max-ms`. After a model response succeeds, the
+agent sleeps for the sampled duration before making the environment result
+available and submitting its next model request.
+
+One tool invocation means one model request followed by one synthetic environment
+response. The benchmark asks the model for an `environment` tool call and preserves
+the returned assistant message in history. If an endpoint returns plain assistant
+content instead, BatchBench wraps it in a valid synthetic tool call before appending
+the environment response so the loop can continue.
+
+The final report includes:
+
+- total input tokens sent, from successful responses' `usage.prompt_tokens`;
+- total output tokens generated, from `usage.completion_tokens`;
+- estimated cached input tokens under perfect prefix caching;
+- total simulated tool-call latency across all agents.
+
+For each successful request after an agent's first, the cache estimate adds that
+same agent's preceding prompt-token count (capped by the current prompt count).
+Retries and failed requests are excluded because they do not provide reliable usage
+data. Use `--results-csv <path>` to persist the same totals, or `--dry-run` to inspect
+the independently sampled workload without sending requests.
+
 ## Rust CLI
 
 The existing Rust CLI is unchanged:
@@ -87,6 +168,13 @@ The existing Rust CLI is unchanged:
 ```bash
 cargo build --release --manifest-path rust/Cargo.toml --bin batchbench
 ./rust/target/release/batchbench --help
+```
+
+The agent-loop binary can likewise be run directly:
+
+```bash
+cargo build --release --manifest-path rust/Cargo.toml --bin batchbench-agent
+./rust/target/release/batchbench-agent --help
 ```
 
 ## Releases and PyPI

@@ -2,25 +2,27 @@
 
 ## Project Overview
 
-BatchBench is now a Rust-only benchmarking suite for LLM inference workloads. The single CLI binary `batchbench` generates synthetic request datasets and drives parallel online requests to OpenAI-compatible endpoints.
+BatchBench is a Rust benchmarking suite for LLM inference workloads. The `batchbench` CLI generates synthetic request datasets and drives parallel online requests to OpenAI-compatible endpoints. The separate `batchbench-agent` CLI drives concurrent, stateful agent loops with growing message histories for prefix-cache benchmarking.
 
 ## Architecture
 
-- **Rust core** (`rust-bench/`): Async HTTP client and CLI (`batchbench.rs`) built with Tokio and `clap`.
-- **Build script**: `build_rust.sh` builds the release binary; no Python packaging remains.
-- **Invocation**: Run the Rust binary directly (from `target/release/batchbench`) with inline dataset generation sized to `users * requests_per_user`.
+- **Rust core** (`rust/`): Async HTTP clients and CLIs built with Tokio and `clap`.
+- **Python package** (`src/batchbench/`): Thin PyO3 wrappers and installed console entrypoints.
+- **Invocation**: Run `batchbench` for independent batched requests or `batchbench-agent` for stateful tool loops.
 
 ## Critical Workflows
 
-- **Build**: `./build_rust.sh` or `cd rust-bench && cargo build --release --bin batchbench`.
-- **Run**: `./rust-bench/target/release/batchbench --model <model> --users <n> --requests-per-user <m> [other flags]`.
-- **Tests**: `cd rust-bench && cargo test`.
+- **Build**: `cargo build --release --manifest-path rust/Cargo.toml`.
+- **Run**: `./rust/target/release/batchbench --model <model> --users <n> --requests-per-user <m> [other flags]`.
+- **Run agent loops**: `./rust/target/release/batchbench-agent --model <model> --agents <n> --tool-invocations <m> [other flags]`.
+- **Tests**: `cargo test --manifest-path rust/Cargo.toml`.
 
 ## Key Conventions
 
-- Requests are generated inline; JSONL inputs and Python entrypoints have been removed.
+- Requests are generated inline; JSONL input has been removed.
 - Request selection is deterministic: request `m` from user `n` maps to index `m * N + n` in the generated list (N = users).
 - Output length options: fixed (`--output-tokens` with optional `--output-vary`, default 0) or log-normal sampling (mutually exclusive with fixed tokens).
+- Agent-loop input, output, environment, tool-invocation counts, and simulated tool-call latency each support fixed or independent log-normal sampling.
 
 ## Docker Configuration
 

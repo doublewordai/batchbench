@@ -80,6 +80,7 @@ jobs:
 
       - name: Smoke test CLI
         run: |
+          batchbench-agent --help
           batchbench \
             --host https://example.com \
             --endpoint /v1/chat/completions \
