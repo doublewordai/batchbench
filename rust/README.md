@@ -138,4 +138,5 @@ includes server-reported total input and output tokens plus the number of input
 tokens expected to hit a perfect per-agent prefix cache. Tool latency can likewise
 be fixed with `--tool-call-latency-ms` or sampled with the
 `--tool-call-latency-lognorm-*` flags; each agent sleeps for that duration before
-continuing after a successful tool call.
+continuing after a successful tool call. Pass `--temperature 0` when the workload
+should use deterministic greedy decoding.

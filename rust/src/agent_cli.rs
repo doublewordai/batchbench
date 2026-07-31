@@ -79,6 +79,10 @@ struct Args {
     #[arg(long, alias = "model-response-lognorm-max")]
     output_lognorm_max: Option<usize>,
 
+    /// Sampling temperature sent with every request (0 uses greedy decoding)
+    #[arg(long)]
+    temperature: Option<f64>,
+
     /// Fixed synthetic environment response length (default: 64)
     #[arg(long, alias = "environment-response-tokens")]
     environment_tokens: Option<usize>,
@@ -239,6 +243,7 @@ struct CsvResult {
     tool_call_latency_lognorm_median_ms: Option<f64>,
     tool_call_latency_lognorm_sigma: Option<f64>,
     tool_call_latency_lognorm_max_ms: Option<usize>,
+    temperature: Option<f64>,
 }
 
 enum ParsedArgs {
@@ -296,6 +301,12 @@ async fn run(args: Args) -> Result<()> {
     }
     if args.request_timeout_secs == 0 {
         return Err(anyhow!("request-timeout-secs must be greater than zero"));
+    }
+    if args
+        .temperature
+        .is_some_and(|value| !value.is_finite() || !(0.0..=2.0).contains(&value))
+    {
+        return Err(anyhow!("temperature must be finite and between 0 and 2"));
     }
 
     let input_tokens = resolve_sample_spec(
@@ -360,6 +371,11 @@ async fn run(args: Args) -> Result<()> {
     println!("Initial prompt: {}", describe_spec(&input_tokens));
     println!("Model response: {}", describe_spec(&output_tokens));
     println!(
+        "Sampling temperature: {}",
+        args.temperature
+            .map_or_else(|| "backend default".to_string(), |value| value.to_string())
+    );
+    println!(
         "Environment response: {}",
         describe_spec(&environment_tokens)
     );
@@ -397,6 +413,9 @@ async fn run(args: Args) -> Result<()> {
     .with_sglang(args.sglang)
     .with_verbose(args.verbose)
     .with_dry_run(args.dry_run);
+    if let Some(temperature) = args.temperature {
+        config = config.with_temperature(temperature)?;
+    }
     if let Some(tool_call_latency_ms) = tool_call_latency_ms {
         config = config.with_tool_call_latency_ms(tool_call_latency_ms)?;
     }
@@ -454,6 +473,7 @@ async fn run(args: Args) -> Result<()> {
             tool_call_latency_lognorm_median_ms: args.tool_call_latency_lognorm_median_ms,
             tool_call_latency_lognorm_sigma: args.tool_call_latency_lognorm_sigma,
             tool_call_latency_lognorm_max_ms: args.tool_call_latency_lognorm_max_ms,
+            temperature: args.temperature,
         };
         write_results_csv(csv_path, &record)?;
         println!("Wrote agent benchmark summary to {}", csv_path.display());

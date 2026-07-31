@@ -156,7 +156,9 @@ Each log-normal family accepts either `*-lognorm-median` or `*-lognorm-mu`,
 requires `*-lognorm-sigma`, and optionally accepts `*-lognorm-max`. Samples are
 independent between agents and turns; `--seed` makes the sampled workload
 reproducible. `--tokenizer-model` can be supplied when the endpoint's model name is
-not also a Hugging Face tokenizer identifier.
+not also a Hugging Face tokenizer identifier. `--temperature` sends an explicit
+OpenAI sampling temperature with every request; use `--temperature 0` for a
+deterministic routing or cache experiment.
 
 Tool-call latency defaults to zero. Set a fixed delay with
 `--tool-call-latency-ms`, or sample milliseconds independently for every invocation

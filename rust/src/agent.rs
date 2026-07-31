@@ -160,6 +160,7 @@ pub struct AgentLoopConfig {
     pub environment_tokens: SampleSpec,
     pub tool_invocations: SampleSpec,
     pub tool_call_latency_ms: Option<SampleSpec>,
+    pub temperature: Option<f64>,
     pub user_prefix: Option<String>,
     pub agent_header_templates: Vec<AgentHeaderTemplate>,
     pub nvext_extra_fields: Vec<String>,
@@ -222,6 +223,7 @@ impl AgentLoopConfig {
             environment_tokens,
             tool_invocations,
             tool_call_latency_ms: None,
+            temperature: None,
             user_prefix: None,
             agent_header_templates: Vec::new(),
             nvext_extra_fields: Vec::new(),
@@ -241,6 +243,14 @@ impl AgentLoopConfig {
     pub fn with_tokenizer_model(mut self, tokenizer_model: impl Into<String>) -> Self {
         self.tokenizer_model = tokenizer_model.into();
         self
+    }
+
+    pub fn with_temperature(mut self, temperature: f64) -> Result<Self> {
+        if !temperature.is_finite() || !(0.0..=2.0).contains(&temperature) {
+            return Err(anyhow!("temperature must be finite and between 0 and 2"));
+        }
+        self.temperature = Some(temperature);
+        Ok(self)
     }
 
     pub fn with_request_timeout(mut self, timeout: Duration) -> Self {
@@ -1028,6 +1038,9 @@ fn build_request_body(
         if let Some(prefix) = &config.user_prefix {
             map.insert("user".to_string(), json!(format!("{prefix}-{agent_id}")));
         }
+        if let Some(temperature) = config.temperature {
+            map.insert("temperature".to_string(), json!(temperature));
+        }
         if !config.nvext_extra_fields.is_empty() {
             map.insert(
                 "nvext".to_string(),
@@ -1507,6 +1520,32 @@ mod tests {
             Value::String("environment".to_string())
         );
         assert!(body.get("user").is_none());
+        assert!(body.get("temperature").is_none());
+    }
+
+    #[test]
+    fn request_body_can_set_greedy_sampling() {
+        let config = AgentLoopConfig::try_new(
+            "http://localhost:8000/v1/chat/completions",
+            None,
+            "test-model",
+            1,
+            SampleSpec::fixed(8).unwrap(),
+            SampleSpec::fixed(4).unwrap(),
+            SampleSpec::fixed(6).unwrap(),
+            SampleSpec::fixed(2).unwrap(),
+        )
+        .unwrap()
+        .with_temperature(0.0)
+        .unwrap();
+
+        let body = build_request_body(
+            &config,
+            &[json!({"role": "user", "content": "start"})],
+            5,
+            0,
+        );
+        assert_eq!(body["temperature"], 0.0);
     }
 
     #[test]
