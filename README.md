@@ -128,6 +128,30 @@ batchbench-agent \
   --seed 42
 ```
 
+For a Dynamo session-affinity experiment, stamp a stable header per agent, request
+routing metadata, and write a live event stream:
+
+```bash
+batchbench-agent \
+  --model Qwen/Qwen3.5-9B \
+  --host http://localhost:8000 \
+  --agents 100 \
+  --tool-invocations 20 \
+  --barrier-after-invocation 3 \
+  --agent-header-template 'x-dynamo-session-id=scale-agent-{agent_id}' \
+  --nvext-extra-field worker_id \
+  --events-jsonl /tmp/agent-events.jsonl \
+  --seed 42
+```
+
+`--agent-header-template NAME=VALUE` may be repeated; its value must contain the
+literal `{agent_id}` placeholder. `--events-jsonl` is flushed after each request
+start and completion so an external controller can react while traffic is still
+running. Completion events include latency, usage/cached-token fields, and any
+worker/DP-rank metadata returned by Dynamo. `--barrier-after-invocation N`
+requires a fixed `--tool-invocations` value greater than N and releases all agents
+together once every agent has completed invocation N.
+
 Each log-normal family accepts either `*-lognorm-median` or `*-lognorm-mu`,
 requires `*-lognorm-sigma`, and optionally accepts `*-lognorm-max`. Samples are
 independent between agents and turns; `--seed` makes the sampled workload
@@ -153,6 +177,7 @@ The final report includes:
 - total input tokens sent, from successful responses' `usage.prompt_tokens`;
 - total output tokens generated, from `usage.completion_tokens`;
 - estimated cached input tokens under perfect prefix caching;
+- cached input tokens reported by the backend, when present;
 - total simulated tool-call latency across all agents.
 
 For each successful request after an agent's first, the cache estimate adds that

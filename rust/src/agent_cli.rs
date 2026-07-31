@@ -7,7 +7,9 @@ use anyhow::{anyhow, Context, Result};
 use clap::Parser;
 use serde::Serialize;
 
-use crate::{run_agent_benchmark, AgentBenchmarkReport, AgentLoopConfig, SampleSpec};
+use crate::{
+    run_agent_benchmark, AgentBenchmarkReport, AgentHeaderTemplate, AgentLoopConfig, SampleSpec,
+};
 
 const DEFAULT_MODEL: &str = "Qwen/Qwen3-VL-235B-A22B-Instruct-FP8";
 
@@ -148,6 +150,23 @@ struct Args {
     #[arg(long)]
     user_prefix: Option<String>,
 
+    /// Per-agent request header template in NAME=VALUE form. VALUE must contain `{agent_id}`.
+    /// May be repeated.
+    #[arg(long = "agent-header-template", value_name = "NAME=VALUE")]
+    agent_header_templates: Vec<String>,
+
+    /// Ask Dynamo to return an nvext field (for example worker_id). May be repeated.
+    #[arg(long = "nvext-extra-field", value_name = "FIELD")]
+    nvext_extra_fields: Vec<String>,
+
+    /// Write one flushed JSON object for every request start and completion
+    #[arg(long)]
+    events_jsonl: Option<PathBuf>,
+
+    /// Make all agents wait after this successful invocation before continuing
+    #[arg(long)]
+    barrier_after_invocation: Option<usize>,
+
     /// API key; when omitted, read --api-key-env
     #[arg(long)]
     api_key: Option<String>,
@@ -202,6 +221,7 @@ struct CsvResult {
     total_input_tokens: u64,
     total_output_tokens: u64,
     estimated_cached_input_tokens: u64,
+    reported_cached_input_tokens: u64,
     total_tool_call_latency_seconds: f64,
     total_duration_seconds: f64,
     requests_per_second: f64,
@@ -383,6 +403,18 @@ async fn run(args: Args) -> Result<()> {
     if let Some(user_prefix) = &args.user_prefix {
         config = config.with_user_prefix(user_prefix.clone());
     }
+    for raw_template in &args.agent_header_templates {
+        config = config.add_agent_header_template(parse_agent_header_template(raw_template)?)?;
+    }
+    if !args.nvext_extra_fields.is_empty() {
+        config = config.with_nvext_extra_fields(args.nvext_extra_fields.clone())?;
+    }
+    if let Some(path) = &args.events_jsonl {
+        config = config.with_events_jsonl(path.clone());
+    }
+    if let Some(invocation) = args.barrier_after_invocation {
+        config = config.with_barrier_after_invocation(invocation)?;
+    }
     if let Some(seed) = args.seed {
         config = config.with_seed(seed);
     }
@@ -404,6 +436,7 @@ async fn run(args: Args) -> Result<()> {
             total_input_tokens: report.total_input_tokens,
             total_output_tokens: report.total_output_tokens,
             estimated_cached_input_tokens: report.estimated_cached_input_tokens,
+            reported_cached_input_tokens: report.reported_cached_input_tokens,
             total_tool_call_latency_seconds: report.total_tool_call_latency.as_secs_f64(),
             total_duration_seconds: report.total_duration.as_secs_f64(),
             requests_per_second: report.requests_per_second,
@@ -580,6 +613,16 @@ fn resolve_endpoint(host: &str, endpoint: &str) -> String {
     format!("{}/{}", host, endpoint.trim_start_matches('/'))
 }
 
+fn parse_agent_header_template(raw: &str) -> Result<AgentHeaderTemplate> {
+    let (name, value) = raw
+        .split_once('=')
+        .ok_or_else(|| anyhow!("agent header template must use NAME=VALUE syntax: {raw:?}"))?;
+    if name.is_empty() {
+        return Err(anyhow!("agent header template name must not be empty"));
+    }
+    AgentHeaderTemplate::try_new(name, value)
+}
+
 fn print_summary(report: &AgentBenchmarkReport) {
     println!(
         "Agents: {} completed / {} total",
@@ -600,6 +643,10 @@ fn print_summary(report: &AgentBenchmarkReport) {
     println!(
         "Estimated cached input tokens (perfect server-side caching): {}",
         report.estimated_cached_input_tokens
+    );
+    println!(
+        "Reported cached input tokens: {}",
+        report.reported_cached_input_tokens
     );
     println!(
         "Total simulated tool-call latency: {:.2}s",
@@ -724,5 +771,21 @@ mod tests {
         let error = resolve_optional_latency_spec(Some(100), None, Some(200.0), Some(0.5), None)
             .unwrap_err();
         assert!(error.to_string().contains("cannot be combined"));
+    }
+
+    #[test]
+    fn parses_per_agent_header_template() {
+        let template =
+            parse_agent_header_template("x-dynamo-session-id=scale-agent-{agent_id}").unwrap();
+        let (name, value) = template.render(42).unwrap();
+        assert_eq!(name, "x-dynamo-session-id");
+        assert_eq!(value, "scale-agent-42");
+    }
+
+    #[test]
+    fn rejects_malformed_per_agent_header_template() {
+        assert!(parse_agent_header_template("x-dynamo-session-id").is_err());
+        assert!(parse_agent_header_template("=scale-agent-{agent_id}").is_err());
+        assert!(parse_agent_header_template("x-dynamo-session-id=scale-agent").is_err());
     }
 }

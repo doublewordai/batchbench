@@ -9,7 +9,8 @@ mod report;
 mod runner;
 
 pub use agent::{
-    run_agent_benchmark, AgentBenchmarkReport, AgentFailureRecord, AgentLoopConfig, SampleSpec,
+    run_agent_benchmark, AgentBenchmarkReport, AgentFailureRecord, AgentHeaderTemplate,
+    AgentLoopConfig, SampleSpec,
 };
 pub use agent_cli::{run_from_argv as run_agent_from_argv, run_from_env as run_agent_from_env};
 pub use cli::{run_from_argv, run_from_env};

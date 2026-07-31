@@ -1,3 +1,6 @@
+use std::path::{Path, PathBuf};
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use anyhow::{anyhow, Context, Result};
@@ -5,9 +8,56 @@ use rand::{Rng, SeedableRng};
 use rand_distr::{Distribution, LogNormal};
 use reqwest::header::{HeaderMap, HeaderName, HeaderValue, AUTHORIZATION, CONTENT_TYPE};
 use reqwest::{Client, Url};
+use serde::Serialize;
 use serde_json::{json, Map, Value};
 use tokenizers::Tokenizer;
+use tokio::io::{AsyncWriteExt, BufWriter};
+use tokio::sync::{Barrier, Mutex};
 use tokio::task::JoinSet;
+
+const DYNAMO_SESSION_HEADER: &str = "x-dynamo-session-id";
+
+/// A request header whose value is rendered independently for each agent.
+///
+/// The literal `{agent_id}` placeholder is replaced with the zero-based agent ID.
+#[derive(Clone, Debug)]
+pub struct AgentHeaderTemplate {
+    name: HeaderName,
+    value_template: String,
+}
+
+impl AgentHeaderTemplate {
+    pub fn try_new(name: impl AsRef<str>, value_template: impl Into<String>) -> Result<Self> {
+        let raw_name = name.as_ref();
+        let name = HeaderName::from_bytes(raw_name.as_bytes())
+            .with_context(|| format!("invalid agent header name {raw_name:?}"))?;
+        let value_template = value_template.into();
+        if !value_template.contains("{agent_id}") {
+            return Err(anyhow!(
+                "agent header template for {raw_name} must contain {{agent_id}}"
+            ));
+        }
+        let template = Self {
+            name,
+            value_template,
+        };
+        template.render(0)?;
+        Ok(template)
+    }
+
+    pub(crate) fn render(&self, agent_id: usize) -> Result<(HeaderName, HeaderValue)> {
+        let value = self
+            .value_template
+            .replace("{agent_id}", &agent_id.to_string());
+        let value = HeaderValue::from_str(&value).with_context(|| {
+            format!(
+                "agent header {} rendered an invalid value for agent {}",
+                self.name, agent_id
+            )
+        })?;
+        Ok((self.name.clone(), value))
+    }
+}
 
 /// A fixed value or a value independently sampled from a log-normal distribution.
 #[derive(Clone, Debug)]
@@ -111,6 +161,10 @@ pub struct AgentLoopConfig {
     pub tool_invocations: SampleSpec,
     pub tool_call_latency_ms: Option<SampleSpec>,
     pub user_prefix: Option<String>,
+    pub agent_header_templates: Vec<AgentHeaderTemplate>,
+    pub nvext_extra_fields: Vec<String>,
+    pub events_jsonl: Option<PathBuf>,
+    pub barrier_after_invocation: Option<usize>,
     pub request_timeout: Duration,
     pub max_retries: usize,
     pub retry_delay: Duration,
@@ -169,6 +223,10 @@ impl AgentLoopConfig {
             tool_invocations,
             tool_call_latency_ms: None,
             user_prefix: None,
+            agent_header_templates: Vec::new(),
+            nvext_extra_fields: Vec::new(),
+            events_jsonl: None,
+            barrier_after_invocation: None,
             request_timeout: Duration::from_secs(60),
             max_retries: 2,
             retry_delay: Duration::from_millis(250),
@@ -225,6 +283,57 @@ impl AgentLoopConfig {
         self
     }
 
+    pub fn add_agent_header_template(mut self, template: AgentHeaderTemplate) -> Result<Self> {
+        if self
+            .agent_header_templates
+            .iter()
+            .any(|existing| existing.name == template.name)
+        {
+            return Err(anyhow!(
+                "duplicate agent header template for {}",
+                template.name
+            ));
+        }
+        self.agent_header_templates.push(template);
+        Ok(self)
+    }
+
+    pub fn with_nvext_extra_fields(mut self, fields: Vec<String>) -> Result<Self> {
+        for field in &fields {
+            if field.trim().is_empty() {
+                return Err(anyhow!("nvext extra field must not be empty"));
+            }
+        }
+        self.nvext_extra_fields = fields;
+        Ok(self)
+    }
+
+    pub fn with_events_jsonl(mut self, path: impl Into<PathBuf>) -> Self {
+        self.events_jsonl = Some(path.into());
+        self
+    }
+
+    pub fn with_barrier_after_invocation(mut self, invocation: usize) -> Result<Self> {
+        if invocation == 0 {
+            return Err(anyhow!("barrier invocation must be greater than zero"));
+        }
+        match self.tool_invocations {
+            SampleSpec::Fixed(turns) if invocation < turns => {}
+            SampleSpec::Fixed(turns) => {
+                return Err(anyhow!(
+                    "barrier invocation {invocation} must be less than the fixed turn count {turns}"
+                ));
+            }
+            SampleSpec::LogNormal { .. } => {
+                return Err(anyhow!(
+                    "barrier-after-invocation requires a fixed --tool-invocations value"
+                ));
+            }
+        }
+        self.barrier_after_invocation = Some(invocation);
+        Ok(self)
+    }
+
     pub fn with_tool_call_latency_ms(mut self, latency_ms: SampleSpec) -> Result<Self> {
         latency_ms.validate("tool call latency")?;
         self.tool_call_latency_ms = Some(latency_ms);
@@ -235,6 +344,202 @@ impl AgentLoopConfig {
         self.headers.insert(name, value);
         self
     }
+}
+
+#[derive(Clone)]
+struct AgentEventSink {
+    writer: Arc<Mutex<BufWriter<tokio::fs::File>>>,
+}
+
+struct InvocationBarrier {
+    barrier: Barrier,
+    cancelled: AtomicBool,
+    cancelled_notify: tokio::sync::Notify,
+}
+
+impl InvocationBarrier {
+    fn new(participants: usize) -> Arc<Self> {
+        Arc::new(Self {
+            barrier: Barrier::new(participants),
+            cancelled: AtomicBool::new(false),
+            cancelled_notify: tokio::sync::Notify::new(),
+        })
+    }
+
+    fn participant(self: &Arc<Self>) -> InvocationBarrierParticipant {
+        InvocationBarrierParticipant {
+            barrier: self.clone(),
+            passed: false,
+        }
+    }
+
+    fn cancel(&self) {
+        self.cancelled.store(true, Ordering::Release);
+        self.cancelled_notify.notify_waiters();
+    }
+
+    async fn wait(&self) {
+        let cancelled = self.cancelled_notify.notified();
+        tokio::pin!(cancelled);
+        cancelled.as_mut().enable();
+        if self.cancelled.load(Ordering::Acquire) {
+            return;
+        }
+        tokio::select! {
+            _ = self.barrier.wait() => {}
+            _ = cancelled => {}
+        }
+    }
+}
+
+struct InvocationBarrierParticipant {
+    barrier: Arc<InvocationBarrier>,
+    passed: bool,
+}
+
+impl InvocationBarrierParticipant {
+    async fn wait(&mut self) {
+        self.barrier.wait().await;
+        self.passed = true;
+    }
+}
+
+impl Drop for InvocationBarrierParticipant {
+    fn drop(&mut self) {
+        if !self.passed {
+            self.barrier.cancel();
+        }
+    }
+}
+
+impl AgentEventSink {
+    async fn create(path: &Path) -> Result<Self> {
+        if let Some(parent) = path.parent() {
+            if !parent.as_os_str().is_empty() {
+                tokio::fs::create_dir_all(parent)
+                    .await
+                    .with_context(|| format!("failed to create {}", parent.display()))?;
+            }
+        }
+        let file = tokio::fs::File::create(path)
+            .await
+            .with_context(|| format!("failed to create {}", path.display()))?;
+        Ok(Self {
+            writer: Arc::new(Mutex::new(BufWriter::new(file))),
+        })
+    }
+
+    async fn write<T: Serialize>(&self, event: &T) -> Result<()> {
+        let mut line = serde_json::to_vec(event).context("failed to serialize agent event")?;
+        line.push(b'\n');
+        let mut writer = self.writer.lock().await;
+        writer
+            .write_all(&line)
+            .await
+            .context("failed to write agent event")?;
+        writer
+            .flush()
+            .await
+            .context("failed to flush agent event")?;
+        Ok(())
+    }
+}
+
+#[derive(Serialize)]
+struct AgentRequestEvent<'a> {
+    event: &'static str,
+    timestamp: String,
+    agent_id: usize,
+    invocation: usize,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    session_id: Option<&'a str>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    status: Option<&'static str>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    latency_ms: Option<f64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    prompt_tokens: Option<u64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    cached_tokens: Option<u64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    completion_tokens: Option<u64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    worker_id: Option<u64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    dp_rank: Option<u32>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    error: Option<&'a str>,
+}
+
+impl<'a> AgentRequestEvent<'a> {
+    fn started(agent_id: usize, invocation: usize, session_id: Option<&'a str>) -> Self {
+        Self {
+            event: "request_start",
+            timestamp: event_timestamp(),
+            agent_id,
+            invocation,
+            session_id,
+            status: None,
+            latency_ms: None,
+            prompt_tokens: None,
+            cached_tokens: None,
+            completion_tokens: None,
+            worker_id: None,
+            dp_rank: None,
+            error: None,
+        }
+    }
+
+    fn completed(
+        agent_id: usize,
+        invocation: usize,
+        session_id: Option<&'a str>,
+        result: &RequestResult,
+    ) -> Self {
+        Self {
+            event: "request_complete",
+            timestamp: event_timestamp(),
+            agent_id,
+            invocation,
+            session_id,
+            status: Some("success"),
+            latency_ms: Some(result.latency.as_secs_f64() * 1000.0),
+            prompt_tokens: Some(result.prompt_tokens),
+            cached_tokens: result.cached_tokens,
+            completion_tokens: Some(result.completion_tokens),
+            worker_id: result.worker_id,
+            dp_rank: result.dp_rank,
+            error: None,
+        }
+    }
+
+    fn failed(
+        agent_id: usize,
+        invocation: usize,
+        session_id: Option<&'a str>,
+        latency: Duration,
+        error: &'a str,
+    ) -> Self {
+        Self {
+            event: "request_complete",
+            timestamp: event_timestamp(),
+            agent_id,
+            invocation,
+            session_id,
+            status: Some("failure"),
+            latency_ms: Some(latency.as_secs_f64() * 1000.0),
+            prompt_tokens: None,
+            cached_tokens: None,
+            completion_tokens: None,
+            worker_id: None,
+            dp_rank: None,
+            error: Some(error),
+        }
+    }
+}
+
+fn event_timestamp() -> String {
+    chrono::Utc::now().to_rfc3339_opts(chrono::SecondsFormat::Millis, true)
 }
 
 #[derive(Clone, Debug)]
@@ -271,6 +576,7 @@ pub struct AgentBenchmarkReport {
     pub total_input_tokens: u64,
     pub total_output_tokens: u64,
     pub estimated_cached_input_tokens: u64,
+    pub reported_cached_input_tokens: u64,
     pub total_tool_call_latency: Duration,
     pub total_duration: Duration,
     pub input_tokens_per_second: f64,
@@ -290,6 +596,7 @@ struct AgentWorkerReport {
     input_tokens: u64,
     output_tokens: u64,
     estimated_cached_input_tokens: u64,
+    reported_cached_input_tokens: u64,
     tool_call_latency: Duration,
     latencies: Vec<Duration>,
     failures: Vec<AgentFailureRecord>,
@@ -305,6 +612,7 @@ impl AgentWorkerReport {
             input_tokens: 0,
             output_tokens: 0,
             estimated_cached_input_tokens: 0,
+            reported_cached_input_tokens: 0,
             tool_call_latency: Duration::ZERO,
             latencies: Vec::new(),
             failures: Vec::new(),
@@ -326,7 +634,10 @@ struct DryRunRecord {
 #[derive(Debug)]
 struct RequestResult {
     prompt_tokens: u64,
+    cached_tokens: Option<u64>,
     completion_tokens: u64,
+    worker_id: Option<u64>,
+    dp_rank: Option<u32>,
     assistant_message: Value,
     latency: Duration,
 }
@@ -349,6 +660,14 @@ pub async fn run_agent_benchmark(config: AgentLoopConfig) -> Result<AgentBenchma
         .timeout(config.request_timeout)
         .build()
         .context("failed to construct HTTP client")?;
+    let event_sink = match config.events_jsonl.as_deref() {
+        Some(path) => Some(AgentEventSink::create(path).await?),
+        None => None,
+    };
+    let invocation_barrier = config
+        .barrier_after_invocation
+        .filter(|_| !config.dry_run)
+        .map(|_| InvocationBarrier::new(config.agent_count));
     let config = std::sync::Arc::new(config);
     let start = Instant::now();
 
@@ -356,7 +675,13 @@ pub async fn run_agent_benchmark(config: AgentLoopConfig) -> Result<AgentBenchma
     for plan in plans {
         let client = client.clone();
         let config = std::sync::Arc::clone(&config);
-        join_set.spawn(async move { run_agent(plan, client, config).await });
+        let event_sink = event_sink.clone();
+        let invocation_barrier = invocation_barrier
+            .as_ref()
+            .map(InvocationBarrier::participant);
+        join_set.spawn(async move {
+            run_agent(plan, client, config, event_sink, invocation_barrier).await
+        });
     }
 
     let mut completed_agents = 0usize;
@@ -365,6 +690,7 @@ pub async fn run_agent_benchmark(config: AgentLoopConfig) -> Result<AgentBenchma
     let mut total_input_tokens = 0u64;
     let mut total_output_tokens = 0u64;
     let mut estimated_cached_input_tokens = 0u64;
+    let mut reported_cached_input_tokens = 0u64;
     let mut total_tool_call_latency = Duration::ZERO;
     let mut latencies = Vec::new();
     let mut failures = Vec::new();
@@ -381,6 +707,8 @@ pub async fn run_agent_benchmark(config: AgentLoopConfig) -> Result<AgentBenchma
         total_output_tokens = total_output_tokens.saturating_add(worker.output_tokens);
         estimated_cached_input_tokens =
             estimated_cached_input_tokens.saturating_add(worker.estimated_cached_input_tokens);
+        reported_cached_input_tokens =
+            reported_cached_input_tokens.saturating_add(worker.reported_cached_input_tokens);
         total_tool_call_latency = total_tool_call_latency.saturating_add(worker.tool_call_latency);
         latencies.extend(worker.latencies);
         failures.extend(worker.failures);
@@ -418,6 +746,7 @@ pub async fn run_agent_benchmark(config: AgentLoopConfig) -> Result<AgentBenchma
         total_input_tokens,
         total_output_tokens,
         estimated_cached_input_tokens,
+        reported_cached_input_tokens,
         total_tool_call_latency,
         total_duration,
         input_tokens_per_second: rate(total_input_tokens, duration_secs),
@@ -532,6 +861,8 @@ async fn run_agent(
     plan: AgentPlan,
     client: Client,
     config: std::sync::Arc<AgentLoopConfig>,
+    event_sink: Option<AgentEventSink>,
+    mut invocation_barrier: Option<InvocationBarrierParticipant>,
 ) -> Result<AgentWorkerReport> {
     let mut report = AgentWorkerReport::new();
     let mut messages = vec![json!({
@@ -539,6 +870,11 @@ async fn run_agent(
         "content": plan.initial_prompt,
     })];
     let mut previous_prompt_tokens = 0u64;
+    let agent_headers = render_agent_headers(&config, plan.agent_id)?;
+    let session_id = agent_headers
+        .get(DYNAMO_SESSION_HEADER)
+        .and_then(|value| value.to_str().ok())
+        .map(str::to_string);
 
     for (turn_index, turn) in plan.turns.iter().enumerate() {
         let invocation = turn_index + 1;
@@ -566,8 +902,33 @@ async fn run_agent(
         }
 
         let body = build_request_body(&config, &messages, turn.output_tokens, plan.agent_id);
-        match request_with_retries(&client, &config, &body).await {
+        if let Some(sink) = &event_sink {
+            sink.write(&AgentRequestEvent::started(
+                plan.agent_id,
+                invocation,
+                session_id.as_deref(),
+            ))
+            .await?;
+        }
+        let request_start = Instant::now();
+        match request_with_retries(&client, &config, &body, &agent_headers).await {
             Ok(result) => {
+                if let Some(sink) = &event_sink {
+                    sink.write(&AgentRequestEvent::completed(
+                        plan.agent_id,
+                        invocation,
+                        session_id.as_deref(),
+                        &result,
+                    ))
+                    .await?;
+                }
+                if config.barrier_after_invocation == Some(invocation) {
+                    invocation_barrier
+                        .as_mut()
+                        .expect("configured invocation barrier must exist")
+                        .wait()
+                        .await;
+                }
                 report.successful_requests += 1;
                 report.input_tokens = report.input_tokens.saturating_add(result.prompt_tokens);
                 report.output_tokens = report
@@ -579,6 +940,9 @@ async fn run_agent(
                         previous_prompt_tokens,
                         result.prompt_tokens,
                     ));
+                report.reported_cached_input_tokens = report
+                    .reported_cached_input_tokens
+                    .saturating_add(result.cached_tokens.unwrap_or_default());
                 previous_prompt_tokens = result.prompt_tokens;
                 report.latencies.push(result.latency);
 
@@ -598,11 +962,22 @@ async fn run_agent(
                 )?;
             }
             Err(err) => {
+                let error = err.to_string();
+                if let Some(sink) = &event_sink {
+                    sink.write(&AgentRequestEvent::failed(
+                        plan.agent_id,
+                        invocation,
+                        session_id.as_deref(),
+                        request_start.elapsed(),
+                        &error,
+                    ))
+                    .await?;
+                }
                 report.failed_requests += 1;
                 report.failures.push(AgentFailureRecord {
                     agent_id: plan.agent_id,
                     invocation,
-                    error: err.to_string(),
+                    error,
                 });
                 return Ok(report);
             }
@@ -653,6 +1028,12 @@ fn build_request_body(
         if let Some(prefix) = &config.user_prefix {
             map.insert("user".to_string(), json!(format!("{prefix}-{agent_id}")));
         }
+        if !config.nvext_extra_fields.is_empty() {
+            map.insert(
+                "nvext".to_string(),
+                json!({"extra_fields": &config.nvext_extra_fields}),
+            );
+        }
     }
     body
 }
@@ -669,12 +1050,13 @@ async fn request_with_retries(
     client: &Client,
     config: &AgentLoopConfig,
     body: &Value,
+    agent_headers: &HeaderMap,
 ) -> Result<RequestResult> {
     let start = Instant::now();
     let mut last_error = None;
 
     for attempt in 0..=config.max_retries {
-        match single_attempt(client, config, body).await {
+        match single_attempt(client, config, body, agent_headers).await {
             Ok(mut result) => {
                 result.latency = start.elapsed();
                 return Ok(result);
@@ -696,15 +1078,17 @@ async fn single_attempt(
     client: &Client,
     config: &AgentLoopConfig,
     body: &Value,
+    agent_headers: &HeaderMap,
 ) -> Result<RequestResult> {
     if config.verbose {
         println!("[AGENT REQUEST] {}", sanitize_request(body));
     }
 
-    let mut request = client.post(config.endpoint.clone());
-    for (name, value) in config.headers.iter() {
-        request = request.header(name, value);
+    let mut headers = config.headers.clone();
+    for (name, value) in agent_headers {
+        headers.insert(name.clone(), value.clone());
     }
+    let request = client.post(config.endpoint.clone()).headers(headers);
     let response = request.json(body).send().await?;
     let status = response.status();
     let bytes = response.bytes().await?;
@@ -720,6 +1104,10 @@ async fn single_attempt(
     if config.verbose {
         println!("[AGENT RESPONSE] {}", sanitize_response(&payload));
     }
+    parse_response_payload(&payload)
+}
+
+fn parse_response_payload(payload: &Value) -> Result<RequestResult> {
     let usage = payload
         .get("usage")
         .ok_or_else(|| anyhow!("response missing usage field"))?;
@@ -727,6 +1115,9 @@ async fn single_attempt(
         .get("prompt_tokens")
         .and_then(Value::as_u64)
         .ok_or_else(|| anyhow!("usage.prompt_tokens missing or not an integer"))?;
+    let cached_tokens = usage
+        .pointer("/prompt_tokens_details/cached_tokens")
+        .and_then(Value::as_u64);
     let completion_tokens = usage
         .get("completion_tokens")
         .and_then(Value::as_u64)
@@ -735,13 +1126,38 @@ async fn single_attempt(
         .pointer("/choices/0/message")
         .cloned()
         .ok_or_else(|| anyhow!("response missing choices[0].message"))?;
+    let worker_info = payload.pointer("/nvext/worker_id");
+    let worker_id = worker_info.and_then(|info| {
+        info.get("decode_worker_id")
+            .or_else(|| info.get("prefill_worker_id"))
+            .and_then(Value::as_u64)
+    });
+    let dp_rank = worker_info
+        .and_then(|info| {
+            info.get("decode_dp_rank")
+                .or_else(|| info.get("prefill_dp_rank"))
+                .and_then(Value::as_u64)
+        })
+        .and_then(|rank| u32::try_from(rank).ok());
 
     Ok(RequestResult {
         prompt_tokens,
+        cached_tokens,
         completion_tokens,
+        worker_id,
+        dp_rank,
         assistant_message,
         latency: Duration::ZERO,
     })
+}
+
+fn render_agent_headers(config: &AgentLoopConfig, agent_id: usize) -> Result<HeaderMap> {
+    let mut headers = HeaderMap::new();
+    for template in &config.agent_header_templates {
+        let (name, value) = template.render(agent_id)?;
+        headers.insert(name, value);
+    }
+    Ok(headers)
 }
 
 fn append_model_and_environment(
@@ -943,6 +1359,51 @@ mod tests {
     }
 
     #[test]
+    fn invocation_barrier_requires_a_reachable_fixed_turn() {
+        let fixed = AgentLoopConfig::try_new(
+            "http://localhost:8000/v1/chat/completions",
+            None,
+            "test-model",
+            2,
+            SampleSpec::fixed(8).unwrap(),
+            SampleSpec::fixed(4).unwrap(),
+            SampleSpec::fixed(6).unwrap(),
+            SampleSpec::fixed(5).unwrap(),
+        )
+        .unwrap();
+        assert!(fixed.clone().with_barrier_after_invocation(3).is_ok());
+        assert!(fixed.clone().with_barrier_after_invocation(0).is_err());
+        assert!(fixed.with_barrier_after_invocation(5).is_err());
+
+        let sampled = AgentLoopConfig::try_new(
+            "http://localhost:8000/v1/chat/completions",
+            None,
+            "test-model",
+            2,
+            SampleSpec::fixed(8).unwrap(),
+            SampleSpec::fixed(4).unwrap(),
+            SampleSpec::fixed(6).unwrap(),
+            SampleSpec::log_normal_from_median(5.0, 0.2, Some(10)).unwrap(),
+        )
+        .unwrap();
+        assert!(sampled.with_barrier_after_invocation(3).is_err());
+    }
+
+    #[tokio::test]
+    async fn invocation_barrier_unblocks_if_a_participant_drops() {
+        let barrier = InvocationBarrier::new(2);
+        let mut waiting = barrier.participant();
+        let abandoned = barrier.participant();
+        let task = tokio::spawn(async move { waiting.wait().await });
+        tokio::task::yield_now().await;
+        drop(abandoned);
+        tokio::time::timeout(Duration::from_secs(1), task)
+            .await
+            .expect("cancelled barrier did not release")
+            .unwrap();
+    }
+
+    #[test]
     fn lognormal_samples_are_seeded_and_capped() {
         let spec = SampleSpec::log_normal_from_median(100.0, 0.9, Some(40)).unwrap();
         let mut first = rand::rngs::StdRng::seed_from_u64(9);
@@ -1066,5 +1527,102 @@ mod tests {
 
         let body = build_request_body(&config, &messages, 5, 1);
         assert_eq!(body["user"], Value::String("loadtest-1".to_string()));
+    }
+
+    #[test]
+    fn agent_header_template_renders_a_distinct_session_per_agent() {
+        let config = AgentLoopConfig::try_new(
+            "http://localhost:8000/v1/chat/completions",
+            None,
+            "test-model",
+            2,
+            SampleSpec::fixed(8).unwrap(),
+            SampleSpec::fixed(4).unwrap(),
+            SampleSpec::fixed(6).unwrap(),
+            SampleSpec::fixed(2).unwrap(),
+        )
+        .unwrap()
+        .add_agent_header_template(
+            AgentHeaderTemplate::try_new(DYNAMO_SESSION_HEADER, "scale-agent-{agent_id}").unwrap(),
+        )
+        .unwrap();
+
+        let first = render_agent_headers(&config, 0).unwrap();
+        let second = render_agent_headers(&config, 19).unwrap();
+        assert_eq!(first.get(DYNAMO_SESSION_HEADER).unwrap(), "scale-agent-0");
+        assert_eq!(second.get(DYNAMO_SESSION_HEADER).unwrap(), "scale-agent-19");
+    }
+
+    #[test]
+    fn agent_header_template_requires_placeholder_and_unique_name() {
+        assert!(AgentHeaderTemplate::try_new(DYNAMO_SESSION_HEADER, "one-session").is_err());
+
+        let template = AgentHeaderTemplate::try_new("x-test-agent", "agent-{agent_id}").unwrap();
+        let config = AgentLoopConfig::try_new(
+            "http://localhost:8000/v1/chat/completions",
+            None,
+            "test-model",
+            1,
+            SampleSpec::fixed(8).unwrap(),
+            SampleSpec::fixed(4).unwrap(),
+            SampleSpec::fixed(6).unwrap(),
+            SampleSpec::fixed(2).unwrap(),
+        )
+        .unwrap()
+        .add_agent_header_template(template.clone())
+        .unwrap();
+        assert!(config.add_agent_header_template(template).is_err());
+    }
+
+    #[test]
+    fn request_body_can_request_dynamo_routing_metadata() {
+        let config = AgentLoopConfig::try_new(
+            "http://localhost:8000/v1/chat/completions",
+            None,
+            "test-model",
+            1,
+            SampleSpec::fixed(8).unwrap(),
+            SampleSpec::fixed(4).unwrap(),
+            SampleSpec::fixed(6).unwrap(),
+            SampleSpec::fixed(2).unwrap(),
+        )
+        .unwrap()
+        .with_nvext_extra_fields(vec!["worker_id".to_string()])
+        .unwrap();
+
+        let body = build_request_body(
+            &config,
+            &[json!({"role": "user", "content": "start"})],
+            5,
+            0,
+        );
+        assert_eq!(body["nvext"]["extra_fields"], json!(["worker_id"]));
+    }
+
+    #[test]
+    fn response_parser_extracts_cache_and_dynamo_target_metadata() {
+        let result = parse_response_payload(&json!({
+            "usage": {
+                "prompt_tokens": 120,
+                "completion_tokens": 8,
+                "prompt_tokens_details": {"cached_tokens": 96}
+            },
+            "choices": [{"message": {"role": "assistant", "content": "ok"}}],
+            "nvext": {
+                "worker_id": {
+                    "prefill_worker_id": 7,
+                    "prefill_dp_rank": 0,
+                    "decode_worker_id": 8,
+                    "decode_dp_rank": 1
+                }
+            }
+        }))
+        .unwrap();
+
+        assert_eq!(result.prompt_tokens, 120);
+        assert_eq!(result.cached_tokens, Some(96));
+        assert_eq!(result.completion_tokens, 8);
+        assert_eq!(result.worker_id, Some(8));
+        assert_eq!(result.dp_rank, Some(1));
     }
 }
