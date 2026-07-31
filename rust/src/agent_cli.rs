@@ -83,6 +83,10 @@ struct Args {
     #[arg(long)]
     temperature: Option<f64>,
 
+    /// Send only the sampled maximum output-token limit, without a matching minimum
+    #[arg(long)]
+    max_tokens_only: bool,
+
     /// Fixed synthetic environment response length (default: 64)
     #[arg(long, alias = "environment-response-tokens")]
     environment_tokens: Option<usize>,
@@ -244,6 +248,7 @@ struct CsvResult {
     tool_call_latency_lognorm_sigma: Option<f64>,
     tool_call_latency_lognorm_max_ms: Option<usize>,
     temperature: Option<f64>,
+    max_tokens_only: bool,
 }
 
 enum ParsedArgs {
@@ -376,6 +381,14 @@ async fn run(args: Args) -> Result<()> {
             .map_or_else(|| "backend default".to_string(), |value| value.to_string())
     );
     println!(
+        "Output length constraint: {}",
+        if args.max_tokens_only {
+            "maximum only"
+        } else {
+            "exact (minimum equals maximum)"
+        }
+    );
+    println!(
         "Environment response: {}",
         describe_spec(&environment_tokens)
     );
@@ -411,6 +424,7 @@ async fn run(args: Args) -> Result<()> {
     .with_request_timeout(Duration::from_secs(args.request_timeout_secs))
     .with_retry(args.max_retries, Duration::from_millis(args.retry_delay_ms))
     .with_sglang(args.sglang)
+    .with_max_tokens_only(args.max_tokens_only)
     .with_verbose(args.verbose)
     .with_dry_run(args.dry_run);
     if let Some(temperature) = args.temperature {
@@ -474,6 +488,7 @@ async fn run(args: Args) -> Result<()> {
             tool_call_latency_lognorm_sigma: args.tool_call_latency_lognorm_sigma,
             tool_call_latency_lognorm_max_ms: args.tool_call_latency_lognorm_max_ms,
             temperature: args.temperature,
+            max_tokens_only: args.max_tokens_only,
         };
         write_results_csv(csv_path, &record)?;
         println!("Wrote agent benchmark summary to {}", csv_path.display());

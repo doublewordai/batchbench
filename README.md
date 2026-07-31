@@ -158,7 +158,9 @@ independent between agents and turns; `--seed` makes the sampled workload
 reproducible. `--tokenizer-model` can be supplied when the endpoint's model name is
 not also a Hugging Face tokenizer identifier. `--temperature` sends an explicit
 OpenAI sampling temperature with every request; use `--temperature 0` for a
-deterministic routing or cache experiment.
+deterministic routing or cache experiment. By default, the sampled output length
+is sent as both the minimum and maximum; `--max-tokens-only` omits the minimum,
+which is appropriate when a tool-call grammar may finish before that limit.
 
 Tool-call latency defaults to zero. Set a fixed delay with
 `--tool-call-latency-ms`, or sample milliseconds independently for every invocation

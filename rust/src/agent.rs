@@ -161,6 +161,7 @@ pub struct AgentLoopConfig {
     pub tool_invocations: SampleSpec,
     pub tool_call_latency_ms: Option<SampleSpec>,
     pub temperature: Option<f64>,
+    pub max_tokens_only: bool,
     pub user_prefix: Option<String>,
     pub agent_header_templates: Vec<AgentHeaderTemplate>,
     pub nvext_extra_fields: Vec<String>,
@@ -224,6 +225,7 @@ impl AgentLoopConfig {
             tool_invocations,
             tool_call_latency_ms: None,
             temperature: None,
+            max_tokens_only: false,
             user_prefix: None,
             agent_header_templates: Vec::new(),
             nvext_extra_fields: Vec::new(),
@@ -251,6 +253,11 @@ impl AgentLoopConfig {
         }
         self.temperature = Some(temperature);
         Ok(self)
+    }
+
+    pub fn with_max_tokens_only(mut self, enabled: bool) -> Self {
+        self.max_tokens_only = enabled;
+        self
     }
 
     pub fn with_request_timeout(mut self, timeout: Duration) -> Self {
@@ -1034,7 +1041,9 @@ fn build_request_body(
     let (max_key, min_key) = output_token_field_names(config.sglang);
     if let Some(map) = body.as_object_mut() {
         map.insert(max_key.to_string(), json!(output_tokens));
-        map.insert(min_key.to_string(), json!(output_tokens));
+        if !config.max_tokens_only {
+            map.insert(min_key.to_string(), json!(output_tokens));
+        }
         if let Some(prefix) = &config.user_prefix {
             map.insert("user".to_string(), json!(format!("{prefix}-{agent_id}")));
         }
@@ -1546,6 +1555,31 @@ mod tests {
             0,
         );
         assert_eq!(body["temperature"], 0.0);
+    }
+
+    #[test]
+    fn request_body_can_omit_the_minimum_output_limit() {
+        let config = AgentLoopConfig::try_new(
+            "http://localhost:8000/v1/chat/completions",
+            None,
+            "test-model",
+            1,
+            SampleSpec::fixed(8).unwrap(),
+            SampleSpec::fixed(4).unwrap(),
+            SampleSpec::fixed(6).unwrap(),
+            SampleSpec::fixed(2).unwrap(),
+        )
+        .unwrap()
+        .with_max_tokens_only(true);
+
+        let body = build_request_body(
+            &config,
+            &[json!({"role": "user", "content": "start"})],
+            5,
+            0,
+        );
+        assert_eq!(body["max_tokens"], 5);
+        assert!(body.get("min_tokens").is_none());
     }
 
     #[test]
