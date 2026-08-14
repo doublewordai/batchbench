@@ -134,6 +134,11 @@ independent between agents and turns; `--seed` makes the sampled workload
 reproducible. `--tokenizer-model` can be supplied when the endpoint's model name is
 not also a Hugging Face tokenizer identifier.
 
+Every request includes a `user` field containing a UUID that remains stable for the
+life of that agent and differs between agents. Use `--disable-user-tagging` to omit
+the field, or `--user-prefix <prefix>` to use deterministic
+`<prefix>-<agent_id>` values instead of UUIDs.
+
 Tool-call latency defaults to zero. Set a fixed delay with
 `--tool-call-latency-ms`, or sample milliseconds independently for every invocation
 with `--tool-call-latency-lognorm-median-ms` (or
@@ -142,18 +147,25 @@ optional `--tool-call-latency-lognorm-max-ms`. After a model response succeeds, 
 agent sleeps for the sampled duration before making the environment result
 available and submitting its next model request.
 
-One tool invocation means one model request followed by one synthetic environment
-response. The benchmark asks the model for an `environment` tool call and preserves
-the returned assistant message in history. If an endpoint returns plain assistant
-content instead, BatchBench wraps it in a valid synthetic tool call before appending
-the environment response so the loop can continue.
+One tool invocation means one unconstrained model request followed by one synthetic
+environment response. BatchBench treats generated assistant output as opaque state:
+it preserves content and reasoning output but ignores any model-generated tool calls.
+It then adds its own valid synthetic `environment` tool call and appends the sampled
+environment response. This keeps the trajectory protocol-valid without assuming
+anything about the generated output.
 
 The final report includes:
 
 - total input tokens sent, from successful responses' `usage.prompt_tokens`;
 - total output tokens generated, from `usage.completion_tokens`;
 - estimated cached input tokens under perfect prefix caching;
-- total simulated tool-call latency across all agents.
+- total simulated tool-call latency across all agents;
+- request-latency p50, p90, and p99 across successful requests;
+- end-to-end p50, p90, and p99 across completed agents, measured from the start
+  of each agent loop through its final synthetic tool delay.
+
+Failed agents are excluded from the end-to-end latency distribution because their
+lifetimes end early. Their request failures are still included in the failure report.
 
 For each successful request after an agent's first, the cache estimate adds that
 same agent's preceding prompt-token count (capped by the current prompt count).

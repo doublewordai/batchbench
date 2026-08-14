@@ -172,6 +172,14 @@ struct Args {
     #[arg(long)]
     sglang: bool,
 
+    /// Ignore EOS so generation continues to the configured output-token limit
+    #[arg(long)]
+    ignore_eos: bool,
+
+    /// Omit the persistent per-agent value from the request's user field
+    #[arg(long)]
+    disable_user_tagging: bool,
+
     /// Print truncated request and response payloads
     #[arg(long, short)]
     verbose: bool,
@@ -210,9 +218,14 @@ struct CsvResult {
     latency_p50_ms: Option<f64>,
     latency_p90_ms: Option<f64>,
     latency_p99_ms: Option<f64>,
+    agent_end_to_end_latency_p50_ms: Option<f64>,
+    agent_end_to_end_latency_p90_ms: Option<f64>,
+    agent_end_to_end_latency_p99_ms: Option<f64>,
     host: String,
     endpoint: String,
     sglang: bool,
+    ignore_eos: bool,
+    user_tagging: bool,
     seed: Option<u64>,
     tool_call_latency_ms: Option<usize>,
     tool_call_latency_lognorm_mu: Option<f64>,
@@ -359,6 +372,15 @@ async fn run(args: Args) -> Result<()> {
             "default (min_tokens/max_tokens)"
         }
     );
+    println!("Ignore EOS: {}", args.ignore_eos);
+    println!(
+        "Per-agent user tagging: {}",
+        if args.disable_user_tagging {
+            "disabled"
+        } else {
+            "enabled"
+        }
+    );
     println!("==========================================\n");
 
     let mut config = AgentLoopConfig::try_new(
@@ -375,6 +397,8 @@ async fn run(args: Args) -> Result<()> {
     .with_request_timeout(Duration::from_secs(args.request_timeout_secs))
     .with_retry(args.max_retries, Duration::from_millis(args.retry_delay_ms))
     .with_sglang(args.sglang)
+    .with_ignore_eos(args.ignore_eos)
+    .with_user_tagging(!args.disable_user_tagging)
     .with_verbose(args.verbose)
     .with_dry_run(args.dry_run);
     if let Some(tool_call_latency_ms) = tool_call_latency_ms {
@@ -412,9 +436,14 @@ async fn run(args: Args) -> Result<()> {
             latency_p50_ms: milliseconds(report.latency_p50),
             latency_p90_ms: milliseconds(report.latency_p90),
             latency_p99_ms: milliseconds(report.latency_p99),
+            agent_end_to_end_latency_p50_ms: milliseconds(report.agent_end_to_end_latency_p50),
+            agent_end_to_end_latency_p90_ms: milliseconds(report.agent_end_to_end_latency_p90),
+            agent_end_to_end_latency_p99_ms: milliseconds(report.agent_end_to_end_latency_p99),
             host: args.host,
             endpoint,
             sglang: args.sglang,
+            ignore_eos: args.ignore_eos,
+            user_tagging: !args.disable_user_tagging,
             seed: args.seed,
             tool_call_latency_ms: args.tool_call_latency_ms,
             tool_call_latency_lognorm_mu: args.tool_call_latency_lognorm_mu,
@@ -613,10 +642,16 @@ fn print_summary(report: &AgentBenchmarkReport) {
         report.requests_per_second
     );
     println!(
-        "Latency (ms): p50={} p90={} p99={}",
+        "Request latency (ms): p50={} p90={} p99={}",
         format_latency(report.latency_p50),
         format_latency(report.latency_p90),
         format_latency(report.latency_p99)
+    );
+    println!(
+        "Agent end-to-end latency (ms, completed agents): p50={} p90={} p99={}",
+        format_latency(report.agent_end_to_end_latency_p50),
+        format_latency(report.agent_end_to_end_latency_p90),
+        format_latency(report.agent_end_to_end_latency_p99)
     );
     for failure in &report.failures {
         println!(
