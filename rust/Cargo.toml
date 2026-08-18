@@ -25,4 +25,5 @@ rand_distr = "0.4"
 chrono = { version = "0.4", features = ["serde"] }
 csv = "1"
 tokenizers = { version = "0.22.2", features = ["http"] }
+uuid = { version = "1", features = ["v4"] }
 pyo3 = { version = "0.22.6", features = ["extension-module", "abi3-py39"], optional = true }

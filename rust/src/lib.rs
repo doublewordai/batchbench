@@ -7,6 +7,7 @@ mod generator;
 mod py_bindings;
 mod report;
 mod runner;
+mod tokenizer_loader;
 
 pub use agent::{
     run_agent_benchmark, AgentBenchmarkReport, AgentFailureRecord, AgentLoopConfig, SampleSpec,

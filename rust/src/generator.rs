@@ -2,9 +2,9 @@ use anyhow::{anyhow, Context, Result};
 use rand::prelude::*;
 use rand::SeedableRng;
 use rand_distr::LogNormal;
-use tokenizers::Tokenizer;
 
 use crate::config::RequestEntry;
+use crate::tokenizer_loader::load_tokenizer;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum DistMode {
@@ -45,8 +45,7 @@ pub fn generate_requests(opts: &GenerateOptions, model: &str) -> Result<Vec<Requ
             .context("failed to initialize rng from thread_rng")?,
     };
 
-    let tokenizer = Tokenizer::from_pretrained(&opts.tokenizer_model, None)
-        .map_err(|e| anyhow!("failed to load tokenizer {}: {}", opts.tokenizer_model, e))?;
+    let tokenizer = load_tokenizer(&opts.tokenizer_model)?;
 
     // Sample sequence lengths
     let mut sequence_lengths: Vec<usize> = Vec::with_capacity(opts.count);

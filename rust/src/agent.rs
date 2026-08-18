@@ -8,6 +8,11 @@ use reqwest::{Client, Url};
 use serde_json::{json, Map, Value};
 use tokenizers::Tokenizer;
 use tokio::task::JoinSet;
+use uuid::Uuid;
+
+use crate::tokenizer_loader::load_tokenizer;
+
+const SMG_ROUTING_KEY: HeaderName = HeaderName::from_static("x-smg-routing-key");
 
 /// A fixed value or a value independently sampled from a log-normal distribution.
 #[derive(Clone, Debug)]
@@ -118,6 +123,8 @@ pub struct AgentLoopConfig {
     pub verbose: bool,
     pub dry_run: bool,
     pub sglang: bool,
+    pub ignore_eos: bool,
+    pub user_tagging: bool,
     pub seed: Option<u64>,
 }
 
@@ -176,6 +183,8 @@ impl AgentLoopConfig {
             verbose: false,
             dry_run: false,
             sglang: false,
+            ignore_eos: false,
+            user_tagging: true,
             seed: None,
         })
     }
@@ -215,6 +224,16 @@ impl AgentLoopConfig {
         self
     }
 
+    pub fn with_ignore_eos(mut self, ignore_eos: bool) -> Self {
+        self.ignore_eos = ignore_eos;
+        self
+    }
+
+    pub fn with_user_tagging(mut self, user_tagging: bool) -> Self {
+        self.user_tagging = user_tagging;
+        self
+    }
+
     pub fn with_seed(mut self, seed: u64) -> Self {
         self.seed = Some(seed);
         self
@@ -248,6 +267,7 @@ struct AgentTurnPlan {
 #[derive(Clone, Debug)]
 struct AgentPlan {
     agent_id: usize,
+    user_tag: Option<String>,
     initial_prompt_tokens: usize,
     initial_prompt: String,
     turns: Vec<AgentTurnPlan>,
@@ -279,12 +299,16 @@ pub struct AgentBenchmarkReport {
     pub latency_p50: Option<Duration>,
     pub latency_p90: Option<Duration>,
     pub latency_p99: Option<Duration>,
+    pub agent_end_to_end_latency_p50: Option<Duration>,
+    pub agent_end_to_end_latency_p90: Option<Duration>,
+    pub agent_end_to_end_latency_p99: Option<Duration>,
     pub failures: Vec<AgentFailureRecord>,
 }
 
 #[derive(Debug)]
 struct AgentWorkerReport {
     completed: bool,
+    end_to_end_latency: Duration,
     successful_requests: u64,
     failed_requests: u64,
     input_tokens: u64,
@@ -300,6 +324,7 @@ impl AgentWorkerReport {
     fn new() -> Self {
         Self {
             completed: false,
+            end_to_end_latency: Duration::ZERO,
             successful_requests: 0,
             failed_requests: 0,
             input_tokens: 0,
@@ -367,6 +392,7 @@ pub async fn run_agent_benchmark(config: AgentLoopConfig) -> Result<AgentBenchma
     let mut estimated_cached_input_tokens = 0u64;
     let mut total_tool_call_latency = Duration::ZERO;
     let mut latencies = Vec::new();
+    let mut agent_end_to_end_latencies = Vec::new();
     let mut failures = Vec::new();
     let mut dry_run_records = Vec::new();
 
@@ -374,6 +400,7 @@ pub async fn run_agent_benchmark(config: AgentLoopConfig) -> Result<AgentBenchma
         let worker = joined.map_err(|err| anyhow!("agent worker task failed: {}", err))??;
         if worker.completed {
             completed_agents += 1;
+            agent_end_to_end_latencies.push(worker.end_to_end_latency);
         }
         successful_requests = successful_requests.saturating_add(worker.successful_requests);
         failed_requests = failed_requests.saturating_add(worker.failed_requests);
@@ -404,6 +431,7 @@ pub async fn run_agent_benchmark(config: AgentLoopConfig) -> Result<AgentBenchma
 
     let total_duration = start.elapsed();
     latencies.sort();
+    agent_end_to_end_latencies.sort();
     failures.sort_by_key(|failure| (failure.agent_id, failure.invocation));
     let total_requests = successful_requests.saturating_add(failed_requests);
     let duration_secs = total_duration.as_secs_f64();
@@ -426,18 +454,15 @@ pub async fn run_agent_benchmark(config: AgentLoopConfig) -> Result<AgentBenchma
         latency_p50: percentile(&latencies, 0.50),
         latency_p90: percentile(&latencies, 0.90),
         latency_p99: percentile(&latencies, 0.99),
+        agent_end_to_end_latency_p50: percentile(&agent_end_to_end_latencies, 0.50),
+        agent_end_to_end_latency_p90: percentile(&agent_end_to_end_latencies, 0.90),
+        agent_end_to_end_latency_p99: percentile(&agent_end_to_end_latencies, 0.99),
         failures,
     })
 }
 
 fn build_agent_plans(config: &AgentLoopConfig) -> Result<Vec<AgentPlan>> {
-    let tokenizer = Tokenizer::from_pretrained(&config.tokenizer_model, None).map_err(|err| {
-        anyhow!(
-            "failed to load tokenizer {}: {}",
-            config.tokenizer_model,
-            err
-        )
-    })?;
+    let tokenizer = load_tokenizer(&config.tokenizer_model)?;
     let root_seed = match config.seed {
         Some(seed) => seed,
         None => rand::thread_rng().gen(),
@@ -485,6 +510,11 @@ fn build_agent_plans(config: &AgentLoopConfig) -> Result<Vec<AgentPlan>> {
 
         plans.push(AgentPlan {
             agent_id,
+            user_tag: generate_user_tag(
+                config.user_tagging,
+                config.user_prefix.as_deref(),
+                agent_id,
+            ),
             initial_prompt_tokens,
             initial_prompt,
             turns,
@@ -533,6 +563,7 @@ async fn run_agent(
     client: Client,
     config: std::sync::Arc<AgentLoopConfig>,
 ) -> Result<AgentWorkerReport> {
+    let agent_start = Instant::now();
     let mut report = AgentWorkerReport::new();
     let mut messages = vec![json!({
         "role": "user",
@@ -565,8 +596,13 @@ async fn run_agent(
             continue;
         }
 
-        let body = build_request_body(&config, &messages, turn.output_tokens, plan.agent_id);
-        match request_with_retries(&client, &config, &body).await {
+        let body = build_request_body(
+            &config,
+            &messages,
+            turn.output_tokens,
+            plan.user_tag.as_deref(),
+        );
+        match request_with_retries(&client, &config, &body, plan.user_tag.as_deref()).await {
             Ok(result) => {
                 report.successful_requests += 1;
                 report.input_tokens = report.input_tokens.saturating_add(result.prompt_tokens);
@@ -604,54 +640,44 @@ async fn run_agent(
                     invocation,
                     error: err.to_string(),
                 });
+                report.end_to_end_latency = agent_start.elapsed();
                 return Ok(report);
             }
         }
     }
 
     report.completed = true;
+    report.end_to_end_latency = agent_start.elapsed();
     Ok(report)
+}
+
+fn generate_user_tag(enabled: bool, prefix: Option<&str>, agent_id: usize) -> Option<String> {
+    enabled.then(|| match prefix {
+        Some(prefix) => format!("{prefix}-{agent_id}"),
+        None => Uuid::new_v4().to_string(),
+    })
 }
 
 fn build_request_body(
     config: &AgentLoopConfig,
     messages: &[Value],
     output_tokens: usize,
-    agent_id: usize,
+    user_tag: Option<&str>,
 ) -> Value {
     let mut body = json!({
         "model": config.model,
-        "messages": messages,
-        "tools": [{
-            "type": "function",
-            "function": {
-                "name": "environment",
-                "description": "Interact with the benchmark's synthetic environment.",
-                "parameters": {
-                    "type": "object",
-                    "properties": {
-                        "request": {
-                            "type": "string",
-                            "description": "The environment operation to perform."
-                        }
-                    },
-                    "required": ["request"]
-                }
-            }
-        }],
-        "tool_choice": {
-            "type": "function",
-            "function": {"name": "environment"}
-        },
-        "parallel_tool_calls": false
+        "messages": messages
     });
 
     let (max_key, min_key) = output_token_field_names(config.sglang);
     if let Some(map) = body.as_object_mut() {
         map.insert(max_key.to_string(), json!(output_tokens));
         map.insert(min_key.to_string(), json!(output_tokens));
-        if let Some(prefix) = &config.user_prefix {
-            map.insert("user".to_string(), json!(format!("{prefix}-{agent_id}")));
+        if config.ignore_eos {
+            map.insert("ignore_eos".to_string(), json!(true));
+        }
+        if let Some(user_tag) = user_tag {
+            map.insert("user".to_string(), json!(user_tag));
         }
     }
     body
@@ -669,12 +695,13 @@ async fn request_with_retries(
     client: &Client,
     config: &AgentLoopConfig,
     body: &Value,
+    user_tag: Option<&str>,
 ) -> Result<RequestResult> {
     let start = Instant::now();
     let mut last_error = None;
 
     for attempt in 0..=config.max_retries {
-        match single_attempt(client, config, body).await {
+        match single_attempt(client, config, body, user_tag).await {
             Ok(mut result) => {
                 result.latency = start.elapsed();
                 return Ok(result);
@@ -696,15 +723,15 @@ async fn single_attempt(
     client: &Client,
     config: &AgentLoopConfig,
     body: &Value,
+    user_tag: Option<&str>,
 ) -> Result<RequestResult> {
     if config.verbose {
         println!("[AGENT REQUEST] {}", sanitize_request(body));
     }
 
-    let mut request = client.post(config.endpoint.clone());
-    for (name, value) in config.headers.iter() {
-        request = request.header(name, value);
-    }
+    let request = client
+        .post(config.endpoint.clone())
+        .headers(build_request_headers(config, user_tag)?);
     let response = request.json(body).send().await?;
     let status = response.status();
     let bytes = response.bytes().await?;
@@ -744,6 +771,16 @@ async fn single_attempt(
     })
 }
 
+fn build_request_headers(config: &AgentLoopConfig, user_tag: Option<&str>) -> Result<HeaderMap> {
+    let mut headers = config.headers.clone();
+    if let Some(user_tag) = user_tag {
+        let value = HeaderValue::from_str(user_tag)
+            .context("failed to build X-SMG-Routing-Key header from user tag")?;
+        headers.insert(SMG_ROUTING_KEY, value);
+    }
+    Ok(headers)
+}
+
 fn append_model_and_environment(
     messages: &mut Vec<Value>,
     assistant_message: Value,
@@ -752,43 +789,26 @@ fn append_model_and_environment(
     environment_content: &str,
 ) -> Result<()> {
     let mut assistant = normalize_assistant_message(assistant_message)?;
-    let mut tool_call_ids = assistant
-        .get("tool_calls")
-        .and_then(Value::as_array)
-        .map(|calls| {
-            calls
-                .iter()
-                .filter_map(|call| call.get("id").and_then(Value::as_str))
-                .map(str::to_string)
-                .collect::<Vec<_>>()
-        })
-        .unwrap_or_default();
-
-    if tool_call_ids.is_empty() {
-        let tool_call_id = synthetic_tool_call_id(agent_id, invocation);
-        let tool_call = json!({
-            "id": tool_call_id,
-            "type": "function",
-            "function": {
-                "name": "environment",
-                "arguments": "{\"request\":\"continue\"}"
-            }
-        });
-        assistant
-            .as_object_mut()
-            .ok_or_else(|| anyhow!("normalized assistant message is not an object"))?
-            .insert("tool_calls".to_string(), json!([tool_call]));
-        tool_call_ids.push(synthetic_tool_call_id(agent_id, invocation));
-    }
+    let tool_call_id = synthetic_tool_call_id(agent_id, invocation);
+    let tool_call = json!({
+        "id": tool_call_id,
+        "type": "function",
+        "function": {
+            "name": "environment",
+            "arguments": "{\"request\":\"continue\"}"
+        }
+    });
+    assistant
+        .as_object_mut()
+        .ok_or_else(|| anyhow!("normalized assistant message is not an object"))?
+        .insert("tool_calls".to_string(), json!([tool_call]));
 
     messages.push(assistant);
-    for (index, tool_call_id) in tool_call_ids.into_iter().enumerate() {
-        messages.push(json!({
-            "role": "tool",
-            "tool_call_id": tool_call_id,
-            "content": if index == 0 { environment_content } else { "" },
-        }));
-    }
+    messages.push(json!({
+        "role": "tool",
+        "tool_call_id": tool_call_id,
+        "content": environment_content,
+    }));
     Ok(())
 }
 
@@ -825,12 +845,14 @@ fn normalize_assistant_message(message: Value) -> Result<Value> {
         .ok_or_else(|| anyhow!("choices[0].message is not an object"))?;
     let mut normalized = Map::new();
     normalized.insert("role".to_string(), Value::String("assistant".to_string()));
-    for key in ["content", "name", "tool_calls", "function_call", "refusal"] {
+    // Treat generated output as opaque assistant state. Provider-generated tool calls are
+    // deliberately discarded; BatchBench adds its own valid synthetic tool-call envelope.
+    for key in ["content", "reasoning_content", "name", "refusal"] {
         if let Some(value) = source.get(key) {
             normalized.insert(key.to_string(), value.clone());
         }
     }
-    if !normalized.contains_key("content") && !normalized.contains_key("tool_calls") {
+    if !normalized.contains_key("content") {
         normalized.insert("content".to_string(), Value::Null);
     }
     Ok(Value::Object(normalized))
@@ -960,7 +982,7 @@ mod tests {
     }
 
     #[test]
-    fn appended_turn_preserves_model_message_and_adds_tool_result() {
+    fn appended_turn_preserves_output_but_replaces_model_tool_calls() {
         let mut messages = vec![json!({"role": "user", "content": "start"})];
         let assistant = json!({
             "role": "assistant",
@@ -968,17 +990,25 @@ mod tests {
             "tool_calls": [{
                 "id": "call_123",
                 "type": "function",
-                "function": {"name": "environment", "arguments": "{\"request\":\"x\"}"}
+                "function": {"name": "unexpected", "arguments": "{\"unterminated\":"}
             }],
             "reasoning_content": "server-specific field"
         });
         append_model_and_environment(&mut messages, assistant, 0, 1, "result").unwrap();
 
         assert_eq!(messages.len(), 3);
-        assert_eq!(messages[1]["tool_calls"][0]["id"], "call_123");
-        assert!(messages[1].get("reasoning_content").is_none());
+        assert_eq!(messages[1]["tool_calls"][0]["id"], "call_batchbench_0_1");
+        assert_eq!(
+            messages[1]["tool_calls"][0]["function"]["arguments"],
+            "{\"request\":\"continue\"}"
+        );
+        assert_eq!(
+            messages[1]["tool_calls"][0]["function"]["name"],
+            "environment"
+        );
+        assert_eq!(messages[1]["reasoning_content"], "server-specific field");
         assert_eq!(messages[2]["role"], "tool");
-        assert_eq!(messages[2]["tool_call_id"], "call_123");
+        assert_eq!(messages[2]["tool_call_id"], "call_batchbench_0_1");
         assert_eq!(messages[2]["content"], "result");
     }
 
@@ -1037,34 +1067,105 @@ mod tests {
             json!({"role": "tool", "tool_call_id": "call_1", "content": "result"}),
         ];
 
-        let body = build_request_body(&config, &messages, 17, 0);
+        let body = build_request_body(&config, &messages, 17, Some("agent-user-tag"));
         assert_eq!(body["messages"], json!(messages));
         assert_eq!(body["max_tokens"], 17);
         assert_eq!(body["min_tokens"], 17);
-        assert_eq!(
-            body["tool_choice"]["function"]["name"],
-            Value::String("environment".to_string())
-        );
-        assert!(body.get("user").is_none());
+        assert_eq!(body["user"], "agent-user-tag");
+        assert!(body.get("tools").is_none());
+        assert!(body.get("tool_choice").is_none());
     }
 
     #[test]
-    fn user_prefix_stamps_a_per_agent_user_field() {
+    fn user_tags_are_uuid_v4_values_and_can_be_disabled() {
+        let first = generate_user_tag(true, None, 0).unwrap();
+        let second = generate_user_tag(true, None, 1).unwrap();
+        assert_ne!(first, second);
+        assert_eq!(Uuid::parse_str(&first).unwrap().get_version_num(), 4);
+        assert_eq!(generate_user_tag(false, None, 0), None);
+    }
+
+    #[test]
+    fn user_prefix_stamps_a_deterministic_per_agent_user_field() {
+        assert_eq!(
+            generate_user_tag(true, Some("loadtest"), 1).as_deref(),
+            Some("loadtest-1")
+        );
+        assert_eq!(generate_user_tag(false, Some("loadtest"), 1), None);
+    }
+
+    #[test]
+    fn user_tag_stamps_the_same_per_agent_routing_header() {
         let config = AgentLoopConfig::try_new(
             "http://localhost:8000/v1/chat/completions",
             None,
             "test-model",
-            2,
+            1,
+            SampleSpec::fixed(8).unwrap(),
+            SampleSpec::fixed(4).unwrap(),
+            SampleSpec::fixed(6).unwrap(),
+            SampleSpec::fixed(2).unwrap(),
+        )
+        .unwrap();
+        let user_tag = generate_user_tag(true, Some("user"), 123).unwrap();
+        let headers = build_request_headers(&config, Some(&user_tag)).unwrap();
+
+        assert_eq!(user_tag, "user-123");
+        assert_eq!(headers.get(SMG_ROUTING_KEY).unwrap(), user_tag.as_str());
+    }
+
+    #[test]
+    fn routing_header_is_omitted_when_user_tagging_is_disabled() {
+        let config = AgentLoopConfig::try_new(
+            "http://localhost:8000/v1/chat/completions",
+            None,
+            "test-model",
+            1,
+            SampleSpec::fixed(8).unwrap(),
+            SampleSpec::fixed(4).unwrap(),
+            SampleSpec::fixed(6).unwrap(),
+            SampleSpec::fixed(2).unwrap(),
+        )
+        .unwrap();
+        let headers = build_request_headers(&config, None).unwrap();
+
+        assert!(!headers.contains_key(SMG_ROUTING_KEY));
+    }
+
+    #[test]
+    fn request_body_omits_disabled_user_tag() {
+        let config = AgentLoopConfig::try_new(
+            "http://localhost:8000/v1/chat/completions",
+            None,
+            "test-model",
+            1,
+            SampleSpec::fixed(8).unwrap(),
+            SampleSpec::fixed(4).unwrap(),
+            SampleSpec::fixed(6).unwrap(),
+            SampleSpec::fixed(2).unwrap(),
+        )
+        .unwrap();
+        let messages = vec![json!({"role": "user", "content": "start"})];
+        let body = build_request_body(&config, &messages, 4, None);
+        assert!(body.get("user").is_none());
+    }
+
+    #[test]
+    fn request_body_can_force_generation_past_eos() {
+        let config = AgentLoopConfig::try_new(
+            "http://localhost:8000/v1/chat/completions",
+            None,
+            "test-model",
+            1,
             SampleSpec::fixed(8).unwrap(),
             SampleSpec::fixed(4).unwrap(),
             SampleSpec::fixed(6).unwrap(),
             SampleSpec::fixed(2).unwrap(),
         )
         .unwrap()
-        .with_user_prefix("loadtest");
+        .with_ignore_eos(true);
         let messages = vec![json!({"role": "user", "content": "start"})];
-
-        let body = build_request_body(&config, &messages, 5, 1);
-        assert_eq!(body["user"], Value::String("loadtest-1".to_string()));
+        let body = build_request_body(&config, &messages, 4, None);
+        assert_eq!(body["ignore_eos"], true);
     }
 }
