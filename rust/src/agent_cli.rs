@@ -143,8 +143,8 @@ struct Args {
     )]
     tool_call_latency_lognorm_max_ms: Option<usize>,
 
-    /// Stamp each request with an OpenAI `user` field of "<prefix>-<agent_id>",
-    /// so gateways and routers can key session-sticky routing per agent
+    /// Stamp each request's OpenAI `user` field and X-SMG-Routing-Key header
+    /// with "<prefix>-<agent_id>" for session-sticky routing per agent
     #[arg(long)]
     user_prefix: Option<String>,
 
@@ -176,7 +176,7 @@ struct Args {
     #[arg(long)]
     ignore_eos: bool,
 
-    /// Omit the persistent per-agent value from the request's user field
+    /// Omit the persistent per-agent value from the user field and routing header
     #[arg(long)]
     disable_user_tagging: bool,
 

@@ -10,6 +10,10 @@ use tokenizers::Tokenizer;
 use tokio::task::JoinSet;
 use uuid::Uuid;
 
+use crate::tokenizer_loader::load_tokenizer;
+
+const SMG_ROUTING_KEY: HeaderName = HeaderName::from_static("x-smg-routing-key");
+
 /// A fixed value or a value independently sampled from a log-normal distribution.
 #[derive(Clone, Debug)]
 pub enum SampleSpec {
@@ -458,13 +462,7 @@ pub async fn run_agent_benchmark(config: AgentLoopConfig) -> Result<AgentBenchma
 }
 
 fn build_agent_plans(config: &AgentLoopConfig) -> Result<Vec<AgentPlan>> {
-    let tokenizer = Tokenizer::from_pretrained(&config.tokenizer_model, None).map_err(|err| {
-        anyhow!(
-            "failed to load tokenizer {}: {}",
-            config.tokenizer_model,
-            err
-        )
-    })?;
+    let tokenizer = load_tokenizer(&config.tokenizer_model)?;
     let root_seed = match config.seed {
         Some(seed) => seed,
         None => rand::thread_rng().gen(),
@@ -604,7 +602,7 @@ async fn run_agent(
             turn.output_tokens,
             plan.user_tag.as_deref(),
         );
-        match request_with_retries(&client, &config, &body).await {
+        match request_with_retries(&client, &config, &body, plan.user_tag.as_deref()).await {
             Ok(result) => {
                 report.successful_requests += 1;
                 report.input_tokens = report.input_tokens.saturating_add(result.prompt_tokens);
@@ -697,12 +695,13 @@ async fn request_with_retries(
     client: &Client,
     config: &AgentLoopConfig,
     body: &Value,
+    user_tag: Option<&str>,
 ) -> Result<RequestResult> {
     let start = Instant::now();
     let mut last_error = None;
 
     for attempt in 0..=config.max_retries {
-        match single_attempt(client, config, body).await {
+        match single_attempt(client, config, body, user_tag).await {
             Ok(mut result) => {
                 result.latency = start.elapsed();
                 return Ok(result);
@@ -724,15 +723,15 @@ async fn single_attempt(
     client: &Client,
     config: &AgentLoopConfig,
     body: &Value,
+    user_tag: Option<&str>,
 ) -> Result<RequestResult> {
     if config.verbose {
         println!("[AGENT REQUEST] {}", sanitize_request(body));
     }
 
-    let mut request = client.post(config.endpoint.clone());
-    for (name, value) in config.headers.iter() {
-        request = request.header(name, value);
-    }
+    let request = client
+        .post(config.endpoint.clone())
+        .headers(build_request_headers(config, user_tag)?);
     let response = request.json(body).send().await?;
     let status = response.status();
     let bytes = response.bytes().await?;
@@ -770,6 +769,16 @@ async fn single_attempt(
         assistant_message,
         latency: Duration::ZERO,
     })
+}
+
+fn build_request_headers(config: &AgentLoopConfig, user_tag: Option<&str>) -> Result<HeaderMap> {
+    let mut headers = config.headers.clone();
+    if let Some(user_tag) = user_tag {
+        let value = HeaderValue::from_str(user_tag)
+            .context("failed to build X-SMG-Routing-Key header from user tag")?;
+        headers.insert(SMG_ROUTING_KEY, value);
+    }
+    Ok(headers)
 }
 
 fn append_model_and_environment(
@@ -1083,6 +1092,44 @@ mod tests {
             Some("loadtest-1")
         );
         assert_eq!(generate_user_tag(false, Some("loadtest"), 1), None);
+    }
+
+    #[test]
+    fn user_tag_stamps_the_same_per_agent_routing_header() {
+        let config = AgentLoopConfig::try_new(
+            "http://localhost:8000/v1/chat/completions",
+            None,
+            "test-model",
+            1,
+            SampleSpec::fixed(8).unwrap(),
+            SampleSpec::fixed(4).unwrap(),
+            SampleSpec::fixed(6).unwrap(),
+            SampleSpec::fixed(2).unwrap(),
+        )
+        .unwrap();
+        let user_tag = generate_user_tag(true, Some("user"), 123).unwrap();
+        let headers = build_request_headers(&config, Some(&user_tag)).unwrap();
+
+        assert_eq!(user_tag, "user-123");
+        assert_eq!(headers.get(SMG_ROUTING_KEY).unwrap(), user_tag.as_str());
+    }
+
+    #[test]
+    fn routing_header_is_omitted_when_user_tagging_is_disabled() {
+        let config = AgentLoopConfig::try_new(
+            "http://localhost:8000/v1/chat/completions",
+            None,
+            "test-model",
+            1,
+            SampleSpec::fixed(8).unwrap(),
+            SampleSpec::fixed(4).unwrap(),
+            SampleSpec::fixed(6).unwrap(),
+            SampleSpec::fixed(2).unwrap(),
+        )
+        .unwrap();
+        let headers = build_request_headers(&config, None).unwrap();
+
+        assert!(!headers.contains_key(SMG_ROUTING_KEY));
     }
 
     #[test]

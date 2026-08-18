@@ -132,12 +132,13 @@ Each log-normal family accepts either `*-lognorm-median` or `*-lognorm-mu`,
 requires `*-lognorm-sigma`, and optionally accepts `*-lognorm-max`. Samples are
 independent between agents and turns; `--seed` makes the sampled workload
 reproducible. `--tokenizer-model` can be supplied when the endpoint's model name is
-not also a Hugging Face tokenizer identifier.
+not also a Hugging Face tokenizer identifier. It accepts a Hugging Face model ID,
+a local `tokenizer.json` file, or a local directory containing `tokenizer.json`.
 
-Every request includes a `user` field containing a UUID that remains stable for the
-life of that agent and differs between agents. Use `--disable-user-tagging` to omit
-the field, or `--user-prefix <prefix>` to use deterministic
-`<prefix>-<agent_id>` values instead of UUIDs.
+Every request includes a `user` field and an `X-SMG-Routing-Key` header containing
+the same UUID, which remains stable for the life of that agent and differs between
+agents. Use `--disable-user-tagging` to omit both, or `--user-prefix <prefix>` to
+use deterministic `<prefix>-<agent_id>` values instead of UUIDs.
 
 Tool-call latency defaults to zero. Set a fixed delay with
 `--tool-call-latency-ms`, or sample milliseconds independently for every invocation
