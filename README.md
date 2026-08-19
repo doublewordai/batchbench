@@ -140,6 +140,12 @@ the same UUID, which remains stable for the life of that agent and differs betwe
 agents. Use `--disable-user-tagging` to omit both, or `--user-prefix <prefix>` to
 use deterministic `<prefix>-<agent_id>` values instead of UUIDs.
 
+For deterministic data-parallel routing, pass both
+`--dp-rank-perfect-routing` and `--dp-rank-perfect-routing-num <ranks>`.
+Each request then includes `X-SMG-Target-Worker: <agent_id % ranks>`, distributing
+consecutive agents evenly across the configured ranks. This routing is independent
+of user tagging.
+
 Tool-call latency defaults to zero. Set a fixed delay with
 `--tool-call-latency-ms`, or sample milliseconds independently for every invocation
 with `--tool-call-latency-lognorm-median-ms` (or

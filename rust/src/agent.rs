@@ -13,6 +13,7 @@ use uuid::Uuid;
 use crate::tokenizer_loader::load_tokenizer;
 
 const SMG_ROUTING_KEY: HeaderName = HeaderName::from_static("x-smg-routing-key");
+const SMG_TARGET_WORKER: HeaderName = HeaderName::from_static("x-smg-target-worker");
 
 /// A fixed value or a value independently sampled from a log-normal distribution.
 #[derive(Clone, Debug)]
@@ -116,6 +117,7 @@ pub struct AgentLoopConfig {
     pub tool_invocations: SampleSpec,
     pub tool_call_latency_ms: Option<SampleSpec>,
     pub user_prefix: Option<String>,
+    pub dp_rank_perfect_routing_num: Option<usize>,
     pub request_timeout: Duration,
     pub max_retries: usize,
     pub retry_delay: Duration,
@@ -176,6 +178,7 @@ impl AgentLoopConfig {
             tool_invocations,
             tool_call_latency_ms: None,
             user_prefix: None,
+            dp_rank_perfect_routing_num: None,
             request_timeout: Duration::from_secs(60),
             max_retries: 2,
             retry_delay: Duration::from_millis(250),
@@ -242,6 +245,16 @@ impl AgentLoopConfig {
     pub fn with_user_prefix(mut self, user_prefix: impl Into<String>) -> Self {
         self.user_prefix = Some(user_prefix.into());
         self
+    }
+
+    pub fn with_dp_rank_perfect_routing(mut self, num_ranks: usize) -> Result<Self> {
+        if num_ranks == 0 {
+            return Err(anyhow!(
+                "dp rank perfect routing rank count must be greater than zero"
+            ));
+        }
+        self.dp_rank_perfect_routing_num = Some(num_ranks);
+        Ok(self)
     }
 
     pub fn with_tool_call_latency_ms(mut self, latency_ms: SampleSpec) -> Result<Self> {
@@ -602,7 +615,15 @@ async fn run_agent(
             turn.output_tokens,
             plan.user_tag.as_deref(),
         );
-        match request_with_retries(&client, &config, &body, plan.user_tag.as_deref()).await {
+        match request_with_retries(
+            &client,
+            &config,
+            &body,
+            plan.user_tag.as_deref(),
+            plan.agent_id,
+        )
+        .await
+        {
             Ok(result) => {
                 report.successful_requests += 1;
                 report.input_tokens = report.input_tokens.saturating_add(result.prompt_tokens);
@@ -696,12 +717,13 @@ async fn request_with_retries(
     config: &AgentLoopConfig,
     body: &Value,
     user_tag: Option<&str>,
+    agent_id: usize,
 ) -> Result<RequestResult> {
     let start = Instant::now();
     let mut last_error = None;
 
     for attempt in 0..=config.max_retries {
-        match single_attempt(client, config, body, user_tag).await {
+        match single_attempt(client, config, body, user_tag, agent_id).await {
             Ok(mut result) => {
                 result.latency = start.elapsed();
                 return Ok(result);
@@ -724,6 +746,7 @@ async fn single_attempt(
     config: &AgentLoopConfig,
     body: &Value,
     user_tag: Option<&str>,
+    agent_id: usize,
 ) -> Result<RequestResult> {
     if config.verbose {
         println!("[AGENT REQUEST] {}", sanitize_request(body));
@@ -731,7 +754,7 @@ async fn single_attempt(
 
     let request = client
         .post(config.endpoint.clone())
-        .headers(build_request_headers(config, user_tag)?);
+        .headers(build_request_headers(config, user_tag, agent_id)?);
     let response = request.json(body).send().await?;
     let status = response.status();
     let bytes = response.bytes().await?;
@@ -771,12 +794,22 @@ async fn single_attempt(
     })
 }
 
-fn build_request_headers(config: &AgentLoopConfig, user_tag: Option<&str>) -> Result<HeaderMap> {
+fn build_request_headers(
+    config: &AgentLoopConfig,
+    user_tag: Option<&str>,
+    agent_id: usize,
+) -> Result<HeaderMap> {
     let mut headers = config.headers.clone();
     if let Some(user_tag) = user_tag {
         let value = HeaderValue::from_str(user_tag)
             .context("failed to build X-SMG-Routing-Key header from user tag")?;
         headers.insert(SMG_ROUTING_KEY, value);
+    }
+    if let Some(num_ranks) = config.dp_rank_perfect_routing_num {
+        let target_worker = (agent_id % num_ranks).to_string();
+        let value = HeaderValue::from_str(&target_worker)
+            .context("failed to build X-SMG-Target-Worker header from agent rank")?;
+        headers.insert(SMG_TARGET_WORKER, value);
     }
     Ok(headers)
 }
@@ -1108,7 +1141,7 @@ mod tests {
         )
         .unwrap();
         let user_tag = generate_user_tag(true, Some("user"), 123).unwrap();
-        let headers = build_request_headers(&config, Some(&user_tag)).unwrap();
+        let headers = build_request_headers(&config, Some(&user_tag), 123).unwrap();
 
         assert_eq!(user_tag, "user-123");
         assert_eq!(headers.get(SMG_ROUTING_KEY).unwrap(), user_tag.as_str());
@@ -1127,9 +1160,53 @@ mod tests {
             SampleSpec::fixed(2).unwrap(),
         )
         .unwrap();
-        let headers = build_request_headers(&config, None).unwrap();
+        let headers = build_request_headers(&config, None, 0).unwrap();
 
         assert!(!headers.contains_key(SMG_ROUTING_KEY));
+    }
+
+    #[test]
+    fn perfect_routing_targets_agent_id_modulo_rank_count() {
+        let config = AgentLoopConfig::try_new(
+            "http://localhost:8000/v1/chat/completions",
+            None,
+            "test-model",
+            10,
+            SampleSpec::fixed(8).unwrap(),
+            SampleSpec::fixed(4).unwrap(),
+            SampleSpec::fixed(6).unwrap(),
+            SampleSpec::fixed(2).unwrap(),
+        )
+        .unwrap()
+        .with_user_tagging(false)
+        .with_dp_rank_perfect_routing(8)
+        .unwrap();
+
+        for agent_id in 0..10 {
+            let headers = build_request_headers(&config, None, agent_id).unwrap();
+            assert_eq!(
+                headers.get(SMG_TARGET_WORKER).unwrap(),
+                (agent_id % 8).to_string().as_str()
+            );
+            assert!(!headers.contains_key(SMG_ROUTING_KEY));
+        }
+    }
+
+    #[test]
+    fn perfect_routing_rejects_zero_ranks() {
+        let config = AgentLoopConfig::try_new(
+            "http://localhost:8000/v1/chat/completions",
+            None,
+            "test-model",
+            1,
+            SampleSpec::fixed(8).unwrap(),
+            SampleSpec::fixed(4).unwrap(),
+            SampleSpec::fixed(6).unwrap(),
+            SampleSpec::fixed(2).unwrap(),
+        )
+        .unwrap();
+
+        assert!(config.with_dp_rank_perfect_routing(0).is_err());
     }
 
     #[test]

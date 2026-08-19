@@ -148,6 +148,18 @@ struct Args {
     #[arg(long)]
     user_prefix: Option<String>,
 
+    /// Route each agent directly to a data-parallel rank
+    #[arg(long, requires = "dp_rank_perfect_routing_num")]
+    dp_rank_perfect_routing: bool,
+
+    /// Number of data-parallel ranks used for perfect routing
+    #[arg(
+        long,
+        requires = "dp_rank_perfect_routing",
+        value_parser = parse_positive_usize
+    )]
+    dp_rank_perfect_routing_num: Option<usize>,
+
     /// API key; when omitted, read --api-key-env
     #[arg(long)]
     api_key: Option<String>,
@@ -226,6 +238,8 @@ struct CsvResult {
     sglang: bool,
     ignore_eos: bool,
     user_tagging: bool,
+    dp_rank_perfect_routing: bool,
+    dp_rank_perfect_routing_num: Option<usize>,
     seed: Option<u64>,
     tool_call_latency_ms: Option<usize>,
     tool_call_latency_lognorm_mu: Option<f64>,
@@ -237,6 +251,16 @@ struct CsvResult {
 enum ParsedArgs {
     Ready(Box<Args>),
     Displayed,
+}
+
+fn parse_positive_usize(value: &str) -> std::result::Result<usize, String> {
+    let parsed = value
+        .parse::<usize>()
+        .map_err(|_| format!("{value:?} is not a valid positive integer"))?;
+    if parsed == 0 {
+        return Err("value must be greater than zero".to_string());
+    }
+    Ok(parsed)
 }
 
 pub fn run_from_env() -> Result<()> {
@@ -374,6 +398,12 @@ async fn run(args: Args) -> Result<()> {
     );
     println!("Ignore EOS: {}", args.ignore_eos);
     println!(
+        "DP-rank perfect routing: {}",
+        args.dp_rank_perfect_routing_num
+            .map(|num_ranks| format!("enabled ({} ranks)", num_ranks))
+            .unwrap_or_else(|| "disabled".to_string())
+    );
+    println!(
         "Per-agent user tagging: {}",
         if args.disable_user_tagging {
             "disabled"
@@ -406,6 +436,9 @@ async fn run(args: Args) -> Result<()> {
     }
     if let Some(user_prefix) = &args.user_prefix {
         config = config.with_user_prefix(user_prefix.clone());
+    }
+    if let Some(num_ranks) = args.dp_rank_perfect_routing_num {
+        config = config.with_dp_rank_perfect_routing(num_ranks)?;
     }
     if let Some(seed) = args.seed {
         config = config.with_seed(seed);
@@ -444,6 +477,8 @@ async fn run(args: Args) -> Result<()> {
             sglang: args.sglang,
             ignore_eos: args.ignore_eos,
             user_tagging: !args.disable_user_tagging,
+            dp_rank_perfect_routing: args.dp_rank_perfect_routing,
+            dp_rank_perfect_routing_num: args.dp_rank_perfect_routing_num,
             seed: args.seed,
             tool_call_latency_ms: args.tool_call_latency_ms,
             tool_call_latency_lognorm_mu: args.tool_call_latency_lognorm_mu,
@@ -759,5 +794,34 @@ mod tests {
         let error = resolve_optional_latency_spec(Some(100), None, Some(200.0), Some(0.5), None)
             .unwrap_err();
         assert!(error.to_string().contains("cannot be combined"));
+    }
+
+    #[test]
+    fn perfect_routing_requires_a_rank_count() {
+        let error =
+            Args::try_parse_from(["batchbench-agent", "--dp-rank-perfect-routing"]).unwrap_err();
+        assert!(error.to_string().contains("--dp-rank-perfect-routing-num"));
+    }
+
+    #[test]
+    fn perfect_routing_rank_count_requires_the_enable_flag() {
+        let error =
+            Args::try_parse_from(["batchbench-agent", "--dp-rank-perfect-routing-num", "8"])
+                .unwrap_err();
+        assert!(error.to_string().contains("--dp-rank-perfect-routing"));
+    }
+
+    #[test]
+    fn perfect_routing_rejects_zero_ranks_at_parse_time() {
+        let error = Args::try_parse_from([
+            "batchbench-agent",
+            "--dp-rank-perfect-routing",
+            "--dp-rank-perfect-routing-num",
+            "0",
+        ])
+        .unwrap_err();
+        assert!(error
+            .to_string()
+            .contains("value must be greater than zero"));
     }
 }
