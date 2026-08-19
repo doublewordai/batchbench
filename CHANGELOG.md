@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.5.0](https://github.com/doublewordai/batchbench/compare/v0.4.0...v0.5.0) (2026-08-19)
+
+
+### Features
+
+* improve agent workload routing and tokenizer support ([cb173b6](https://github.com/doublewordai/batchbench/commit/cb173b6045c84e03d366d871c4246fbb729b5935))
+
 ## [0.4.0](https://github.com/doublewordai/batchbench/compare/v0.3.0...v0.4.0) (2026-07-24)
 
 
