@@ -25,6 +25,10 @@ struct Args {
     #[arg(long, default_value = DEFAULT_MODEL)]
     model: String,
 
+    /// Optional fixed system prompt file prepended to every agent conversation
+    #[arg(long)]
+    system_prompt_file: Option<PathBuf>,
+
     /// Tokenizer model used to synthesize prompts and environment responses (defaults to --model)
     #[arg(long)]
     tokenizer_model: Option<String>,
@@ -188,6 +192,22 @@ struct Args {
     #[arg(long)]
     ignore_eos: bool,
 
+    /// Request and parse an OpenAI-compatible SSE streaming response
+    #[arg(long)]
+    stream: bool,
+
+    /// Sustain request starts for this many seconds
+    #[arg(long)]
+    duration_secs: Option<u64>,
+
+    /// Logical token rate to schedule (requires --duration-secs and --logical-tokens-per-request)
+    #[arg(long)]
+    target_logical_tpm: Option<u64>,
+
+    /// Logical tokens represented by each scheduled request
+    #[arg(long)]
+    logical_tokens_per_request: Option<u64>,
+
     /// Omit the persistent per-agent value from the user field and routing header
     #[arg(long)]
     disable_user_tagging: bool,
@@ -207,6 +227,10 @@ struct Args {
     /// Optional path to write a CSV report
     #[arg(long)]
     results_csv: Option<PathBuf>,
+
+    /// Optional path to write one row per request/stream, including TTFT and client-observed delivery TPS
+    #[arg(long)]
+    requests_csv: Option<PathBuf>,
 }
 
 #[derive(Debug, Serialize)]
@@ -246,6 +270,22 @@ struct CsvResult {
     tool_call_latency_lognorm_median_ms: Option<f64>,
     tool_call_latency_lognorm_sigma: Option<f64>,
     tool_call_latency_lognorm_max_ms: Option<usize>,
+}
+
+#[derive(Debug, Serialize)]
+struct RequestCsvResult {
+    started_at: String,
+    agent_id: usize,
+    invocation: usize,
+    user_tag: Option<String>,
+    success: bool,
+    prompt_tokens: Option<u64>,
+    completion_tokens: Option<u64>,
+    latency_ms: Option<f64>,
+    ttft_ms: Option<f64>,
+    stream_delivery_ms: Option<f64>,
+    client_observed_output_tokens_per_second: Option<f64>,
+    error: Option<String>,
 }
 
 enum ParsedArgs {
@@ -314,6 +354,14 @@ async fn run(args: Args) -> Result<()> {
     if args.request_timeout_secs == 0 {
         return Err(anyhow!("request-timeout-secs must be greater than zero"));
     }
+    let sustained_values = [
+        args.duration_secs.is_some(),
+        args.target_logical_tpm.is_some(),
+        args.logical_tokens_per_request.is_some(),
+    ];
+    if sustained_values.iter().any(|value| *value) && !sustained_values.iter().all(|value| *value) {
+        return Err(anyhow!("--duration-secs, --target-logical-tpm, and --logical-tokens-per-request must be supplied together"));
+    }
 
     let input_tokens = resolve_sample_spec(
         "input",
@@ -368,6 +416,12 @@ async fn run(args: Args) -> Result<()> {
         .tokenizer_model
         .clone()
         .unwrap_or_else(|| args.model.clone());
+    let system_prompt = args
+        .system_prompt_file
+        .as_deref()
+        .map(fs::read_to_string)
+        .transpose()
+        .context("failed to read system prompt file")?;
 
     println!("=== Agent Loop Benchmark Configuration ===");
     println!("Endpoint: {}", endpoint);
@@ -397,6 +451,17 @@ async fn run(args: Args) -> Result<()> {
         }
     );
     println!("Ignore EOS: {}", args.ignore_eos);
+    println!("Streaming: {}", args.stream);
+    if let (Some(duration), Some(tpm), Some(tokens)) = (
+        args.duration_secs,
+        args.target_logical_tpm,
+        args.logical_tokens_per_request,
+    ) {
+        println!(
+            "Sustained schedule: {}s at {} logical TPM ({} logical tokens/request)",
+            duration, tpm, tokens
+        );
+    }
     println!(
         "DP-rank perfect routing: {}",
         args.dp_rank_perfect_routing_num
@@ -428,9 +493,13 @@ async fn run(args: Args) -> Result<()> {
     .with_retry(args.max_retries, Duration::from_millis(args.retry_delay_ms))
     .with_sglang(args.sglang)
     .with_ignore_eos(args.ignore_eos)
+    .with_stream(args.stream)
     .with_user_tagging(!args.disable_user_tagging)
     .with_verbose(args.verbose)
     .with_dry_run(args.dry_run);
+    if let Some(system_prompt) = system_prompt {
+        config = config.with_system_prompt(system_prompt);
+    }
     if let Some(tool_call_latency_ms) = tool_call_latency_ms {
         config = config.with_tool_call_latency_ms(tool_call_latency_ms)?;
     }
@@ -442,6 +511,20 @@ async fn run(args: Args) -> Result<()> {
     }
     if let Some(seed) = args.seed {
         config = config.with_seed(seed);
+    }
+    if let (Some(duration), Some(tpm), Some(tokens)) = (
+        args.duration_secs,
+        args.target_logical_tpm,
+        args.logical_tokens_per_request,
+    ) {
+        if duration == 0 || tpm == 0 || tokens == 0 {
+            return Err(anyhow!("sustained-load values must be greater than zero"));
+        }
+        let interval_seconds = 60.0 * tokens as f64 / tpm as f64;
+        config = config.with_sustained_load(
+            Duration::from_secs(duration),
+            Duration::from_secs_f64(interval_seconds),
+        );
     }
 
     let start_time = chrono::Utc::now();
@@ -488,6 +571,10 @@ async fn run(args: Args) -> Result<()> {
         };
         write_results_csv(csv_path, &record)?;
         println!("Wrote agent benchmark summary to {}", csv_path.display());
+    }
+    if let Some(csv_path) = args.requests_csv.as_deref() {
+        write_request_results_csv(csv_path, &report)?;
+        println!("Wrote per-request stream metrics to {}", csv_path.display());
     }
 
     Ok(())
@@ -688,12 +775,71 @@ fn print_summary(report: &AgentBenchmarkReport) {
         format_latency(report.agent_end_to_end_latency_p90),
         format_latency(report.agent_end_to_end_latency_p99)
     );
+    let mut ttft: Vec<Duration> = report
+        .request_records
+        .iter()
+        .filter_map(|record| record.time_to_first_token)
+        .collect();
+    let mut generation: Vec<Duration> = report
+        .request_records
+        .iter()
+        .filter_map(|record| record.stream_delivery_duration)
+        .collect();
+    let mut output_tps: Vec<f64> = report
+        .request_records
+        .iter()
+        .filter_map(|record| record.client_observed_output_tokens_per_second)
+        .filter(|value| value.is_finite())
+        .collect();
+    ttft.sort();
+    generation.sort();
+    output_tps.sort_by(f64::total_cmp);
+    println!(
+        "TTFT (ms, first non-empty content/reasoning delta): p50={} p90={} p99={}",
+        format_latency(duration_percentile(&ttft, 0.50)),
+        format_latency(duration_percentile(&ttft, 0.90)),
+        format_latency(duration_percentile(&ttft, 0.99))
+    );
+    println!(
+        "Client-observed stream delivery duration (ms, first-to-last delta): p50={} p90={} p99={}",
+        format_latency(duration_percentile(&generation, 0.50)),
+        format_latency(duration_percentile(&generation, 0.90)),
+        format_latency(duration_percentile(&generation, 0.99))
+    );
+    println!(
+        "Client-observed output delivery TPS (completion_tokens / first-to-last delta): p50={} p90={} p99={}",
+        format_number(float_percentile(&output_tps, 0.50)),
+        format_number(float_percentile(&output_tps, 0.90)),
+        format_number(float_percentile(&output_tps, 0.99))
+    );
     for failure in &report.failures {
         println!(
             "Failure: agent {} invocation {}: {}",
             failure.agent_id, failure.invocation, failure.error
         );
     }
+}
+
+fn duration_percentile(sorted: &[Duration], quantile: f64) -> Option<Duration> {
+    if sorted.is_empty() {
+        return None;
+    }
+    let index = ((sorted.len() - 1) as f64 * quantile.clamp(0.0, 1.0)).round() as usize;
+    sorted.get(index).copied()
+}
+
+fn float_percentile(sorted: &[f64], quantile: f64) -> Option<f64> {
+    if sorted.is_empty() {
+        return None;
+    }
+    let index = ((sorted.len() - 1) as f64 * quantile.clamp(0.0, 1.0)).round() as usize;
+    sorted.get(index).copied()
+}
+
+fn format_number(value: Option<f64>) -> String {
+    value
+        .map(|value| format!("{value:.2}"))
+        .unwrap_or_else(|| "n/a".to_string())
 }
 
 fn milliseconds(duration: Option<Duration>) -> Option<f64> {
@@ -718,6 +864,40 @@ fn write_results_csv(path: &Path, record: &CsvResult) -> Result<()> {
     writer
         .serialize(record)
         .with_context(|| format!("failed to serialize {}", path.display()))?;
+    writer
+        .flush()
+        .with_context(|| format!("failed to flush {}", path.display()))?;
+    Ok(())
+}
+
+fn write_request_results_csv(path: &Path, report: &AgentBenchmarkReport) -> Result<()> {
+    if let Some(parent) = path.parent() {
+        if !parent.as_os_str().is_empty() {
+            fs::create_dir_all(parent)
+                .with_context(|| format!("failed to create directory {}", parent.display()))?;
+        }
+    }
+    let mut writer = csv::Writer::from_path(path)
+        .with_context(|| format!("failed to create {}", path.display()))?;
+    for record in &report.request_records {
+        writer
+            .serialize(RequestCsvResult {
+                started_at: record.started_at.clone(),
+                agent_id: record.agent_id,
+                invocation: record.invocation,
+                user_tag: record.user_tag.clone(),
+                success: record.success,
+                prompt_tokens: record.prompt_tokens,
+                completion_tokens: record.completion_tokens,
+                latency_ms: milliseconds(record.latency),
+                ttft_ms: milliseconds(record.time_to_first_token),
+                stream_delivery_ms: milliseconds(record.stream_delivery_duration),
+                client_observed_output_tokens_per_second: record
+                    .client_observed_output_tokens_per_second,
+                error: record.error.clone(),
+            })
+            .with_context(|| format!("failed to serialize {}", path.display()))?;
+    }
     writer
         .flush()
         .with_context(|| format!("failed to flush {}", path.display()))?;

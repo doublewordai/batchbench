@@ -89,6 +89,11 @@ are appended to `messages`, then the complete growing conversation is sent again
 This makes every request after the first one reuse that agent's previous prompt as a
 prefix and exercises server-side KV caching.
 
+This branch also supports sustained OpenAI-compatible streaming workloads with a
+fixed system prefix and request-level TTFT/output-delivery metrics. See
+[`WEBSITE_BUILDER_LOAD_TEST.md`](WEBSITE_BUILDER_LOAD_TEST.md) for the added flags,
+metric definitions, and a reproducible 120-agent/12M-logical-TPM example.
+
 Fixed-length example:
 
 ```bash

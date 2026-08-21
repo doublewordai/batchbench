@@ -1,12 +1,14 @@
 use std::time::{Duration, Instant};
 
 use anyhow::{anyhow, Context, Result};
+use futures_util::StreamExt;
 use rand::{Rng, SeedableRng};
 use rand_distr::{Distribution, LogNormal};
 use reqwest::header::{HeaderMap, HeaderName, HeaderValue, AUTHORIZATION, CONTENT_TYPE};
 use reqwest::{Client, Url};
 use serde_json::{json, Map, Value};
 use tokenizers::Tokenizer;
+use tokio::sync::Mutex;
 use tokio::task::JoinSet;
 use uuid::Uuid;
 
@@ -110,6 +112,7 @@ pub struct AgentLoopConfig {
     pub endpoint: Url,
     pub model: String,
     pub tokenizer_model: String,
+    pub system_prompt: Option<String>,
     pub agent_count: usize,
     pub input_tokens: SampleSpec,
     pub output_tokens: SampleSpec,
@@ -126,8 +129,11 @@ pub struct AgentLoopConfig {
     pub dry_run: bool,
     pub sglang: bool,
     pub ignore_eos: bool,
+    pub stream: bool,
     pub user_tagging: bool,
     pub seed: Option<u64>,
+    pub duration: Option<Duration>,
+    pub request_start_interval: Option<Duration>,
 }
 
 impl AgentLoopConfig {
@@ -170,6 +176,7 @@ impl AgentLoopConfig {
         Ok(Self {
             endpoint,
             tokenizer_model: model.clone(),
+            system_prompt: None,
             model,
             agent_count,
             input_tokens,
@@ -187,13 +194,21 @@ impl AgentLoopConfig {
             dry_run: false,
             sglang: false,
             ignore_eos: false,
+            stream: false,
             user_tagging: true,
             seed: None,
+            duration: None,
+            request_start_interval: None,
         })
     }
 
     pub fn with_tokenizer_model(mut self, tokenizer_model: impl Into<String>) -> Self {
         self.tokenizer_model = tokenizer_model.into();
+        self
+    }
+
+    pub fn with_system_prompt(mut self, system_prompt: impl Into<String>) -> Self {
+        self.system_prompt = Some(system_prompt.into());
         self
     }
 
@@ -232,6 +247,11 @@ impl AgentLoopConfig {
         self
     }
 
+    pub fn with_stream(mut self, stream: bool) -> Self {
+        self.stream = stream;
+        self
+    }
+
     pub fn with_user_tagging(mut self, user_tagging: bool) -> Self {
         self.user_tagging = user_tagging;
         self
@@ -239,6 +259,20 @@ impl AgentLoopConfig {
 
     pub fn with_seed(mut self, seed: u64) -> Self {
         self.seed = Some(seed);
+        self
+    }
+
+    pub fn with_sustained_load(
+        mut self,
+        duration: Duration,
+        request_start_interval: Duration,
+    ) -> Self {
+        if !duration.is_zero() {
+            self.duration = Some(duration);
+        }
+        if !request_start_interval.is_zero() {
+            self.request_start_interval = Some(request_start_interval);
+        }
         self
     }
 
@@ -316,6 +350,23 @@ pub struct AgentBenchmarkReport {
     pub agent_end_to_end_latency_p90: Option<Duration>,
     pub agent_end_to_end_latency_p99: Option<Duration>,
     pub failures: Vec<AgentFailureRecord>,
+    pub request_records: Vec<AgentRequestRecord>,
+}
+
+#[derive(Clone, Debug)]
+pub struct AgentRequestRecord {
+    pub agent_id: usize,
+    pub invocation: usize,
+    pub user_tag: Option<String>,
+    pub started_at: String,
+    pub success: bool,
+    pub prompt_tokens: Option<u64>,
+    pub completion_tokens: Option<u64>,
+    pub latency: Option<Duration>,
+    pub time_to_first_token: Option<Duration>,
+    pub stream_delivery_duration: Option<Duration>,
+    pub client_observed_output_tokens_per_second: Option<f64>,
+    pub error: Option<String>,
 }
 
 #[derive(Debug)]
@@ -331,6 +382,7 @@ struct AgentWorkerReport {
     latencies: Vec<Duration>,
     failures: Vec<AgentFailureRecord>,
     dry_run_records: Vec<DryRunRecord>,
+    request_records: Vec<AgentRequestRecord>,
 }
 
 impl AgentWorkerReport {
@@ -347,6 +399,7 @@ impl AgentWorkerReport {
             latencies: Vec::new(),
             failures: Vec::new(),
             dry_run_records: Vec::new(),
+            request_records: Vec::new(),
         }
     }
 }
@@ -367,6 +420,41 @@ struct RequestResult {
     completion_tokens: u64,
     assistant_message: Value,
     latency: Duration,
+    time_to_first_token: Option<Duration>,
+    stream_delivery_duration: Option<Duration>,
+    client_observed_output_tokens_per_second: Option<f64>,
+}
+
+#[derive(Debug)]
+struct RequestPacer {
+    next_start: Mutex<Instant>,
+    interval: Duration,
+}
+
+impl RequestPacer {
+    fn new(start: Instant, interval: Duration) -> Self {
+        Self {
+            next_start: Mutex::new(start),
+            interval,
+        }
+    }
+
+    async fn wait_for_slot(&self, deadline: Instant) -> bool {
+        let scheduled = {
+            let mut next = self.next_start.lock().await;
+            if *next >= deadline {
+                return false;
+            }
+            let scheduled = *next;
+            *next = next.checked_add(self.interval).unwrap_or(deadline);
+            scheduled
+        };
+        let delay = scheduled.saturating_duration_since(Instant::now());
+        if !delay.is_zero() {
+            tokio::time::sleep(delay).await;
+        }
+        true
+    }
 }
 
 /// Run independent, stateful agent loops concurrently.
@@ -389,12 +477,17 @@ pub async fn run_agent_benchmark(config: AgentLoopConfig) -> Result<AgentBenchma
         .context("failed to construct HTTP client")?;
     let config = std::sync::Arc::new(config);
     let start = Instant::now();
+    let deadline = config.duration.map(|duration| start + duration);
+    let pacer = config
+        .request_start_interval
+        .map(|interval| std::sync::Arc::new(RequestPacer::new(start, interval)));
 
     let mut join_set = JoinSet::new();
     for plan in plans {
         let client = client.clone();
         let config = std::sync::Arc::clone(&config);
-        join_set.spawn(async move { run_agent(plan, client, config).await });
+        let pacer = pacer.clone();
+        join_set.spawn(async move { run_agent(plan, client, config, pacer, deadline).await });
     }
 
     let mut completed_agents = 0usize;
@@ -408,6 +501,7 @@ pub async fn run_agent_benchmark(config: AgentLoopConfig) -> Result<AgentBenchma
     let mut agent_end_to_end_latencies = Vec::new();
     let mut failures = Vec::new();
     let mut dry_run_records = Vec::new();
+    let mut request_records = Vec::new();
 
     while let Some(joined) = join_set.join_next().await {
         let worker = joined.map_err(|err| anyhow!("agent worker task failed: {}", err))??;
@@ -425,6 +519,7 @@ pub async fn run_agent_benchmark(config: AgentLoopConfig) -> Result<AgentBenchma
         latencies.extend(worker.latencies);
         failures.extend(worker.failures);
         dry_run_records.extend(worker.dry_run_records);
+        request_records.extend(worker.request_records);
     }
 
     if config.dry_run {
@@ -446,6 +541,7 @@ pub async fn run_agent_benchmark(config: AgentLoopConfig) -> Result<AgentBenchma
     latencies.sort();
     agent_end_to_end_latencies.sort();
     failures.sort_by_key(|failure| (failure.agent_id, failure.invocation));
+    request_records.sort_by_key(|record| (record.agent_id, record.invocation));
     let total_requests = successful_requests.saturating_add(failed_requests);
     let duration_secs = total_duration.as_secs_f64();
 
@@ -471,6 +567,7 @@ pub async fn run_agent_benchmark(config: AgentLoopConfig) -> Result<AgentBenchma
         agent_end_to_end_latency_p90: percentile(&agent_end_to_end_latencies, 0.90),
         agent_end_to_end_latency_p99: percentile(&agent_end_to_end_latencies, 0.99),
         failures,
+        request_records,
     })
 }
 
@@ -575,13 +672,22 @@ async fn run_agent(
     plan: AgentPlan,
     client: Client,
     config: std::sync::Arc<AgentLoopConfig>,
+    pacer: Option<std::sync::Arc<RequestPacer>>,
+    deadline: Option<Instant>,
 ) -> Result<AgentWorkerReport> {
     let agent_start = Instant::now();
     let mut report = AgentWorkerReport::new();
-    let mut messages = vec![json!({
+    let mut messages = Vec::with_capacity(2);
+    if let Some(system_prompt) = config.system_prompt.as_ref() {
+        messages.push(json!({
+            "role": "system",
+            "content": system_prompt,
+        }));
+    }
+    messages.push(json!({
         "role": "user",
         "content": plan.initial_prompt,
-    })];
+    }));
     let mut previous_prompt_tokens = 0u64;
 
     for (turn_index, turn) in plan.turns.iter().enumerate() {
@@ -609,12 +715,28 @@ async fn run_agent(
             continue;
         }
 
+        if let Some(deadline) = deadline {
+            if Instant::now() >= deadline {
+                report.completed = true;
+                report.end_to_end_latency = agent_start.elapsed();
+                return Ok(report);
+            }
+        }
+        if let (Some(pacer), Some(deadline)) = (pacer.as_ref(), deadline) {
+            if !pacer.wait_for_slot(deadline).await {
+                report.completed = true;
+                report.end_to_end_latency = agent_start.elapsed();
+                return Ok(report);
+            }
+        }
+
         let body = build_request_body(
             &config,
             &messages,
             turn.output_tokens,
             plan.user_tag.as_deref(),
         );
+        let request_started_at = chrono::Utc::now().to_rfc3339();
         match request_with_retries(
             &client,
             &config,
@@ -625,6 +747,21 @@ async fn run_agent(
         .await
         {
             Ok(result) => {
+                report.request_records.push(AgentRequestRecord {
+                    agent_id: plan.agent_id,
+                    invocation,
+                    user_tag: plan.user_tag.clone(),
+                    started_at: request_started_at,
+                    success: true,
+                    prompt_tokens: Some(result.prompt_tokens),
+                    completion_tokens: Some(result.completion_tokens),
+                    latency: Some(result.latency),
+                    time_to_first_token: result.time_to_first_token,
+                    stream_delivery_duration: result.stream_delivery_duration,
+                    client_observed_output_tokens_per_second: result
+                        .client_observed_output_tokens_per_second,
+                    error: None,
+                });
                 report.successful_requests += 1;
                 report.input_tokens = report.input_tokens.saturating_add(result.prompt_tokens);
                 report.output_tokens = report
@@ -655,12 +792,30 @@ async fn run_agent(
                 )?;
             }
             Err(err) => {
+                let error = err.to_string();
+                report.request_records.push(AgentRequestRecord {
+                    agent_id: plan.agent_id,
+                    invocation,
+                    user_tag: plan.user_tag.clone(),
+                    started_at: request_started_at,
+                    success: false,
+                    prompt_tokens: None,
+                    completion_tokens: None,
+                    latency: None,
+                    time_to_first_token: None,
+                    stream_delivery_duration: None,
+                    client_observed_output_tokens_per_second: None,
+                    error: Some(error.clone()),
+                });
                 report.failed_requests += 1;
                 report.failures.push(AgentFailureRecord {
                     agent_id: plan.agent_id,
                     invocation,
-                    error: err.to_string(),
+                    error,
                 });
+                if config.duration.is_some() {
+                    continue;
+                }
                 report.end_to_end_latency = agent_start.elapsed();
                 return Ok(report);
             }
@@ -687,7 +842,9 @@ fn build_request_body(
 ) -> Value {
     let mut body = json!({
         "model": config.model,
-        "messages": messages
+        "messages": messages,
+        "tools": website_builder_tools(),
+        "temperature": 0.3
     });
 
     let (max_key, min_key) = output_token_field_names(config.sglang);
@@ -697,11 +854,117 @@ fn build_request_body(
         if config.ignore_eos {
             map.insert("ignore_eos".to_string(), json!(true));
         }
+        if config.stream {
+            map.insert("stream".to_string(), json!(true));
+            map.insert("stream_options".to_string(), json!({"include_usage": true}));
+        }
         if let Some(user_tag) = user_tag {
             map.insert("user".to_string(), json!(user_tag));
+            let routing_hash = user_tag.bytes().fold(0u64, |state, value| {
+                state.wrapping_mul(31).wrapping_add(value as u64)
+            });
+            map.insert(
+                "reasoning_effort".to_string(),
+                json!(if routing_hash % 12 == 0 {
+                    "max"
+                } else {
+                    "medium"
+                }),
+            );
         }
     }
     body
+}
+
+fn website_builder_tools() -> Value {
+    let mut tools = json!([
+        {
+            "type": "function",
+            "function": {
+                "name": "environment",
+                "description": "Interact with the website-builder environment to inspect project files, edit files, preview the app, or run a validation command.",
+                "parameters": {
+                    "type": "object",
+                    "properties": {"request": {"type": "string"}},
+                    "required": ["request"]
+                }
+            }
+        },
+        {
+            "type": "function",
+            "function": {
+                "name": "read_file",
+                "description": "Read a project file before making a targeted change.",
+                "parameters": {
+                    "type": "object",
+                    "properties": {"path": {"type": "string"}},
+                    "required": ["path"]
+                }
+            }
+        },
+        {
+            "type": "function",
+            "function": {
+                "name": "write_file",
+                "description": "Create or update a project file with the requested website implementation.",
+                "parameters": {
+                    "type": "object",
+                    "properties": {
+                        "path": {"type": "string"},
+                        "content": {"type": "string"}
+                    },
+                    "required": ["path", "content"]
+                }
+            }
+        },
+        {
+            "type": "function",
+            "function": {
+                "name": "preview",
+                "description": "Build or preview the website and return validation output.",
+                "parameters": {
+                    "type": "object",
+                    "properties": {"target": {"type": "string"}},
+                    "required": ["target"]
+                }
+            }
+        }
+    ]);
+    let extra_tools = [
+        "list_files",
+        "search_files",
+        "delete_file",
+        "move_file",
+        "run_command",
+        "install_package",
+        "inspect_page",
+        "screenshot",
+        "browser_action",
+        "check_accessibility",
+        "check_responsive",
+        "read_console",
+        "query_database",
+        "deploy_preview",
+        "rollback",
+        "ask_user",
+    ];
+    if let Some(array) = tools.as_array_mut() {
+        for name in extra_tools {
+            array.push(json!({
+                "type": "function",
+                "function": {
+                    "name": name,
+                    "description": format!("Website-builder project operation: {name}."),
+                    "parameters": {
+                        "type": "object",
+                        "properties": {"request": {"type": "string"}},
+                        "required": ["request"]
+                    }
+                }
+            }));
+        }
+    }
+    tools
 }
 
 fn output_token_field_names(use_sglang: bool) -> (&'static str, &'static str) {
@@ -748,6 +1011,7 @@ async fn single_attempt(
     user_tag: Option<&str>,
     agent_id: usize,
 ) -> Result<RequestResult> {
+    let attempt_start = Instant::now();
     if config.verbose {
         println!("[AGENT REQUEST] {}", sanitize_request(body));
     }
@@ -757,6 +1021,17 @@ async fn single_attempt(
         .headers(build_request_headers(config, user_tag, agent_id)?);
     let response = request.json(body).send().await?;
     let status = response.status();
+    if config.stream {
+        if !status.is_success() {
+            let bytes = response.bytes().await?;
+            return Err(anyhow!(
+                "streaming request failed ({}) {}",
+                status,
+                truncate_text(&String::from_utf8_lossy(&bytes), 500)
+            ));
+        }
+        return parse_stream_response(response, attempt_start).await;
+    }
     let bytes = response.bytes().await?;
     if !status.is_success() {
         return Err(anyhow!(
@@ -791,7 +1066,155 @@ async fn single_attempt(
         completion_tokens,
         assistant_message,
         latency: Duration::ZERO,
+        time_to_first_token: None,
+        stream_delivery_duration: None,
+        client_observed_output_tokens_per_second: None,
     })
+}
+
+async fn parse_stream_response(
+    response: reqwest::Response,
+    request_started_at: Instant,
+) -> Result<RequestResult> {
+    let mut bytes_stream = response.bytes_stream();
+    let mut buffer = Vec::new();
+    let mut content = String::new();
+    let mut reasoning_content = String::new();
+    let mut usage: Option<Value> = None;
+    let mut saw_done = false;
+    let mut first_token_at: Option<Instant> = None;
+    let mut last_token_at: Option<Instant> = None;
+
+    while let Some(chunk) = bytes_stream.next().await {
+        let chunk = chunk.context("stream read failed")?;
+        buffer.extend_from_slice(&chunk);
+        while let Some((event_end, separator_len)) = find_sse_event_end(&buffer) {
+            let event = buffer
+                .drain(..event_end + separator_len)
+                .collect::<Vec<_>>();
+            process_sse_event(
+                &event,
+                &mut content,
+                &mut reasoning_content,
+                &mut usage,
+                &mut saw_done,
+                &mut first_token_at,
+                &mut last_token_at,
+            )?;
+        }
+    }
+    if !buffer.is_empty() {
+        process_sse_event(
+            &buffer,
+            &mut content,
+            &mut reasoning_content,
+            &mut usage,
+            &mut saw_done,
+            &mut first_token_at,
+            &mut last_token_at,
+        )?;
+    }
+
+    let usage = usage.ok_or_else(|| anyhow!("stream response missing usage event"))?;
+    let prompt_tokens = usage
+        .get("prompt_tokens")
+        .and_then(Value::as_u64)
+        .ok_or_else(|| anyhow!("stream usage.prompt_tokens missing or not an integer"))?;
+    let completion_tokens = usage
+        .get("completion_tokens")
+        .and_then(Value::as_u64)
+        .unwrap_or(0);
+    if !saw_done {
+        return Err(anyhow!("stream response ended without [DONE]"));
+    }
+    let time_to_first_token =
+        first_token_at.map(|instant| instant.duration_since(request_started_at));
+    let stream_delivery_duration = match (first_token_at, last_token_at) {
+        (Some(first), Some(last)) if last > first => Some(last.duration_since(first)),
+        _ => None,
+    };
+    let client_observed_output_tokens_per_second = stream_delivery_duration.and_then(|duration| {
+        let seconds = duration.as_secs_f64();
+        (seconds > 0.0).then_some(completion_tokens as f64 / seconds)
+    });
+
+    let mut assistant_message = Map::new();
+    assistant_message.insert("role".to_string(), json!("assistant"));
+    assistant_message.insert("content".to_string(), json!(content));
+    if !reasoning_content.is_empty() {
+        assistant_message.insert("reasoning_content".to_string(), json!(reasoning_content));
+    }
+
+    Ok(RequestResult {
+        prompt_tokens,
+        completion_tokens,
+        assistant_message: Value::Object(assistant_message),
+        latency: Duration::ZERO,
+        time_to_first_token,
+        stream_delivery_duration,
+        client_observed_output_tokens_per_second,
+    })
+}
+
+fn find_sse_event_end(buffer: &[u8]) -> Option<(usize, usize)> {
+    if let Some(index) = buffer.windows(2).position(|window| window == b"\n\n") {
+        return Some((index, 2));
+    }
+    buffer
+        .windows(4)
+        .position(|window| window == b"\r\n\r\n")
+        .map(|index| (index, 4))
+}
+
+fn process_sse_event(
+    event: &[u8],
+    content: &mut String,
+    reasoning_content: &mut String,
+    usage: &mut Option<Value>,
+    saw_done: &mut bool,
+    first_token_at: &mut Option<Instant>,
+    last_token_at: &mut Option<Instant>,
+) -> Result<()> {
+    let text = String::from_utf8_lossy(event);
+    for line in text.lines() {
+        let Some(data) = line.strip_prefix("data:") else {
+            continue;
+        };
+        let data = data.trim();
+        if data == "[DONE]" {
+            *saw_done = true;
+            continue;
+        }
+        if data.is_empty() {
+            continue;
+        }
+        let payload: Value = serde_json::from_str(data).context("invalid SSE data JSON")?;
+        if let Some(value) = payload.get("usage") {
+            if !value.is_null() {
+                *usage = Some(value.clone());
+            }
+        }
+        let delta = payload.pointer("/choices/0/delta");
+        let observed_at = Instant::now();
+        let mut emitted_token_data = false;
+        if let Some(value) = delta.and_then(|value| value.get("content")) {
+            if let Some(value) = value.as_str() {
+                emitted_token_data |= !value.is_empty();
+                content.push_str(value);
+            }
+        }
+        if let Some(value) = delta.and_then(|value| value.get("reasoning_content")) {
+            if let Some(value) = value.as_str() {
+                emitted_token_data |= !value.is_empty();
+                reasoning_content.push_str(value);
+            }
+        }
+        if emitted_token_data {
+            first_token_at.get_or_insert(observed_at);
+            *last_token_at = Some(observed_at);
+        }
+    }
+    Ok(())
 }
 
 fn build_request_headers(
@@ -1105,8 +1528,37 @@ mod tests {
         assert_eq!(body["max_tokens"], 17);
         assert_eq!(body["min_tokens"], 17);
         assert_eq!(body["user"], "agent-user-tag");
-        assert!(body.get("tools").is_none());
+        assert_eq!(body["tools"].as_array().map(Vec::len), Some(20));
+        assert_eq!(body["temperature"], 0.3);
+        assert!(matches!(
+            body["reasoning_effort"].as_str(),
+            Some("medium" | "max")
+        ));
         assert!(body.get("tool_choice").is_none());
+    }
+
+    #[test]
+    fn sse_content_delta_marks_first_and_last_token_times() {
+        let mut content = String::new();
+        let mut reasoning = String::new();
+        let mut usage = None;
+        let mut saw_done = false;
+        let mut first = None;
+        let mut last = None;
+        process_sse_event(
+            b"data: {\"choices\":[{\"delta\":{\"content\":\"hello\"}}]}\n\n",
+            &mut content,
+            &mut reasoning,
+            &mut usage,
+            &mut saw_done,
+            &mut first,
+            &mut last,
+        )
+        .unwrap();
+        assert_eq!(content, "hello");
+        assert!(first.is_some());
+        assert!(last.is_some());
+        assert_eq!(first, last);
     }
 
     #[test]
