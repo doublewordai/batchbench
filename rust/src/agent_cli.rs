@@ -1,6 +1,6 @@
 use std::ffi::OsString;
 use std::fs;
-use std::io::{BufWriter, Write};
+use std::io::{BufReader, BufWriter, Read, Write};
 use std::path::{Path, PathBuf};
 use std::time::Duration;
 
@@ -9,6 +9,7 @@ use clap::Parser;
 use serde::Serialize;
 use sha2::{Digest, Sha256};
 
+use crate::agent::TRAJECTORY_PLAN_SCHEMA_VERSION;
 use crate::{run_agent_benchmark, AgentBenchmarkReport, AgentLoopConfig, SampleSpec};
 
 const DEFAULT_MODEL: &str = "Qwen/Qwen3-VL-235B-A22B-Instruct-FP8";
@@ -562,7 +563,7 @@ async fn run(args: Args) -> Result<()> {
                 .as_ref()
                 .map(|path| path.display().to_string()),
             agent_plans_sha256: agent_plans_sha256.clone(),
-            trajectory_schema_version: replay_mode.then_some(1),
+            trajectory_schema_version: replay_mode.then_some(TRAJECTORY_PLAN_SCHEMA_VERSION),
             agents: report.total_agents,
             requested_max_active_agents: args.max_active_agents,
             max_active_agents: report.max_active_agents,
@@ -862,8 +863,21 @@ fn format_latency(duration: Option<Duration>) -> String {
 }
 
 fn sha256_file(path: &Path) -> Result<String> {
-    let bytes = fs::read(path).with_context(|| format!("failed to read {}", path.display()))?;
-    Ok(format!("{:x}", Sha256::digest(bytes)))
+    let file = fs::File::open(path)
+        .with_context(|| format!("failed to open {} for hashing", path.display()))?;
+    let mut reader = BufReader::new(file);
+    let mut hasher = Sha256::new();
+    let mut buffer = [0u8; 64 * 1024];
+    loop {
+        let bytes_read = reader
+            .read(&mut buffer)
+            .with_context(|| format!("failed to hash {}", path.display()))?;
+        if bytes_read == 0 {
+            break;
+        }
+        hasher.update(&buffer[..bytes_read]);
+    }
+    Ok(format!("{:x}", hasher.finalize()))
 }
 
 fn write_results_csv(path: &Path, record: &CsvResult) -> Result<()> {

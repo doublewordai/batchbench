@@ -307,6 +307,7 @@ impl AgentLoopConfig {
 
 #[derive(Clone, Debug)]
 struct AgentTurnPlan {
+    input_content_tokens: usize,
     target_prompt_tokens: usize,
     output_tokens: usize,
     environment_tokens: usize,
@@ -424,6 +425,7 @@ struct DryRunRecord {
     routing_slot: usize,
     admitted_at: Duration,
     invocation: usize,
+    input_content_tokens: usize,
     target_prompt_tokens: usize,
     output_tokens: usize,
     environment_tokens: usize,
@@ -431,7 +433,7 @@ struct DryRunRecord {
     reset_before: bool,
 }
 
-const TRAJECTORY_PLAN_SCHEMA_VERSION: u32 = 1;
+pub(crate) const TRAJECTORY_PLAN_SCHEMA_VERSION: u32 = 1;
 
 #[derive(Clone, Debug, Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -596,7 +598,7 @@ pub async fn run_agent_benchmark(config: AgentLoopConfig) -> Result<AgentBenchma
                 "[DRY-RUN] agent={} invocation={} input_content_tokens={} output_tokens={} environment_tokens={} tool_call_latency_ms={} trajectory_id={} routing_slot={} admitted_at_ms={} target_prompt_tokens={} reset_before={}",
                 record.agent_id,
                 record.invocation,
-                record.target_prompt_tokens,
+                record.input_content_tokens,
                 record.output_tokens,
                 record.environment_tokens,
                 record.tool_call_latency_ms,
@@ -706,6 +708,7 @@ fn build_agent_plans(config: &AgentLoopConfig) -> Result<Vec<AgentPlan>> {
             let environment_content =
                 generate_synthetic_text(&tokenizer, environment_tokens, &mut text_rng)?;
             turns.push(AgentTurnPlan {
+                input_content_tokens: target_prompt_tokens,
                 target_prompt_tokens,
                 output_tokens,
                 environment_tokens,
@@ -868,6 +871,7 @@ fn build_replay_agent_plans(
         let initial_prompt =
             generate_synthetic_text(tokenizer, initial_prompt_tokens, &mut text_rng)?;
         let mut turns = Vec::with_capacity(spec.requests.len());
+        let mut current_input_content_tokens = initial_prompt_tokens;
 
         for (request_index, request) in spec.requests.iter().enumerate() {
             let reset_prompt = if request.reset_before {
@@ -884,6 +888,7 @@ fn build_replay_agent_plans(
                             config.replay_initial_overhead_tokens
                         )
                     })?;
+                current_input_content_tokens = reset_prompt_tokens;
                 Some(generate_synthetic_text(
                     tokenizer,
                     reset_prompt_tokens,
@@ -911,6 +916,7 @@ fn build_replay_agent_plans(
             let environment_content =
                 generate_synthetic_text(tokenizer, environment_tokens, &mut text_rng)?;
             turns.push(AgentTurnPlan {
+                input_content_tokens: current_input_content_tokens,
                 target_prompt_tokens: request.prompt_tokens,
                 output_tokens: request.output_tokens,
                 environment_tokens,
@@ -918,6 +924,21 @@ fn build_replay_agent_plans(
                 tool_call_latency: Duration::from_millis(request.delay_after_ms),
                 reset_prompt,
             });
+            if spec
+                .requests
+                .get(request_index + 1)
+                .is_some_and(|next| !next.reset_before)
+            {
+                current_input_content_tokens = current_input_content_tokens
+                    .checked_add(request.output_tokens)
+                    .and_then(|tokens| tokens.checked_add(environment_tokens))
+                    .ok_or_else(|| {
+                        anyhow!(
+                            "trajectory {:?} generated content-token count overflowed usize",
+                            spec.trajectory_id
+                        )
+                    })?;
+            }
         }
 
         plans.push(AgentPlan {
@@ -1063,6 +1084,7 @@ async fn run_agent(
                 routing_slot,
                 admitted_at,
                 invocation,
+                input_content_tokens: turn.input_content_tokens,
                 target_prompt_tokens: turn.target_prompt_tokens,
                 output_tokens: turn.output_tokens,
                 environment_tokens: turn.environment_tokens,
@@ -1867,10 +1889,16 @@ mod tests {
             95
         );
         assert_eq!(plan.turns.len(), 3);
+        assert_eq!(plan.turns[0].input_content_tokens, 95);
+        assert_eq!(plan.turns[0].target_prompt_tokens, 100);
         assert_eq!(plan.turns[0].environment_tokens, 20);
+        assert_eq!(plan.turns[1].input_content_tokens, 135);
+        assert_eq!(plan.turns[1].target_prompt_tokens, 150);
         assert_eq!(plan.turns[1].environment_tokens, 0);
         assert_eq!(plan.turns[1].tool_call_latency, Duration::from_millis(25));
         assert!(plan.turns[1].reset_prompt.is_none());
+        assert_eq!(plan.turns[2].input_content_tokens, 55);
+        assert_eq!(plan.turns[2].target_prompt_tokens, 60);
         let reset_prompt = plan.turns[2].reset_prompt.as_ref().unwrap();
         assert_eq!(
             tokenizer
