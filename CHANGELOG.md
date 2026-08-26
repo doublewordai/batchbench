@@ -1,5 +1,13 @@
 # Changelog
 
+## [0.6.1](https://github.com/doublewordai/batchbench/compare/v0.6.0...v0.6.1) (2026-08-26)
+
+
+### Bug Fixes
+
+* **agent:** resample stalled synthetic token candidates ([ef3ac18](https://github.com/doublewordai/batchbench/commit/ef3ac18b197985bd3675df512d25b0b012a14955))
+* **agent:** resample stalled synthetic token candidates ([7893fe9](https://github.com/doublewordai/batchbench/commit/7893fe95ab11aeaedcba8ae07663c7e95a3e8d4b))
+
 ## [0.6.0](https://github.com/doublewordai/batchbench/compare/v0.5.0...v0.6.0) (2026-08-26)
 
 
