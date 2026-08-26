@@ -1,12 +1,15 @@
 use std::ffi::OsString;
 use std::fs;
+use std::io::{BufReader, BufWriter, Read, Write};
 use std::path::{Path, PathBuf};
 use std::time::Duration;
 
 use anyhow::{anyhow, Context, Result};
 use clap::Parser;
 use serde::Serialize;
+use sha2::{Digest, Sha256};
 
+use crate::agent::TRAJECTORY_PLAN_SCHEMA_VERSION;
 use crate::{run_agent_benchmark, AgentBenchmarkReport, AgentLoopConfig, SampleSpec};
 
 const DEFAULT_MODEL: &str = "Qwen/Qwen3-VL-235B-A22B-Instruct-FP8";
@@ -17,9 +20,25 @@ const DEFAULT_MODEL: &str = "Qwen/Qwen3-VL-235B-A22B-Instruct-FP8";
     about = "Benchmark concurrent stateful agent loops and server-side prefix caching"
 )]
 struct Args {
-    /// Number of independent agent loops to run concurrently
-    #[arg(long, default_value_t = 1)]
-    agents: usize,
+    /// Total number of synthetic agent loops (defaults to 1 without --agent-plans-jsonl)
+    #[arg(long)]
+    agents: Option<usize>,
+
+    /// JSONL file containing complete empirical trajectory plans
+    #[arg(long, value_name = "PATH")]
+    agent_plans_jsonl: Option<PathBuf>,
+
+    /// Prompt tokens already accounted for by first-request/reset chat framing
+    #[arg(long, requires = "agent_plans_jsonl")]
+    replay_initial_overhead_tokens: Option<usize>,
+
+    /// Prompt tokens already accounted for by each appended assistant/tool turn
+    #[arg(long, requires = "agent_plans_jsonl")]
+    replay_turn_overhead_tokens: Option<usize>,
+
+    /// Maximum simultaneously active agents; completed agents are replaced from the pending queue
+    #[arg(long, value_parser = parse_positive_usize)]
+    max_active_agents: Option<usize>,
 
     /// OpenAI-style model identifier
     #[arg(long, default_value = DEFAULT_MODEL)]
@@ -207,13 +226,23 @@ struct Args {
     /// Optional path to write a CSV report
     #[arg(long)]
     results_csv: Option<PathBuf>,
+
+    /// Optional path to write one JSONL lifecycle event per agent
+    #[arg(long, value_name = "PATH")]
+    agent_events_jsonl: Option<PathBuf>,
 }
 
 #[derive(Debug, Serialize)]
 struct CsvResult {
     timestamp: String,
     model: String,
+    workload_mode: String,
+    agent_plans_jsonl: Option<String>,
+    agent_plans_sha256: Option<String>,
+    trajectory_schema_version: Option<u32>,
     agents: usize,
+    requested_max_active_agents: Option<usize>,
+    max_active_agents: usize,
     completed_agents: usize,
     planned_tool_invocations: u64,
     total_requests: u64,
@@ -224,6 +253,8 @@ struct CsvResult {
     estimated_cached_input_tokens: u64,
     total_tool_call_latency_seconds: f64,
     total_duration_seconds: f64,
+    last_agent_admitted_seconds: f64,
+    final_drain_seconds: f64,
     requests_per_second: f64,
     input_tokens_per_second: f64,
     output_tokens_per_second: f64,
@@ -241,11 +272,27 @@ struct CsvResult {
     dp_rank_perfect_routing: bool,
     dp_rank_perfect_routing_num: Option<usize>,
     seed: Option<u64>,
+    replay_initial_overhead_tokens: Option<usize>,
+    replay_turn_overhead_tokens: Option<usize>,
+    agent_events_jsonl: Option<String>,
     tool_call_latency_ms: Option<usize>,
     tool_call_latency_lognorm_mu: Option<f64>,
     tool_call_latency_lognorm_median_ms: Option<f64>,
     tool_call_latency_lognorm_sigma: Option<f64>,
     tool_call_latency_lognorm_max_ms: Option<usize>,
+}
+
+#[derive(Debug, Serialize)]
+struct AgentLifecycleJson<'a> {
+    agent_id: usize,
+    trajectory_id: &'a str,
+    routing_slot: usize,
+    dp_rank: Option<usize>,
+    admitted_at_seconds: f64,
+    queue_wait_seconds: f64,
+    finished_at_seconds: f64,
+    runtime_seconds: f64,
+    completed: bool,
 }
 
 enum ParsedArgs {
@@ -308,7 +355,24 @@ fn run_with_runtime(args: Args) -> Result<()> {
 }
 
 async fn run(args: Args) -> Result<()> {
-    if args.agents == 0 {
+    let replay_mode = args.agent_plans_jsonl.is_some();
+    if replay_mode && args.agents.is_some() {
+        return Err(anyhow!(
+            "--agents cannot be combined with --agent-plans-jsonl; the manifest defines the total agent count"
+        ));
+    }
+    if replay_mode && has_synthetic_shape_args(&args) {
+        return Err(anyhow!(
+            "synthetic workload-shape flags cannot be combined with --agent-plans-jsonl"
+        ));
+    }
+    let agent_plans_sha256 = args
+        .agent_plans_jsonl
+        .as_deref()
+        .map(sha256_file)
+        .transpose()?;
+    let agent_count = args.agents.unwrap_or(1);
+    if agent_count == 0 {
         return Err(anyhow!("agents must be greater than zero"));
     }
     if args.request_timeout_secs == 0 {
@@ -373,21 +437,43 @@ async fn run(args: Args) -> Result<()> {
     println!("Endpoint: {}", endpoint);
     println!("Model: {}", args.model);
     println!("Tokenizer: {}", tokenizer_model);
-    println!("Parallel agents: {}", args.agents);
-    println!("Initial prompt: {}", describe_spec(&input_tokens));
-    println!("Model response: {}", describe_spec(&output_tokens));
-    println!(
-        "Environment response: {}",
-        describe_spec(&environment_tokens)
-    );
-    println!(
-        "Tool invocations per agent: {}",
-        describe_spec(&tool_invocations)
-    );
-    println!(
-        "Tool-call latency: {}",
-        describe_latency_spec(tool_call_latency_ms.as_ref())
-    );
+    if let Some(path) = args.agent_plans_jsonl.as_deref() {
+        println!("Workload: trajectory replay from {}", path.display());
+        if let Some(hash) = agent_plans_sha256.as_deref() {
+            println!("Trajectory manifest SHA-256: {hash}");
+        }
+        println!(
+            "Replay prompt overhead: initial/reset {} tokens; appended turn {} tokens",
+            args.replay_initial_overhead_tokens.unwrap_or(0),
+            args.replay_turn_overhead_tokens.unwrap_or(0)
+        );
+        println!(
+            "Maximum active agents: {}",
+            args.max_active_agents
+                .map(|limit| limit.to_string())
+                .unwrap_or_else(|| "all manifest trajectories".to_string())
+        );
+    } else {
+        println!("Total synthetic agents: {}", agent_count);
+        println!(
+            "Maximum active agents: {}",
+            args.max_active_agents.unwrap_or(agent_count)
+        );
+        println!("Initial prompt: {}", describe_spec(&input_tokens));
+        println!("Model response: {}", describe_spec(&output_tokens));
+        println!(
+            "Environment response: {}",
+            describe_spec(&environment_tokens)
+        );
+        println!(
+            "Tool invocations per agent: {}",
+            describe_spec(&tool_invocations)
+        );
+        println!(
+            "Tool-call latency: {}",
+            describe_latency_spec(tool_call_latency_ms.as_ref())
+        );
+    }
     println!(
         "Output token params: {}",
         if args.sglang {
@@ -417,7 +503,7 @@ async fn run(args: Args) -> Result<()> {
         &endpoint,
         api_key,
         args.model.clone(),
-        args.agents,
+        agent_count,
         input_tokens,
         output_tokens,
         environment_tokens,
@@ -431,6 +517,16 @@ async fn run(args: Args) -> Result<()> {
     .with_user_tagging(!args.disable_user_tagging)
     .with_verbose(args.verbose)
     .with_dry_run(args.dry_run);
+    if let Some(path) = args.agent_plans_jsonl.as_deref() {
+        config = config.with_agent_plans_jsonl(path);
+        config = config.with_replay_prompt_overhead(
+            args.replay_initial_overhead_tokens.unwrap_or(0),
+            args.replay_turn_overhead_tokens.unwrap_or(0),
+        );
+    }
+    if let Some(max_active_agents) = args.max_active_agents {
+        config = config.with_max_active_agents(max_active_agents)?;
+    }
     if let Some(tool_call_latency_ms) = tool_call_latency_ms {
         config = config.with_tool_call_latency_ms(tool_call_latency_ms)?;
     }
@@ -448,11 +544,29 @@ async fn run(args: Args) -> Result<()> {
     let report = run_agent_benchmark(config).await?;
     print_summary(&report);
 
+    if let Some(events_path) = args.agent_events_jsonl.as_deref() {
+        write_agent_events_jsonl(events_path, &report, args.dp_rank_perfect_routing_num)?;
+        println!("Wrote agent lifecycle events to {}", events_path.display());
+    }
+
     if let Some(csv_path) = args.results_csv.as_deref() {
         let record = CsvResult {
             timestamp: start_time.to_rfc3339(),
             model: args.model,
-            agents: args.agents,
+            workload_mode: if replay_mode {
+                "trajectory_replay".to_string()
+            } else {
+                "synthetic".to_string()
+            },
+            agent_plans_jsonl: args
+                .agent_plans_jsonl
+                .as_ref()
+                .map(|path| path.display().to_string()),
+            agent_plans_sha256: agent_plans_sha256.clone(),
+            trajectory_schema_version: replay_mode.then_some(TRAJECTORY_PLAN_SCHEMA_VERSION),
+            agents: report.total_agents,
+            requested_max_active_agents: args.max_active_agents,
+            max_active_agents: report.max_active_agents,
             completed_agents: report.completed_agents,
             planned_tool_invocations: report.planned_tool_invocations,
             total_requests: report.total_requests,
@@ -463,6 +577,8 @@ async fn run(args: Args) -> Result<()> {
             estimated_cached_input_tokens: report.estimated_cached_input_tokens,
             total_tool_call_latency_seconds: report.total_tool_call_latency.as_secs_f64(),
             total_duration_seconds: report.total_duration.as_secs_f64(),
+            last_agent_admitted_seconds: report.last_agent_admitted_at.as_secs_f64(),
+            final_drain_seconds: report.final_drain_duration.as_secs_f64(),
             requests_per_second: report.requests_per_second,
             input_tokens_per_second: report.input_tokens_per_second,
             output_tokens_per_second: report.output_tokens_per_second,
@@ -480,6 +596,12 @@ async fn run(args: Args) -> Result<()> {
             dp_rank_perfect_routing: args.dp_rank_perfect_routing,
             dp_rank_perfect_routing_num: args.dp_rank_perfect_routing_num,
             seed: args.seed,
+            replay_initial_overhead_tokens: args.replay_initial_overhead_tokens,
+            replay_turn_overhead_tokens: args.replay_turn_overhead_tokens,
+            agent_events_jsonl: args
+                .agent_events_jsonl
+                .as_ref()
+                .map(|path| path.display().to_string()),
             tool_call_latency_ms: args.tool_call_latency_ms,
             tool_call_latency_lognorm_mu: args.tool_call_latency_lognorm_mu,
             tool_call_latency_lognorm_median_ms: args.tool_call_latency_lognorm_median_ms,
@@ -491,6 +613,34 @@ async fn run(args: Args) -> Result<()> {
     }
 
     Ok(())
+}
+
+fn has_synthetic_shape_args(args: &Args) -> bool {
+    args.input_tokens.is_some()
+        || args.input_lognorm_mu.is_some()
+        || args.input_lognorm_median.is_some()
+        || args.input_lognorm_sigma.is_some()
+        || args.input_lognorm_max.is_some()
+        || args.output_tokens.is_some()
+        || args.output_lognorm_mu.is_some()
+        || args.output_lognorm_median.is_some()
+        || args.output_lognorm_sigma.is_some()
+        || args.output_lognorm_max.is_some()
+        || args.environment_tokens.is_some()
+        || args.environment_lognorm_mu.is_some()
+        || args.environment_lognorm_median.is_some()
+        || args.environment_lognorm_sigma.is_some()
+        || args.environment_lognorm_max.is_some()
+        || args.tool_invocations.is_some()
+        || args.tool_invocations_lognorm_mu.is_some()
+        || args.tool_invocations_lognorm_median.is_some()
+        || args.tool_invocations_lognorm_sigma.is_some()
+        || args.tool_invocations_lognorm_max.is_some()
+        || args.tool_call_latency_ms.is_some()
+        || args.tool_call_latency_lognorm_mu.is_some()
+        || args.tool_call_latency_lognorm_median_ms.is_some()
+        || args.tool_call_latency_lognorm_sigma.is_some()
+        || args.tool_call_latency_lognorm_max_ms.is_some()
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -650,6 +800,12 @@ fn print_summary(report: &AgentBenchmarkReport) {
         report.completed_agents, report.total_agents
     );
     println!(
+        "Rolling admission: {} maximum active; last admission at {:.2}s; final drain {:.2}s",
+        report.max_active_agents,
+        report.last_agent_admitted_at.as_secs_f64(),
+        report.final_drain_duration.as_secs_f64()
+    );
+    println!(
         "Tool invocations: {} planned; requests {} (success {}, failure {})",
         report.planned_tool_invocations,
         report.total_requests,
@@ -690,8 +846,8 @@ fn print_summary(report: &AgentBenchmarkReport) {
     );
     for failure in &report.failures {
         println!(
-            "Failure: agent {} invocation {}: {}",
-            failure.agent_id, failure.invocation, failure.error
+            "Failure: agent {} trajectory {:?} invocation {}: {}",
+            failure.agent_id, failure.trajectory_id, failure.invocation, failure.error
         );
     }
 }
@@ -706,6 +862,24 @@ fn format_latency(duration: Option<Duration>) -> String {
         .unwrap_or_else(|| "n/a".to_string())
 }
 
+fn sha256_file(path: &Path) -> Result<String> {
+    let file = fs::File::open(path)
+        .with_context(|| format!("failed to open {} for hashing", path.display()))?;
+    let mut reader = BufReader::new(file);
+    let mut hasher = Sha256::new();
+    let mut buffer = [0u8; 64 * 1024];
+    loop {
+        let bytes_read = reader
+            .read(&mut buffer)
+            .with_context(|| format!("failed to hash {}", path.display()))?;
+        if bytes_read == 0 {
+            break;
+        }
+        hasher.update(&buffer[..bytes_read]);
+    }
+    Ok(format!("{:x}", hasher.finalize()))
+}
+
 fn write_results_csv(path: &Path, record: &CsvResult) -> Result<()> {
     if let Some(parent) = path.parent() {
         if !parent.as_os_str().is_empty() {
@@ -718,6 +892,45 @@ fn write_results_csv(path: &Path, record: &CsvResult) -> Result<()> {
     writer
         .serialize(record)
         .with_context(|| format!("failed to serialize {}", path.display()))?;
+    writer
+        .flush()
+        .with_context(|| format!("failed to flush {}", path.display()))?;
+    Ok(())
+}
+
+fn write_agent_events_jsonl(
+    path: &Path,
+    report: &AgentBenchmarkReport,
+    dp_rank_count: Option<usize>,
+) -> Result<()> {
+    if let Some(parent) = path.parent() {
+        if !parent.as_os_str().is_empty() {
+            fs::create_dir_all(parent)
+                .with_context(|| format!("failed to create directory {}", parent.display()))?;
+        }
+    }
+    let file =
+        fs::File::create(path).with_context(|| format!("failed to create {}", path.display()))?;
+    let mut writer = BufWriter::new(file);
+    for record in &report.agent_lifecycles {
+        let runtime = record.finished_at.saturating_sub(record.admitted_at);
+        let event = AgentLifecycleJson {
+            agent_id: record.agent_id,
+            trajectory_id: &record.trajectory_id,
+            routing_slot: record.routing_slot,
+            dp_rank: dp_rank_count.map(|ranks| record.routing_slot % ranks),
+            admitted_at_seconds: record.admitted_at.as_secs_f64(),
+            queue_wait_seconds: record.admitted_at.as_secs_f64(),
+            finished_at_seconds: record.finished_at.as_secs_f64(),
+            runtime_seconds: runtime.as_secs_f64(),
+            completed: record.completed,
+        };
+        serde_json::to_writer(&mut writer, &event)
+            .with_context(|| format!("failed to serialize {}", path.display()))?;
+        writer
+            .write_all(b"\n")
+            .with_context(|| format!("failed to write {}", path.display()))?;
+    }
     writer
         .flush()
         .with_context(|| format!("failed to flush {}", path.display()))?;
@@ -823,5 +1036,86 @@ mod tests {
         assert!(error
             .to_string()
             .contains("value must be greater than zero"));
+    }
+
+    #[test]
+    fn trajectory_replay_flags_parse_without_synthetic_agent_count() {
+        let args = Args::try_parse_from([
+            "batchbench-agent",
+            "--agent-plans-jsonl",
+            "plans.jsonl",
+            "--max-active-agents",
+            "128",
+            "--replay-initial-overhead-tokens",
+            "1113",
+            "--replay-turn-overhead-tokens",
+            "104",
+        ])
+        .unwrap();
+
+        assert_eq!(args.agent_plans_jsonl, Some(PathBuf::from("plans.jsonl")));
+        assert_eq!(args.max_active_agents, Some(128));
+        assert_eq!(args.replay_initial_overhead_tokens, Some(1113));
+        assert_eq!(args.replay_turn_overhead_tokens, Some(104));
+        assert_eq!(args.agents, None);
+        assert!(!has_synthetic_shape_args(&args));
+    }
+
+    #[test]
+    fn trajectory_replay_detects_synthetic_shape_flags() {
+        let args = Args::try_parse_from([
+            "batchbench-agent",
+            "--agent-plans-jsonl",
+            "plans.jsonl",
+            "--output-tokens",
+            "64",
+        ])
+        .unwrap();
+        assert!(has_synthetic_shape_args(&args));
+    }
+
+    #[tokio::test]
+    async fn trajectory_replay_rejects_explicit_agents_at_runtime() {
+        let args = Args::try_parse_from([
+            "batchbench-agent",
+            "--agent-plans-jsonl",
+            "plans.jsonl",
+            "--agents",
+            "2",
+        ])
+        .unwrap();
+        let error = run(args).await.unwrap_err();
+        assert!(error.to_string().contains("--agents cannot be combined"));
+    }
+
+    #[tokio::test]
+    async fn trajectory_replay_rejects_shape_flags_at_runtime() {
+        let args = Args::try_parse_from([
+            "batchbench-agent",
+            "--agent-plans-jsonl",
+            "plans.jsonl",
+            "--output-tokens",
+            "64",
+        ])
+        .unwrap();
+        let error = run(args).await.unwrap_err();
+        assert!(error.to_string().contains("synthetic workload-shape flags"));
+    }
+
+    #[test]
+    fn max_active_agents_rejects_zero_at_parse_time() {
+        let error =
+            Args::try_parse_from(["batchbench-agent", "--max-active-agents", "0"]).unwrap_err();
+        assert!(error
+            .to_string()
+            .contains("value must be greater than zero"));
+    }
+
+    #[test]
+    fn replay_overhead_requires_a_manifest() {
+        let error =
+            Args::try_parse_from(["batchbench-agent", "--replay-turn-overhead-tokens", "104"])
+                .unwrap_err();
+        assert!(error.to_string().contains("--agent-plans-jsonl"));
     }
 }

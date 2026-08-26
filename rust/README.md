@@ -139,3 +139,11 @@ tokens expected to hit a perfect per-agent prefix cache. Tool latency can likewi
 be fixed with `--tool-call-latency-ms` or sampled with the
 `--tool-call-latency-lognorm-*` flags; each agent sleeps for that duration before
 continuing after a successful tool call.
+
+For empirical token-shape replay, pass `--agent-plans-jsonl <path>` instead of the
+synthetic shape flags. Each JSONL record contains one trajectory's ordered
+`prompt_tokens`/`output_tokens` requests. Add `--max-active-agents <n>` to queue all
+plans while keeping at most `n` trajectories active; a queued plan immediately
+replaces whichever active trajectory finishes. See the root README and
+`examples/trajectory-replay/plans.jsonl` for the versioned schema and reset
+semantics.

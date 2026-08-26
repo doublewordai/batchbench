@@ -135,6 +135,73 @@ reproducible. `--tokenizer-model` can be supplied when the endpoint's model name
 not also a Hugging Face tokenizer identifier. It accepts a Hugging Face model ID,
 a local `tokenizer.json` file, or a local directory containing `tokenizer.json`.
 
+### Trajectory replay and rolling admission
+
+Use `--agent-plans-jsonl` to replay complete empirical token shapes instead of
+sampling initial prompts, outputs, environment results, and invocation counts
+independently. Each non-empty JSONL line is one trajectory, and file order is the
+FIFO admission order:
+
+```json
+{"schema_version":1,"trajectory_id":"agent-001","requests":[{"prompt_tokens":13381,"output_tokens":288},{"prompt_tokens":14800,"output_tokens":512,"delay_after_ms":25},{"prompt_tokens":7000,"output_tokens":128,"reset_before":true}]}
+```
+
+`prompt_tokens` and `output_tokens` are required and must be positive.
+`delay_after_ms` defaults to zero. For a normal transition, BatchBench infers the
+synthetic environment growth as:
+
+```text
+next prompt - current prompt - current output
+```
+
+If a trajectory compacts or resets such that this value would be negative, mark the
+next request with `"reset_before": true`. BatchBench then starts that request from a
+fresh synthetic prompt while preserving the trajectory's user/routing identity. A
+reset deliberately claims no prefix-cache reuse from the preceding request.
+
+Absolute prompt counts commonly include chat-template and tool-envelope tokens that
+are not part of the synthetic message content. After calibrating those values against
+the target backend, use `--replay-initial-overhead-tokens` for a first request or
+reset, and `--replay-turn-overhead-tokens` for each normal appended turn. BatchBench
+subtracts these values when generating content while retaining the manifest's
+absolute prompt targets for reporting.
+
+`--max-active-agents` bounds simultaneous trajectories while retaining every plan
+in the manifest. BatchBench initially admits up to that limit and immediately
+admits the next queued trajectory whenever any active trajectory terminates. The
+replacement inherits the freed scheduler/routing slot, keeping active load balanced
+across data-parallel ranks when perfect routing is enabled.
+
+```bash
+batchbench-agent \
+  --model Qwen/Qwen3-8B \
+  --host http://localhost:8000 \
+  --agent-plans-jsonl examples/trajectory-replay/plans.jsonl \
+  --max-active-agents 2 \
+  --replay-initial-overhead-tokens 0 \
+  --replay-turn-overhead-tokens 0 \
+  --agent-events-jsonl agent-events.jsonl \
+  --seed 42 \
+  --dry-run
+```
+
+Do not combine `--agent-plans-jsonl` with `--agents` or the synthetic workload-shape
+flags. `--seed` remains useful because it makes generated placeholder text
+reproducible.
+
+`--agent-events-jsonl` writes each trajectory's queue/admission time, reusable
+routing slot, optional DP rank, finish time, runtime, and completion status. The
+summary separately reports the final admission time and final drain duration.
+
+Trajectory replay reproduces the joint request-count and nominal token-shape plan,
+not the original text. Prompt targets include workload-specific framing, while
+BatchBench generates its own chat/tool framing and exact-length synthetic message
+content. Uncalibrated framing can therefore make live prompts drift systematically
+from their targets over a long trajectory. Live `usage.prompt_tokens` is
+authoritative and should be compared with the plan before a capacity result is
+accepted. Likewise, exact output lengths require a backend that honors the requested
+minimum/maximum token constraints.
+
 Every request includes a `user` field and an `X-SMG-Routing-Key` header containing
 the same UUID, which remains stable for the life of that agent and differs between
 agents. Use `--disable-user-tagging` to omit both, or `--user-prefix <prefix>` to
@@ -142,9 +209,10 @@ use deterministic `<prefix>-<agent_id>` values instead of UUIDs.
 
 For deterministic data-parallel routing, pass both
 `--dp-rank-perfect-routing` and `--dp-rank-perfect-routing-num <ranks>`.
-Each request then includes `X-SMG-Target-Worker: <agent_id % ranks>`, distributing
-consecutive agents evenly across the configured ranks. This routing is independent
-of user tagging.
+Each request then includes `X-SMG-Target-Worker: <routing_slot % ranks>`. Initial
+agents occupy consecutive slots; under rolling admission, a replacement inherits
+the slot freed by the trajectory that just terminated. This preserves the active
+per-rank balance and is independent of user tagging.
 
 Tool-call latency defaults to zero. Set a fixed delay with
 `--tool-call-latency-ms`, or sample milliseconds independently for every invocation
@@ -178,7 +246,7 @@ For each successful request after an agent's first, the cache estimate adds that
 same agent's preceding prompt-token count (capped by the current prompt count).
 Retries and failed requests are excluded because they do not provide reliable usage
 data. Use `--results-csv <path>` to persist the same totals, or `--dry-run` to inspect
-the independently sampled workload without sending requests.
+the sampled or replayed plans without sending requests.
 
 ## Rust CLI
 
