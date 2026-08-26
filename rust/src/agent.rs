@@ -1,3 +1,7 @@
+use std::collections::{HashSet, VecDeque};
+use std::fs::File;
+use std::io::{BufRead, BufReader};
+use std::path::{Path, PathBuf};
 use std::time::{Duration, Instant};
 
 use anyhow::{anyhow, Context, Result};
@@ -5,6 +9,7 @@ use rand::{Rng, SeedableRng};
 use rand_distr::{Distribution, LogNormal};
 use reqwest::header::{HeaderMap, HeaderName, HeaderValue, AUTHORIZATION, CONTENT_TYPE};
 use reqwest::{Client, Url};
+use serde::Deserialize;
 use serde_json::{json, Map, Value};
 use tokenizers::Tokenizer;
 use tokio::task::JoinSet;
@@ -128,6 +133,10 @@ pub struct AgentLoopConfig {
     pub ignore_eos: bool,
     pub user_tagging: bool,
     pub seed: Option<u64>,
+    pub agent_plans_jsonl: Option<PathBuf>,
+    pub max_active_agents: Option<usize>,
+    pub replay_initial_overhead_tokens: usize,
+    pub replay_turn_overhead_tokens: usize,
 }
 
 impl AgentLoopConfig {
@@ -189,6 +198,10 @@ impl AgentLoopConfig {
             ignore_eos: false,
             user_tagging: true,
             seed: None,
+            agent_plans_jsonl: None,
+            max_active_agents: None,
+            replay_initial_overhead_tokens: 0,
+            replay_turn_overhead_tokens: 0,
         })
     }
 
@@ -263,6 +276,29 @@ impl AgentLoopConfig {
         Ok(self)
     }
 
+    pub fn with_agent_plans_jsonl(mut self, path: impl Into<PathBuf>) -> Self {
+        self.agent_plans_jsonl = Some(path.into());
+        self
+    }
+
+    pub fn with_max_active_agents(mut self, max_active_agents: usize) -> Result<Self> {
+        if max_active_agents == 0 {
+            return Err(anyhow!("max active agents must be greater than zero"));
+        }
+        self.max_active_agents = Some(max_active_agents);
+        Ok(self)
+    }
+
+    pub fn with_replay_prompt_overhead(
+        mut self,
+        initial_overhead_tokens: usize,
+        turn_overhead_tokens: usize,
+    ) -> Self {
+        self.replay_initial_overhead_tokens = initial_overhead_tokens;
+        self.replay_turn_overhead_tokens = turn_overhead_tokens;
+        self
+    }
+
     pub fn add_header(mut self, name: HeaderName, value: HeaderValue) -> Self {
         self.headers.insert(name, value);
         self
@@ -271,17 +307,19 @@ impl AgentLoopConfig {
 
 #[derive(Clone, Debug)]
 struct AgentTurnPlan {
+    target_prompt_tokens: usize,
     output_tokens: usize,
     environment_tokens: usize,
     environment_content: String,
     tool_call_latency: Duration,
+    reset_prompt: Option<String>,
 }
 
 #[derive(Clone, Debug)]
 struct AgentPlan {
     agent_id: usize,
+    trajectory_id: String,
     user_tag: Option<String>,
-    initial_prompt_tokens: usize,
     initial_prompt: String,
     turns: Vec<AgentTurnPlan>,
 }
@@ -289,13 +327,25 @@ struct AgentPlan {
 #[derive(Clone, Debug)]
 pub struct AgentFailureRecord {
     pub agent_id: usize,
+    pub trajectory_id: String,
     pub invocation: usize,
     pub error: String,
 }
 
 #[derive(Clone, Debug)]
+pub struct AgentLifecycleRecord {
+    pub agent_id: usize,
+    pub trajectory_id: String,
+    pub routing_slot: usize,
+    pub admitted_at: Duration,
+    pub finished_at: Duration,
+    pub completed: bool,
+}
+
+#[derive(Clone, Debug)]
 pub struct AgentBenchmarkReport {
     pub total_agents: usize,
+    pub max_active_agents: usize,
     pub completed_agents: usize,
     pub planned_tool_invocations: u64,
     pub total_requests: u64,
@@ -306,6 +356,8 @@ pub struct AgentBenchmarkReport {
     pub estimated_cached_input_tokens: u64,
     pub total_tool_call_latency: Duration,
     pub total_duration: Duration,
+    pub last_agent_admitted_at: Duration,
+    pub final_drain_duration: Duration,
     pub input_tokens_per_second: f64,
     pub output_tokens_per_second: f64,
     pub requests_per_second: f64,
@@ -316,10 +368,15 @@ pub struct AgentBenchmarkReport {
     pub agent_end_to_end_latency_p90: Option<Duration>,
     pub agent_end_to_end_latency_p99: Option<Duration>,
     pub failures: Vec<AgentFailureRecord>,
+    pub agent_lifecycles: Vec<AgentLifecycleRecord>,
 }
 
 #[derive(Debug)]
 struct AgentWorkerReport {
+    agent_id: usize,
+    trajectory_id: String,
+    routing_slot: usize,
+    admitted_at: Duration,
     completed: bool,
     end_to_end_latency: Duration,
     successful_requests: u64,
@@ -334,8 +391,17 @@ struct AgentWorkerReport {
 }
 
 impl AgentWorkerReport {
-    fn new() -> Self {
+    fn new(
+        agent_id: usize,
+        trajectory_id: String,
+        routing_slot: usize,
+        admitted_at: Duration,
+    ) -> Self {
         Self {
+            agent_id,
+            trajectory_id,
+            routing_slot,
+            admitted_at,
             completed: false,
             end_to_end_latency: Duration::ZERO,
             successful_requests: 0,
@@ -354,11 +420,38 @@ impl AgentWorkerReport {
 #[derive(Clone, Debug)]
 struct DryRunRecord {
     agent_id: usize,
+    trajectory_id: String,
+    routing_slot: usize,
+    admitted_at: Duration,
     invocation: usize,
-    input_content_tokens: usize,
+    target_prompt_tokens: usize,
     output_tokens: usize,
     environment_tokens: usize,
     tool_call_latency_ms: usize,
+    reset_before: bool,
+}
+
+const TRAJECTORY_PLAN_SCHEMA_VERSION: u32 = 1;
+
+#[derive(Clone, Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct TrajectoryPlanSpec {
+    schema_version: u32,
+    trajectory_id: String,
+    requests: Vec<TrajectoryRequestSpec>,
+    #[serde(default, rename = "metadata")]
+    _metadata: Option<Value>,
+}
+
+#[derive(Clone, Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct TrajectoryRequestSpec {
+    prompt_tokens: usize,
+    output_tokens: usize,
+    #[serde(default)]
+    reset_before: bool,
+    #[serde(default)]
+    delay_after_ms: u64,
 }
 
 #[derive(Debug)]
@@ -369,6 +462,41 @@ struct RequestResult {
     latency: Duration,
 }
 
+#[derive(Debug)]
+struct RollingAdmission<T> {
+    pending: VecDeque<T>,
+    max_active: usize,
+}
+
+impl<T> RollingAdmission<T> {
+    fn new(plans: Vec<T>, max_active: usize) -> Result<Self> {
+        if max_active == 0 {
+            return Err(anyhow!("max active agents must be greater than zero"));
+        }
+        let effective_max_active = max_active.min(plans.len());
+        Ok(Self {
+            pending: VecDeque::from(plans),
+            max_active: effective_max_active,
+        })
+    }
+
+    fn initial_admissions(&mut self) -> Vec<(usize, T)> {
+        (0..self.max_active)
+            .map(|routing_slot| {
+                let plan = self
+                    .pending
+                    .pop_front()
+                    .expect("validated admission limit cannot exceed plan count");
+                (routing_slot, plan)
+            })
+            .collect()
+    }
+
+    fn replacement(&mut self, routing_slot: usize) -> Option<(usize, T)> {
+        self.pending.pop_front().map(|plan| (routing_slot, plan))
+    }
+}
+
 /// Run independent, stateful agent loops concurrently.
 ///
 /// Each agent begins with a separately generated user message. Every model response and synthetic
@@ -376,6 +504,8 @@ struct RequestResult {
 /// previous request as a prefix for server-side KV-cache testing.
 pub async fn run_agent_benchmark(config: AgentLoopConfig) -> Result<AgentBenchmarkReport> {
     let plans = build_agent_plans(&config)?;
+    let total_agents = plans.len();
+    let requested_max_active_agents = config.max_active_agents.unwrap_or(total_agents);
     let planned_tool_invocations = plans
         .iter()
         .try_fold(0u64, |total, plan| {
@@ -391,11 +521,19 @@ pub async fn run_agent_benchmark(config: AgentLoopConfig) -> Result<AgentBenchma
     let start = Instant::now();
 
     let mut join_set = JoinSet::new();
-    for plan in plans {
-        let client = client.clone();
-        let config = std::sync::Arc::clone(&config);
-        join_set.spawn(async move { run_agent(plan, client, config).await });
+    let mut admission = RollingAdmission::new(plans, requested_max_active_agents)?;
+    let max_active_agents = admission.max_active;
+    for (routing_slot, plan) in admission.initial_admissions() {
+        spawn_agent(
+            &mut join_set,
+            plan,
+            routing_slot,
+            Duration::ZERO,
+            &client,
+            &config,
+        );
     }
+    let mut last_agent_admitted_at = Duration::ZERO;
 
     let mut completed_agents = 0usize;
     let mut successful_requests = 0u64;
@@ -408,9 +546,20 @@ pub async fn run_agent_benchmark(config: AgentLoopConfig) -> Result<AgentBenchma
     let mut agent_end_to_end_latencies = Vec::new();
     let mut failures = Vec::new();
     let mut dry_run_records = Vec::new();
+    let mut agent_lifecycles = Vec::with_capacity(total_agents);
 
     while let Some(joined) = join_set.join_next().await {
         let worker = joined.map_err(|err| anyhow!("agent worker task failed: {}", err))??;
+        let finished_at = start.elapsed();
+        let routing_slot = worker.routing_slot;
+        agent_lifecycles.push(AgentLifecycleRecord {
+            agent_id: worker.agent_id,
+            trajectory_id: worker.trajectory_id.clone(),
+            routing_slot,
+            admitted_at: worker.admitted_at,
+            finished_at,
+            completed: worker.completed,
+        });
         if worker.completed {
             completed_agents += 1;
             agent_end_to_end_latencies.push(worker.end_to_end_latency);
@@ -425,32 +574,53 @@ pub async fn run_agent_benchmark(config: AgentLoopConfig) -> Result<AgentBenchma
         latencies.extend(worker.latencies);
         failures.extend(worker.failures);
         dry_run_records.extend(worker.dry_run_records);
+
+        if let Some((routing_slot, plan)) = admission.replacement(routing_slot) {
+            let admitted_at = start.elapsed();
+            last_agent_admitted_at = admitted_at;
+            spawn_agent(
+                &mut join_set,
+                plan,
+                routing_slot,
+                admitted_at,
+                &client,
+                &config,
+            );
+        }
     }
 
     if config.dry_run {
         dry_run_records.sort_by_key(|record| (record.agent_id, record.invocation));
         for record in dry_run_records {
             println!(
-                "[DRY-RUN] agent={} invocation={} input_content_tokens={} output_tokens={} environment_tokens={} tool_call_latency_ms={}",
+                "[DRY-RUN] agent={} invocation={} input_content_tokens={} output_tokens={} environment_tokens={} tool_call_latency_ms={} trajectory_id={} routing_slot={} admitted_at_ms={} target_prompt_tokens={} reset_before={}",
                 record.agent_id,
                 record.invocation,
-                record.input_content_tokens,
+                record.target_prompt_tokens,
                 record.output_tokens,
                 record.environment_tokens,
-                record.tool_call_latency_ms
+                record.tool_call_latency_ms,
+                record.trajectory_id,
+                record.routing_slot,
+                record.admitted_at.as_millis(),
+                record.target_prompt_tokens,
+                record.reset_before
             );
         }
     }
 
     let total_duration = start.elapsed();
+    let final_drain_duration = total_duration.saturating_sub(last_agent_admitted_at);
     latencies.sort();
     agent_end_to_end_latencies.sort();
     failures.sort_by_key(|failure| (failure.agent_id, failure.invocation));
+    agent_lifecycles.sort_by_key(|record| record.agent_id);
     let total_requests = successful_requests.saturating_add(failed_requests);
     let duration_secs = total_duration.as_secs_f64();
 
     Ok(AgentBenchmarkReport {
-        total_agents: config.agent_count,
+        total_agents,
+        max_active_agents,
         completed_agents,
         planned_tool_invocations,
         total_requests,
@@ -461,6 +631,8 @@ pub async fn run_agent_benchmark(config: AgentLoopConfig) -> Result<AgentBenchma
         estimated_cached_input_tokens,
         total_tool_call_latency,
         total_duration,
+        last_agent_admitted_at,
+        final_drain_duration,
         input_tokens_per_second: rate(total_input_tokens, duration_secs),
         output_tokens_per_second: rate(total_output_tokens, duration_secs),
         requests_per_second: rate(total_requests, duration_secs),
@@ -471,7 +643,21 @@ pub async fn run_agent_benchmark(config: AgentLoopConfig) -> Result<AgentBenchma
         agent_end_to_end_latency_p90: percentile(&agent_end_to_end_latencies, 0.90),
         agent_end_to_end_latency_p99: percentile(&agent_end_to_end_latencies, 0.99),
         failures,
+        agent_lifecycles,
     })
+}
+
+fn spawn_agent(
+    join_set: &mut JoinSet<Result<AgentWorkerReport>>,
+    plan: AgentPlan,
+    routing_slot: usize,
+    admitted_at: Duration,
+    client: &Client,
+    config: &std::sync::Arc<AgentLoopConfig>,
+) {
+    let client = client.clone();
+    let config = std::sync::Arc::clone(config);
+    join_set.spawn(async move { run_agent(plan, routing_slot, admitted_at, client, config).await });
 }
 
 fn build_agent_plans(config: &AgentLoopConfig) -> Result<Vec<AgentPlan>> {
@@ -480,6 +666,11 @@ fn build_agent_plans(config: &AgentLoopConfig) -> Result<Vec<AgentPlan>> {
         Some(seed) => seed,
         None => rand::thread_rng().gen(),
     };
+
+    if let Some(path) = config.agent_plans_jsonl.as_deref() {
+        let specs = load_trajectory_plan_specs(path)?;
+        return build_replay_agent_plans(config, &tokenizer, root_seed, specs);
+    }
 
     let mut plans = Vec::with_capacity(config.agent_count);
     for agent_id in 0..config.agent_count {
@@ -498,6 +689,7 @@ fn build_agent_plans(config: &AgentLoopConfig) -> Result<Vec<AgentPlan>> {
             generate_synthetic_text(&tokenizer, initial_prompt_tokens, &mut text_rng)?;
 
         let mut turns = Vec::with_capacity(invocation_count);
+        let mut target_prompt_tokens = initial_prompt_tokens;
         for _ in 0..invocation_count {
             let output_tokens = config
                 .output_tokens
@@ -514,21 +706,228 @@ fn build_agent_plans(config: &AgentLoopConfig) -> Result<Vec<AgentPlan>> {
             let environment_content =
                 generate_synthetic_text(&tokenizer, environment_tokens, &mut text_rng)?;
             turns.push(AgentTurnPlan {
+                target_prompt_tokens,
                 output_tokens,
                 environment_tokens,
                 environment_content,
                 tool_call_latency: Duration::from_millis(tool_call_latency_ms),
+                reset_prompt: None,
             });
+            target_prompt_tokens = target_prompt_tokens
+                .checked_add(output_tokens)
+                .and_then(|tokens| tokens.checked_add(environment_tokens))
+                .ok_or_else(|| anyhow!("sampled agent prompt-token count overflowed usize"))?;
         }
 
         plans.push(AgentPlan {
             agent_id,
+            trajectory_id: format!("sampled-{agent_id}"),
             user_tag: generate_user_tag(
                 config.user_tagging,
                 config.user_prefix.as_deref(),
                 agent_id,
             ),
-            initial_prompt_tokens,
+            initial_prompt,
+            turns,
+        });
+    }
+    Ok(plans)
+}
+
+fn load_trajectory_plan_specs(path: &Path) -> Result<Vec<TrajectoryPlanSpec>> {
+    let file = File::open(path)
+        .with_context(|| format!("failed to open trajectory plan file {}", path.display()))?;
+    parse_trajectory_plan_specs(BufReader::new(file), &path.display().to_string())
+}
+
+fn parse_trajectory_plan_specs<R: BufRead>(
+    reader: R,
+    source: &str,
+) -> Result<Vec<TrajectoryPlanSpec>> {
+    let mut specs = Vec::new();
+    let mut trajectory_ids = HashSet::new();
+
+    for (line_index, line) in reader.lines().enumerate() {
+        let line_number = line_index + 1;
+        let line = line.with_context(|| format!("failed to read {source}:{line_number}"))?;
+        if line.trim().is_empty() {
+            continue;
+        }
+        let spec: TrajectoryPlanSpec = serde_json::from_str(&line)
+            .with_context(|| format!("invalid trajectory plan at {source}:{line_number}"))?;
+        validate_trajectory_plan_spec(&spec)
+            .with_context(|| format!("invalid trajectory plan at {source}:{line_number}"))?;
+        if !trajectory_ids.insert(spec.trajectory_id.clone()) {
+            return Err(anyhow!(
+                "invalid trajectory plan at {source}:{line_number}: duplicate trajectory_id {:?}",
+                spec.trajectory_id
+            ));
+        }
+        specs.push(spec);
+    }
+
+    if specs.is_empty() {
+        return Err(anyhow!(
+            "trajectory plan file {source} contains no trajectory plans"
+        ));
+    }
+    Ok(specs)
+}
+
+fn validate_trajectory_plan_spec(spec: &TrajectoryPlanSpec) -> Result<()> {
+    if spec.schema_version != TRAJECTORY_PLAN_SCHEMA_VERSION {
+        return Err(anyhow!(
+            "unsupported schema_version {}; expected {}",
+            spec.schema_version,
+            TRAJECTORY_PLAN_SCHEMA_VERSION
+        ));
+    }
+    if spec.trajectory_id.trim().is_empty() {
+        return Err(anyhow!("trajectory_id must not be empty"));
+    }
+    if spec.requests.is_empty() {
+        return Err(anyhow!("requests must contain at least one request"));
+    }
+
+    for (request_index, request) in spec.requests.iter().enumerate() {
+        if request.prompt_tokens == 0 {
+            return Err(anyhow!(
+                "request {} prompt_tokens must be greater than zero",
+                request_index + 1
+            ));
+        }
+        if request.output_tokens == 0 {
+            return Err(anyhow!(
+                "request {} output_tokens must be greater than zero",
+                request_index + 1
+            ));
+        }
+        if request_index == 0 && request.reset_before {
+            return Err(anyhow!("the first request cannot set reset_before"));
+        }
+        if request_index > 0 {
+            let previous = &spec.requests[request_index - 1];
+            inferred_environment_tokens(previous, request, 0).with_context(|| {
+                format!(
+                    "request {} prompt_tokens ({}) cannot follow the preceding prompt and output; set reset_before=true to model compaction or reset",
+                    request_index + 1,
+                    request.prompt_tokens
+                )
+            })?;
+        }
+    }
+    Ok(())
+}
+
+fn inferred_environment_tokens(
+    current: &TrajectoryRequestSpec,
+    next: &TrajectoryRequestSpec,
+    transition_overhead_tokens: usize,
+) -> Result<usize> {
+    if next.reset_before {
+        return Ok(0);
+    }
+    let current_context = current
+        .prompt_tokens
+        .checked_add(current.output_tokens)
+        .ok_or_else(|| anyhow!("trajectory prompt-token count overflowed usize"))?;
+    let current_context = current_context
+        .checked_add(transition_overhead_tokens)
+        .ok_or_else(|| anyhow!("trajectory prompt-token count overflowed usize"))?;
+    next.prompt_tokens
+        .checked_sub(current_context)
+        .ok_or_else(|| {
+            anyhow!(
+                "next prompt ({}) is smaller than current prompt plus output ({current_context})",
+                next.prompt_tokens
+            )
+        })
+}
+
+fn build_replay_agent_plans(
+    config: &AgentLoopConfig,
+    tokenizer: &Tokenizer,
+    root_seed: u64,
+    specs: Vec<TrajectoryPlanSpec>,
+) -> Result<Vec<AgentPlan>> {
+    let mut plans = Vec::with_capacity(specs.len());
+    for (agent_id, spec) in specs.into_iter().enumerate() {
+        let mut text_rng = stream_rng(root_seed, agent_id, 4);
+        let initial_prompt_tokens = spec.requests[0]
+            .prompt_tokens
+            .checked_sub(config.replay_initial_overhead_tokens)
+            .filter(|tokens| *tokens > 0)
+            .ok_or_else(|| {
+                anyhow!(
+                    "trajectory {:?} first prompt ({}) must exceed replay initial overhead ({})",
+                    spec.trajectory_id,
+                    spec.requests[0].prompt_tokens,
+                    config.replay_initial_overhead_tokens
+                )
+            })?;
+        let initial_prompt =
+            generate_synthetic_text(tokenizer, initial_prompt_tokens, &mut text_rng)?;
+        let mut turns = Vec::with_capacity(spec.requests.len());
+
+        for (request_index, request) in spec.requests.iter().enumerate() {
+            let reset_prompt = if request.reset_before {
+                let reset_prompt_tokens = request
+                    .prompt_tokens
+                    .checked_sub(config.replay_initial_overhead_tokens)
+                    .filter(|tokens| *tokens > 0)
+                    .ok_or_else(|| {
+                        anyhow!(
+                            "trajectory {:?} request {} prompt ({}) must exceed replay initial overhead ({})",
+                            spec.trajectory_id,
+                            request_index + 1,
+                            request.prompt_tokens,
+                            config.replay_initial_overhead_tokens
+                        )
+                    })?;
+                Some(generate_synthetic_text(
+                    tokenizer,
+                    reset_prompt_tokens,
+                    &mut text_rng,
+                )?)
+            } else {
+                None
+            };
+            let environment_tokens = match spec.requests.get(request_index + 1) {
+                Some(next) => inferred_environment_tokens(
+                    request,
+                    next,
+                    config.replay_turn_overhead_tokens,
+                )
+                .with_context(|| {
+                    format!(
+                        "trajectory {:?} request {} cannot satisfy replay turn overhead {}; lower the overhead or set reset_before=true",
+                        spec.trajectory_id,
+                        request_index + 2,
+                        config.replay_turn_overhead_tokens
+                    )
+                })?,
+                None => 0,
+            };
+            let environment_content =
+                generate_synthetic_text(tokenizer, environment_tokens, &mut text_rng)?;
+            turns.push(AgentTurnPlan {
+                target_prompt_tokens: request.prompt_tokens,
+                output_tokens: request.output_tokens,
+                environment_tokens,
+                environment_content,
+                tool_call_latency: Duration::from_millis(request.delay_after_ms),
+                reset_prompt,
+            });
+        }
+
+        plans.push(AgentPlan {
+            agent_id,
+            trajectory_id: spec.trajectory_id,
+            user_tag: generate_user_tag(
+                config.user_tagging,
+                config.user_prefix.as_deref(),
+                agent_id,
+            ),
             initial_prompt,
             turns,
         });
@@ -548,36 +947,100 @@ fn generate_synthetic_text<R: Rng + ?Sized>(
     target_tokens: usize,
     rng: &mut R,
 ) -> Result<String> {
+    if target_tokens == 0 {
+        return Ok(String::new());
+    }
     let vocab_size = tokenizer.get_vocab_size(false);
     if vocab_size == 0 {
         return Err(anyhow!("tokenizer vocabulary is empty"));
     }
 
-    for _ in 0..8 {
-        let ids: Vec<u32> = (0..target_tokens)
-            .map(|_| rng.gen_range(0..vocab_size) as u32)
-            .collect();
-        let decoded = tokenizer
-            .decode(&ids, true)
-            .map_err(|err| anyhow!("failed to decode synthetic tokens: {}", err))?;
-        if !decoded.trim().is_empty() {
-            return Ok(decoded);
+    let special_ids: HashSet<u32> = tokenizer
+        .get_added_tokens_decoder()
+        .into_iter()
+        .filter_map(|(id, token)| token.special.then_some(id))
+        .collect();
+    let special_base_ids = special_ids
+        .iter()
+        .filter(|id| (**id as usize) < vocab_size)
+        .count();
+    if special_base_ids == vocab_size {
+        return Err(anyhow!(
+            "tokenizer vocabulary contains no non-special tokens"
+        ));
+    }
+
+    let random_ids = |count: usize, rng: &mut R| -> Vec<u32> {
+        let mut ids = Vec::with_capacity(count);
+        while ids.len() < count {
+            let id = rng.gen_range(0..vocab_size) as u32;
+            if !special_ids.contains(&id) {
+                ids.push(id);
+            }
+        }
+        ids
+    };
+    let mut text = tokenizer
+        .decode(&random_ids(target_tokens, rng), false)
+        .map_err(|err| anyhow!("failed to decode synthetic tokens: {}", err))?;
+    let mut actual_tokens = 0usize;
+
+    for _ in 0..32 {
+        let encoding = tokenizer
+            .encode(text.as_str(), false)
+            .map_err(|err| anyhow!("failed to re-encode synthetic text: {}", err))?;
+        actual_tokens = encoding.len();
+        let encoded_special = encoding.get_ids().iter().any(|id| special_ids.contains(id));
+        if encoded_special {
+            text = tokenizer
+                .decode(&random_ids(target_tokens, rng), false)
+                .map_err(|err| anyhow!("failed to replace synthetic special tokens: {}", err))?;
+            continue;
+        }
+        if actual_tokens == target_tokens && !text.is_empty() {
+            return Ok(text);
+        }
+
+        if actual_tokens > target_tokens {
+            let end_offset = encoding.get_offsets()[target_tokens - 1].1;
+            if end_offset > 0 && text.is_char_boundary(end_offset) {
+                text.truncate(end_offset);
+            } else {
+                text = tokenizer
+                    .decode(&encoding.get_ids()[..target_tokens], false)
+                    .map_err(|err| anyhow!("failed to trim synthetic text: {}", err))?;
+            }
+        } else {
+            let missing = target_tokens - actual_tokens;
+            let extra = tokenizer
+                .decode(&random_ids(missing.max(1), rng), false)
+                .map_err(|err| anyhow!("failed to extend synthetic text: {}", err))?;
+            if !text.ends_with(char::is_whitespace) {
+                text.push(' ');
+            }
+            text.push_str(&extra);
         }
     }
 
-    Ok((0..target_tokens)
-        .map(|_| rng.gen_range(1u32..=10_000u32).to_string())
-        .collect::<Vec<_>>()
-        .join(" "))
+    Err(anyhow!(
+        "failed to generate synthetic text with exactly {target_tokens} tokens after 32 attempts (last count: {actual_tokens})"
+    ))
 }
 
 async fn run_agent(
     plan: AgentPlan,
+    routing_slot: usize,
+    admitted_at: Duration,
     client: Client,
     config: std::sync::Arc<AgentLoopConfig>,
 ) -> Result<AgentWorkerReport> {
     let agent_start = Instant::now();
-    let mut report = AgentWorkerReport::new();
+    let mut report = AgentWorkerReport::new(
+        plan.agent_id,
+        plan.trajectory_id.clone(),
+        routing_slot,
+        admitted_at,
+    );
     let mut messages = vec![json!({
         "role": "user",
         "content": plan.initial_prompt,
@@ -586,18 +1049,25 @@ async fn run_agent(
 
     for (turn_index, turn) in plan.turns.iter().enumerate() {
         let invocation = turn_index + 1;
+        if let Some(reset_prompt) = turn.reset_prompt.as_deref() {
+            messages = vec![json!({
+                "role": "user",
+                "content": reset_prompt,
+            })];
+            previous_prompt_tokens = 0;
+        }
         if config.dry_run {
             report.dry_run_records.push(DryRunRecord {
                 agent_id: plan.agent_id,
+                trajectory_id: plan.trajectory_id.clone(),
+                routing_slot,
+                admitted_at,
                 invocation,
-                input_content_tokens: plan.initial_prompt_tokens
-                    + plan.turns[..turn_index]
-                        .iter()
-                        .map(|prior| prior.output_tokens + prior.environment_tokens)
-                        .sum::<usize>(),
+                target_prompt_tokens: turn.target_prompt_tokens,
                 output_tokens: turn.output_tokens,
                 environment_tokens: turn.environment_tokens,
                 tool_call_latency_ms: turn.tool_call_latency.as_millis() as usize,
+                reset_before: turn.reset_prompt.is_some(),
             });
             append_synthetic_turn(
                 &mut messages,
@@ -620,7 +1090,7 @@ async fn run_agent(
             &config,
             &body,
             plan.user_tag.as_deref(),
-            plan.agent_id,
+            routing_slot,
         )
         .await
         {
@@ -646,18 +1116,28 @@ async fn run_agent(
                         .saturating_add(turn.tool_call_latency);
                 }
 
-                append_model_and_environment(
+                if let Err(err) = append_model_and_environment(
                     &mut messages,
                     result.assistant_message,
                     plan.agent_id,
                     invocation,
                     &turn.environment_content,
-                )?;
+                ) {
+                    report.failures.push(AgentFailureRecord {
+                        agent_id: plan.agent_id,
+                        trajectory_id: plan.trajectory_id.clone(),
+                        invocation,
+                        error: format!("failed to append model response: {err:#}"),
+                    });
+                    report.end_to_end_latency = agent_start.elapsed();
+                    return Ok(report);
+                }
             }
             Err(err) => {
                 report.failed_requests += 1;
                 report.failures.push(AgentFailureRecord {
                     agent_id: plan.agent_id,
+                    trajectory_id: plan.trajectory_id.clone(),
                     invocation,
                     error: err.to_string(),
                 });
@@ -717,13 +1197,13 @@ async fn request_with_retries(
     config: &AgentLoopConfig,
     body: &Value,
     user_tag: Option<&str>,
-    agent_id: usize,
+    routing_slot: usize,
 ) -> Result<RequestResult> {
     let start = Instant::now();
     let mut last_error = None;
 
     for attempt in 0..=config.max_retries {
-        match single_attempt(client, config, body, user_tag, agent_id).await {
+        match single_attempt(client, config, body, user_tag, routing_slot).await {
             Ok(mut result) => {
                 result.latency = start.elapsed();
                 return Ok(result);
@@ -746,7 +1226,7 @@ async fn single_attempt(
     config: &AgentLoopConfig,
     body: &Value,
     user_tag: Option<&str>,
-    agent_id: usize,
+    routing_slot: usize,
 ) -> Result<RequestResult> {
     if config.verbose {
         println!("[AGENT REQUEST] {}", sanitize_request(body));
@@ -754,7 +1234,7 @@ async fn single_attempt(
 
     let request = client
         .post(config.endpoint.clone())
-        .headers(build_request_headers(config, user_tag, agent_id)?);
+        .headers(build_request_headers(config, user_tag, routing_slot)?);
     let response = request.json(body).send().await?;
     let status = response.status();
     let bytes = response.bytes().await?;
@@ -797,7 +1277,7 @@ async fn single_attempt(
 fn build_request_headers(
     config: &AgentLoopConfig,
     user_tag: Option<&str>,
-    agent_id: usize,
+    routing_slot: usize,
 ) -> Result<HeaderMap> {
     let mut headers = config.headers.clone();
     if let Some(user_tag) = user_tag {
@@ -806,7 +1286,7 @@ fn build_request_headers(
         headers.insert(SMG_ROUTING_KEY, value);
     }
     if let Some(num_ranks) = config.dp_rank_perfect_routing_num {
-        let target_worker = (agent_id % num_ranks).to_string();
+        let target_worker = (routing_slot % num_ranks).to_string();
         let value = HeaderValue::from_str(&target_worker)
             .context("failed to build X-SMG-Target-Worker header from agent rank")?;
         headers.insert(SMG_TARGET_WORKER, value);
@@ -971,6 +1451,44 @@ mod tests {
         for _ in 0..10 {
             assert_eq!(spec.sample(&mut rng, "test").unwrap(), 13);
         }
+    }
+
+    #[test]
+    fn synthetic_text_reencodes_to_the_requested_token_count() {
+        use tokenizers::models::wordlevel::WordLevel;
+        use tokenizers::pre_tokenizers::whitespace::Whitespace;
+        use tokenizers::AddedToken;
+
+        let vocab = [
+            ("[UNK]".to_string(), 0),
+            ("alpha".to_string(), 1),
+            ("beta".to_string(), 2),
+            ("gamma".to_string(), 3),
+        ]
+        .into_iter()
+        .collect();
+        let model = WordLevel::builder()
+            .vocab(vocab)
+            .unk_token("[UNK]".to_string())
+            .build()
+            .unwrap();
+        let mut tokenizer = Tokenizer::new(model);
+        tokenizer.with_pre_tokenizer(Some(Whitespace));
+        tokenizer.add_special_tokens(&[AddedToken::from("beta", true)]);
+        let mut rng = rand::rngs::StdRng::seed_from_u64(17);
+
+        let text = generate_synthetic_text(&tokenizer, 16, &mut rng).unwrap();
+        let encoding = tokenizer.encode(text, false).unwrap();
+        assert_eq!(encoding.len(), 16);
+        let special_ids: HashSet<u32> = tokenizer
+            .get_added_tokens_decoder()
+            .into_iter()
+            .filter_map(|(id, token)| token.special.then_some(id))
+            .collect();
+        assert!(encoding
+            .get_ids()
+            .iter()
+            .all(|id| !special_ids.contains(id)));
     }
 
     #[test]
@@ -1166,7 +1684,7 @@ mod tests {
     }
 
     #[test]
-    fn perfect_routing_targets_agent_id_modulo_rank_count() {
+    fn perfect_routing_targets_routing_slot_modulo_rank_count() {
         let config = AgentLoopConfig::try_new(
             "http://localhost:8000/v1/chat/completions",
             None,
@@ -1244,5 +1762,175 @@ mod tests {
         let messages = vec![json!({"role": "user", "content": "start"})];
         let body = build_request_body(&config, &messages, 4, None);
         assert_eq!(body["ignore_eos"], true);
+    }
+
+    #[test]
+    fn trajectory_jsonl_preserves_request_order_and_blank_lines() {
+        let input = r#"
+{"schema_version":1,"trajectory_id":"alpha","requests":[{"prompt_tokens":100,"output_tokens":20},{"prompt_tokens":150,"output_tokens":10,"delay_after_ms":25}]}
+
+{"schema_version":1,"trajectory_id":"beta","requests":[{"prompt_tokens":80,"output_tokens":5}]}
+"#;
+        let specs = parse_trajectory_plan_specs(std::io::Cursor::new(input), "fixture").unwrap();
+
+        assert_eq!(specs.len(), 2);
+        assert_eq!(specs[0].trajectory_id, "alpha");
+        assert_eq!(specs[0].requests[0].prompt_tokens, 100);
+        assert_eq!(specs[0].requests[1].prompt_tokens, 150);
+        assert_eq!(specs[0].requests[1].delay_after_ms, 25);
+        assert_eq!(specs[1].trajectory_id, "beta");
+    }
+
+    #[test]
+    fn trajectory_jsonl_accepts_explicit_compaction_reset() {
+        let input = r#"{"schema_version":1,"trajectory_id":"reset","requests":[{"prompt_tokens":100,"output_tokens":20},{"prompt_tokens":60,"output_tokens":10,"reset_before":true}]}"#;
+        let specs = parse_trajectory_plan_specs(std::io::Cursor::new(input), "fixture").unwrap();
+        assert!(specs[0].requests[1].reset_before);
+    }
+
+    #[test]
+    fn trajectory_environment_growth_is_derived_from_adjacent_requests() {
+        let current = TrajectoryRequestSpec {
+            prompt_tokens: 100,
+            output_tokens: 20,
+            reset_before: false,
+            delay_after_ms: 0,
+        };
+        let next = TrajectoryRequestSpec {
+            prompt_tokens: 150,
+            output_tokens: 10,
+            reset_before: false,
+            delay_after_ms: 0,
+        };
+        assert_eq!(inferred_environment_tokens(&current, &next, 0).unwrap(), 30);
+        assert_eq!(
+            inferred_environment_tokens(&current, &next, 10).unwrap(),
+            20
+        );
+
+        let reset = TrajectoryRequestSpec {
+            prompt_tokens: 60,
+            output_tokens: 10,
+            reset_before: true,
+            delay_after_ms: 0,
+        };
+        assert_eq!(
+            inferred_environment_tokens(&current, &reset, 10).unwrap(),
+            0
+        );
+    }
+
+    #[test]
+    fn replay_compiler_applies_overhead_and_reset_boundaries() {
+        use tokenizers::models::wordlevel::WordLevel;
+        use tokenizers::pre_tokenizers::whitespace::Whitespace;
+
+        let vocab = [
+            ("[UNK]".to_string(), 0),
+            ("alpha".to_string(), 1),
+            ("beta".to_string(), 2),
+            ("gamma".to_string(), 3),
+        ]
+        .into_iter()
+        .collect();
+        let model = WordLevel::builder()
+            .vocab(vocab)
+            .unk_token("[UNK]".to_string())
+            .build()
+            .unwrap();
+        let mut tokenizer = Tokenizer::new(model);
+        tokenizer.with_pre_tokenizer(Some(Whitespace));
+
+        let input = r#"{"schema_version":1,"trajectory_id":"shape","requests":[{"prompt_tokens":100,"output_tokens":20},{"prompt_tokens":150,"output_tokens":10,"delay_after_ms":25},{"prompt_tokens":60,"output_tokens":5,"reset_before":true}]}"#;
+        let specs = parse_trajectory_plan_specs(std::io::Cursor::new(input), "fixture").unwrap();
+        let config = AgentLoopConfig::try_new(
+            "http://localhost:8000/v1/chat/completions",
+            None,
+            "test-model",
+            1,
+            SampleSpec::fixed(8).unwrap(),
+            SampleSpec::fixed(4).unwrap(),
+            SampleSpec::fixed(6).unwrap(),
+            SampleSpec::fixed(2).unwrap(),
+        )
+        .unwrap()
+        .with_replay_prompt_overhead(5, 10);
+
+        let plans = build_replay_agent_plans(&config, &tokenizer, 42, specs).unwrap();
+        let plan = &plans[0];
+        assert_eq!(plan.trajectory_id, "shape");
+        assert_eq!(
+            tokenizer
+                .encode(plan.initial_prompt.as_str(), false)
+                .unwrap()
+                .len(),
+            95
+        );
+        assert_eq!(plan.turns.len(), 3);
+        assert_eq!(plan.turns[0].environment_tokens, 20);
+        assert_eq!(plan.turns[1].environment_tokens, 0);
+        assert_eq!(plan.turns[1].tool_call_latency, Duration::from_millis(25));
+        assert!(plan.turns[1].reset_prompt.is_none());
+        let reset_prompt = plan.turns[2].reset_prompt.as_ref().unwrap();
+        assert_eq!(
+            tokenizer
+                .encode(reset_prompt.as_str(), false)
+                .unwrap()
+                .len(),
+            55
+        );
+    }
+
+    #[test]
+    fn trajectory_jsonl_rejects_implicit_prompt_reduction_with_line_context() {
+        let input = r#"{"schema_version":1,"trajectory_id":"bad","requests":[{"prompt_tokens":100,"output_tokens":20},{"prompt_tokens":110,"output_tokens":10}]}"#;
+        let error =
+            parse_trajectory_plan_specs(std::io::Cursor::new(input), "fixture").unwrap_err();
+        let message = format!("{error:#}");
+        assert!(message.contains("fixture:1"));
+        assert!(message.contains("set reset_before=true"));
+    }
+
+    #[test]
+    fn trajectory_jsonl_rejects_duplicate_ids_and_empty_input() {
+        let duplicated = concat!(
+            "{\"schema_version\":1,\"trajectory_id\":\"same\",\"requests\":[{\"prompt_tokens\":10,\"output_tokens\":1}]}\n",
+            "{\"schema_version\":1,\"trajectory_id\":\"same\",\"requests\":[{\"prompt_tokens\":20,\"output_tokens\":1}]}\n"
+        );
+        let error =
+            parse_trajectory_plan_specs(std::io::Cursor::new(duplicated), "fixture").unwrap_err();
+        assert!(error.to_string().contains("duplicate trajectory_id"));
+
+        let error = parse_trajectory_plan_specs(std::io::Cursor::new("\n"), "fixture").unwrap_err();
+        assert!(error.to_string().contains("contains no trajectory plans"));
+    }
+
+    #[test]
+    fn trajectory_jsonl_rejects_unknown_schema_and_fields() {
+        let wrong_version = r#"{"schema_version":2,"trajectory_id":"v2","requests":[{"prompt_tokens":10,"output_tokens":1}]}"#;
+        let error = parse_trajectory_plan_specs(std::io::Cursor::new(wrong_version), "fixture")
+            .unwrap_err();
+        assert!(format!("{error:#}").contains("unsupported schema_version"));
+
+        let unknown = r#"{"schema_version":1,"trajectory_id":"extra","requests":[{"prompt_tokens":10,"output_tokens":1,"typo":true}]}"#;
+        let error =
+            parse_trajectory_plan_specs(std::io::Cursor::new(unknown), "fixture").unwrap_err();
+        assert!(format!("{error:#}").contains("unknown field"));
+    }
+
+    #[test]
+    fn rolling_admission_refills_the_freed_routing_slot_in_fifo_order() {
+        let mut admission = RollingAdmission::new(vec!["a", "b", "c", "d"], 2).unwrap();
+        assert_eq!(admission.initial_admissions(), vec![(0, "a"), (1, "b")]);
+        assert_eq!(admission.replacement(1), Some((1, "c")));
+        assert_eq!(admission.replacement(0), Some((0, "d")));
+        assert_eq!(admission.replacement(1), None);
+    }
+
+    #[test]
+    fn rolling_admission_validates_its_limit() {
+        assert!(RollingAdmission::new(vec![1], 0).is_err());
+        let mut admission = RollingAdmission::new(vec![1], 2).unwrap();
+        assert_eq!(admission.initial_admissions(), vec![(0, 1)]);
     }
 }
