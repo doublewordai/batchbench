@@ -1,5 +1,18 @@
 # Changelog
 
+## [0.6.0](https://github.com/doublewordai/batchbench/compare/v0.5.0...v0.6.0) (2026-08-26)
+
+
+### Features
+
+* **agent:** add trajectory replay and rolling admission ([1b10db5](https://github.com/doublewordai/batchbench/commit/1b10db560800fcc2d4d0dafa20d5751e1a5ea23c))
+* **agent:** add trajectory replay and rolling admission ([e89075f](https://github.com/doublewordai/batchbench/commit/e89075f3a05036437cf33a5164987208a926d6e9))
+
+
+### Bug Fixes
+
+* **agent:** address trajectory replay review feedback ([2bc476a](https://github.com/doublewordai/batchbench/commit/2bc476a60f4e458df800af6c84eacffc61373d16))
+
 ## [0.5.0](https://github.com/doublewordai/batchbench/compare/v0.4.0...v0.5.0) (2026-08-19)
 
 
