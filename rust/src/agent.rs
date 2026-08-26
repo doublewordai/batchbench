@@ -1024,12 +1024,12 @@ fn generate_synthetic_text<R: Rng + ?Sized>(
 
         if actual_tokens > target_tokens {
             let end_offset = encoding.get_offsets()[target_tokens - 1].1;
-            if end_offset > 0 && text.is_char_boundary(end_offset) {
+            if end_offset > 0 && end_offset < text.len() && text.is_char_boundary(end_offset) {
                 text.truncate(end_offset);
             } else {
                 text = tokenizer
-                    .decode(&encoding.get_ids()[..target_tokens], false)
-                    .map_err(|err| anyhow!("failed to trim synthetic text: {}", err))?;
+                    .decode(&random_ids(target_tokens, rng), false)
+                    .map_err(|err| anyhow!("failed to resample synthetic text: {}", err))?;
             }
         } else {
             let missing = target_tokens - actual_tokens;
@@ -1511,6 +1511,31 @@ mod tests {
             .get_ids()
             .iter()
             .all(|id| !special_ids.contains(id)));
+    }
+
+    #[test]
+    fn synthetic_text_resamples_when_byte_offsets_cannot_be_trimmed() {
+        use tokenizers::models::bpe::{Vocab, BPE};
+        use tokenizers::pre_tokenizers::byte_level::ByteLevel;
+
+        let mut alphabet: Vec<_> = ByteLevel::alphabet().into_iter().collect();
+        alphabet.sort_unstable();
+        let vocab: Vocab = alphabet
+            .into_iter()
+            .enumerate()
+            .map(|(id, character)| (character.to_string(), id as u32))
+            .collect();
+        let model = BPE::builder()
+            .vocab_and_merges(vocab, vec![])
+            .build()
+            .unwrap();
+        let mut tokenizer = Tokenizer::new(model);
+        tokenizer.with_pre_tokenizer(Some(ByteLevel::default().add_prefix_space(false)));
+        tokenizer.with_decoder(Some(ByteLevel::default()));
+        let mut rng = rand::rngs::StdRng::seed_from_u64(0);
+
+        let text = generate_synthetic_text(&tokenizer, 1, &mut rng).unwrap();
+        assert_eq!(tokenizer.encode(text, false).unwrap().len(), 1);
     }
 
     #[test]
