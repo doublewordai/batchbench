@@ -1,15 +1,16 @@
-use std::collections::{HashSet, VecDeque};
+use std::collections::{BTreeMap, HashSet, VecDeque};
 use std::fs::File;
 use std::io::{BufRead, BufReader};
 use std::path::{Path, PathBuf};
 use std::time::{Duration, Instant};
 
 use anyhow::{anyhow, Context, Result};
+use bytes::Bytes;
 use rand::{Rng, SeedableRng};
 use rand_distr::{Distribution, LogNormal};
 use reqwest::header::{HeaderMap, HeaderName, HeaderValue, AUTHORIZATION, CONTENT_TYPE};
 use reqwest::{Client, Url};
-use serde::Deserialize;
+use serde::{Deserialize, Serialize};
 use serde_json::{json, Map, Value};
 use tokenizers::Tokenizer;
 use tokio::task::JoinSet;
@@ -311,9 +312,8 @@ struct AgentTurnPlan {
     target_prompt_tokens: usize,
     output_tokens: usize,
     environment_tokens: usize,
-    environment_content: String,
     tool_call_latency: Duration,
-    reset_prompt: Option<String>,
+    reset_prompt_tokens: Option<usize>,
 }
 
 #[derive(Clone, Debug)]
@@ -321,8 +321,25 @@ struct AgentPlan {
     agent_id: usize,
     trajectory_id: String,
     user_tag: Option<String>,
-    initial_prompt: String,
+    initial_prompt_tokens: usize,
+    initial_prompt: Option<String>,
     turns: Vec<AgentTurnPlan>,
+}
+
+#[derive(Clone)]
+struct SyntheticTextGenerator {
+    tokenizer: std::sync::Arc<Tokenizer>,
+    eligible_token_ids: std::sync::Arc<Vec<u32>>,
+    special_token_ids: std::sync::Arc<HashSet<u32>>,
+    permits: std::sync::Arc<tokio::sync::Semaphore>,
+    root_seed: u64,
+}
+
+#[derive(Clone, Copy)]
+enum SyntheticTextField {
+    InitialPrompt,
+    ResetPrompt(usize),
+    Environment(usize),
 }
 
 #[derive(Clone, Debug)]
@@ -505,7 +522,11 @@ impl<T> RollingAdmission<T> {
 /// tool response is appended to that agent's messages before its next request, preserving the
 /// previous request as a prefix for server-side KV-cache testing.
 pub async fn run_agent_benchmark(config: AgentLoopConfig) -> Result<AgentBenchmarkReport> {
-    let plans = build_agent_plans(&config)?;
+    let (plans, root_seed) = build_agent_plans(&config)?;
+    let text_generator = SyntheticTextGenerator::new(
+        std::sync::Arc::new(load_tokenizer(&config.tokenizer_model)?),
+        root_seed,
+    )?;
     let total_agents = plans.len();
     let requested_max_active_agents = config.max_active_agents.unwrap_or(total_agents);
     let planned_tool_invocations = plans
@@ -515,6 +536,13 @@ pub async fn run_agent_benchmark(config: AgentLoopConfig) -> Result<AgentBenchma
         })
         .ok_or_else(|| anyhow!("planned tool invocation count overflowed"))?;
 
+    let mut admission = RollingAdmission::new(plans, requested_max_active_agents)?;
+    let max_active_agents = admission.max_active;
+    // Initial prompt synthesis is deliberately outside the benchmark clock. The live working set
+    // still starts together instead of being accidentally ramped by client-side token generation.
+    let initial_admissions =
+        materialize_initial_prompts(admission.initial_admissions(), &text_generator).await?;
+
     let client = Client::builder()
         .timeout(config.request_timeout)
         .build()
@@ -523,9 +551,7 @@ pub async fn run_agent_benchmark(config: AgentLoopConfig) -> Result<AgentBenchma
     let start = Instant::now();
 
     let mut join_set = JoinSet::new();
-    let mut admission = RollingAdmission::new(plans, requested_max_active_agents)?;
-    let max_active_agents = admission.max_active;
-    for (routing_slot, plan) in admission.initial_admissions() {
+    for (routing_slot, plan) in initial_admissions {
         spawn_agent(
             &mut join_set,
             plan,
@@ -533,6 +559,7 @@ pub async fn run_agent_benchmark(config: AgentLoopConfig) -> Result<AgentBenchma
             Duration::ZERO,
             &client,
             &config,
+            &text_generator,
         );
     }
     let mut last_agent_admitted_at = Duration::ZERO;
@@ -549,46 +576,103 @@ pub async fn run_agent_benchmark(config: AgentLoopConfig) -> Result<AgentBenchma
     let mut failures = Vec::new();
     let mut dry_run_records = Vec::new();
     let mut agent_lifecycles = Vec::with_capacity(total_agents);
+    // Keep prompt preparation off the sole worker-completion drain path. Sequence numbers retain
+    // manifest FIFO admission even when later prompt preparations finish first.
+    let mut replacement_preparations = JoinSet::new();
+    let mut prepared_replacements = BTreeMap::new();
+    let mut next_replacement_sequence = 0usize;
+    let mut next_sequence_to_admit = 0usize;
 
-    while let Some(joined) = join_set.join_next().await {
-        let worker = joined.map_err(|err| anyhow!("agent worker task failed: {}", err))??;
-        let finished_at = start.elapsed();
-        let routing_slot = worker.routing_slot;
-        agent_lifecycles.push(AgentLifecycleRecord {
-            agent_id: worker.agent_id,
-            trajectory_id: worker.trajectory_id.clone(),
-            routing_slot,
-            admitted_at: worker.admitted_at,
-            finished_at,
-            completed: worker.completed,
-        });
-        if worker.completed {
-            completed_agents += 1;
-            agent_end_to_end_latencies.push(worker.end_to_end_latency);
+    loop {
+        if join_set.is_empty() && replacement_preparations.is_empty() {
+            break;
         }
-        successful_requests = successful_requests.saturating_add(worker.successful_requests);
-        failed_requests = failed_requests.saturating_add(worker.failed_requests);
-        total_input_tokens = total_input_tokens.saturating_add(worker.input_tokens);
-        total_output_tokens = total_output_tokens.saturating_add(worker.output_tokens);
-        estimated_cached_input_tokens =
-            estimated_cached_input_tokens.saturating_add(worker.estimated_cached_input_tokens);
-        total_tool_call_latency = total_tool_call_latency.saturating_add(worker.tool_call_latency);
-        latencies.extend(worker.latencies);
-        failures.extend(worker.failures);
-        dry_run_records.extend(worker.dry_run_records);
 
-        if let Some((routing_slot, plan)) = admission.replacement(routing_slot) {
-            let admitted_at = start.elapsed();
-            last_agent_admitted_at = admitted_at;
-            spawn_agent(
-                &mut join_set,
-                plan,
-                routing_slot,
-                admitted_at,
-                &client,
-                &config,
-            );
+        tokio::select! {
+            joined = join_set.join_next(), if !join_set.is_empty() => {
+                let joined = joined.expect("guarded non-empty agent worker set returned no task");
+                let worker = joined.map_err(|err| anyhow!("agent worker task failed: {}", err))??;
+                let finished_at = start.elapsed();
+                let routing_slot = worker.routing_slot;
+                agent_lifecycles.push(AgentLifecycleRecord {
+                    agent_id: worker.agent_id,
+                    trajectory_id: worker.trajectory_id.clone(),
+                    routing_slot,
+                    admitted_at: worker.admitted_at,
+                    finished_at,
+                    completed: worker.completed,
+                });
+                if worker.completed {
+                    completed_agents += 1;
+                    agent_end_to_end_latencies.push(worker.end_to_end_latency);
+                }
+                successful_requests = successful_requests.saturating_add(worker.successful_requests);
+                failed_requests = failed_requests.saturating_add(worker.failed_requests);
+                total_input_tokens = total_input_tokens.saturating_add(worker.input_tokens);
+                total_output_tokens = total_output_tokens.saturating_add(worker.output_tokens);
+                estimated_cached_input_tokens = estimated_cached_input_tokens
+                    .saturating_add(worker.estimated_cached_input_tokens);
+                total_tool_call_latency =
+                    total_tool_call_latency.saturating_add(worker.tool_call_latency);
+                latencies.extend(worker.latencies);
+                failures.extend(worker.failures);
+                dry_run_records.extend(worker.dry_run_records);
+
+                if let Some((routing_slot, plan)) = admission.replacement(routing_slot) {
+                    let text_generator = text_generator.clone();
+                    let replacement_sequence = next_replacement_sequence;
+                    next_replacement_sequence = next_replacement_sequence
+                        .checked_add(1)
+                        .ok_or_else(|| anyhow!("replacement admission sequence overflowed"))?;
+                    spawn_admission_preparation(
+                        &mut replacement_preparations,
+                        replacement_sequence,
+                        (routing_slot, plan),
+                        move |(routing_slot, plan)| async move {
+                            materialize_initial_prompt(plan, &text_generator)
+                                .await
+                                .map(|plan| (routing_slot, plan))
+                        },
+                    );
+                }
+            }
+            prepared = replacement_preparations.join_next(), if !replacement_preparations.is_empty() => {
+                let prepared = prepared
+                    .expect("guarded non-empty admission preparation set returned no task")
+                    .map_err(|error| anyhow!("replacement prompt worker failed: {error}"))??;
+                let (replacement_sequence, replacement) = prepared;
+                if prepared_replacements
+                    .insert(replacement_sequence, replacement)
+                    .is_some()
+                {
+                    return Err(anyhow!(
+                        "duplicate prepared replacement sequence {replacement_sequence}"
+                    ));
+                }
+                for (routing_slot, plan) in take_prepared_in_fifo_order(
+                    &mut prepared_replacements,
+                    &mut next_sequence_to_admit,
+                )? {
+                    let admitted_at = start.elapsed();
+                    last_agent_admitted_at = admitted_at;
+                    spawn_agent(
+                        &mut join_set,
+                        plan,
+                        routing_slot,
+                        admitted_at,
+                        &client,
+                        &config,
+                        &text_generator,
+                    );
+                }
+            }
         }
+    }
+
+    if !prepared_replacements.is_empty() {
+        return Err(anyhow!(
+            "prepared replacement admissions contain an unresolved FIFO gap"
+        ));
     }
 
     if config.dry_run {
@@ -649,6 +733,78 @@ pub async fn run_agent_benchmark(config: AgentLoopConfig) -> Result<AgentBenchma
     })
 }
 
+async fn materialize_initial_prompts(
+    admissions: Vec<(usize, AgentPlan)>,
+    text_generator: &SyntheticTextGenerator,
+) -> Result<Vec<(usize, AgentPlan)>> {
+    let mut join_set = JoinSet::new();
+    for (routing_slot, plan) in admissions {
+        let text_generator = text_generator.clone();
+        spawn_admission_preparation(&mut join_set, routing_slot, plan, move |plan| async move {
+            materialize_initial_prompt(plan, &text_generator).await
+        });
+    }
+
+    let mut prepared = Vec::with_capacity(join_set.len());
+    while let Some(joined) = join_set.join_next().await {
+        prepared.push(joined.map_err(|error| anyhow!("initial-prompt worker failed: {error}"))??);
+    }
+    prepared.sort_by_key(|(routing_slot, _)| *routing_slot);
+    Ok(prepared)
+}
+
+async fn materialize_initial_prompt(
+    mut plan: AgentPlan,
+    text_generator: &SyntheticTextGenerator,
+) -> Result<AgentPlan> {
+    let initial_prompt = text_generator
+        .generate(
+            plan.agent_id,
+            SyntheticTextField::InitialPrompt,
+            plan.initial_prompt_tokens,
+        )
+        .await
+        .with_context(|| {
+            format!(
+                "failed to generate initial prompt for trajectory {:?}",
+                plan.trajectory_id
+            )
+        })?;
+    plan.initial_prompt = Some(initial_prompt);
+    Ok(plan)
+}
+
+fn spawn_admission_preparation<T, Prepare, Prepared>(
+    join_set: &mut JoinSet<Result<(usize, T)>>,
+    admission_key: usize,
+    item: T,
+    prepare: Prepare,
+) where
+    T: Send + 'static,
+    Prepare: FnOnce(T) -> Prepared + Send + 'static,
+    Prepared: std::future::Future<Output = Result<T>> + Send + 'static,
+{
+    join_set.spawn(async move {
+        prepare(item)
+            .await
+            .map(|prepared| (admission_key, prepared))
+    });
+}
+
+fn take_prepared_in_fifo_order<T>(
+    prepared: &mut BTreeMap<usize, T>,
+    next_sequence: &mut usize,
+) -> Result<Vec<T>> {
+    let mut ready = Vec::new();
+    while let Some(item) = prepared.remove(next_sequence) {
+        ready.push(item);
+        *next_sequence = next_sequence
+            .checked_add(1)
+            .ok_or_else(|| anyhow!("replacement admission sequence overflowed"))?;
+    }
+    Ok(ready)
+}
+
 fn spawn_agent(
     join_set: &mut JoinSet<Result<AgentWorkerReport>>,
     plan: AgentPlan,
@@ -656,14 +812,25 @@ fn spawn_agent(
     admitted_at: Duration,
     client: &Client,
     config: &std::sync::Arc<AgentLoopConfig>,
+    text_generator: &SyntheticTextGenerator,
 ) {
     let client = client.clone();
     let config = std::sync::Arc::clone(config);
-    join_set.spawn(async move { run_agent(plan, routing_slot, admitted_at, client, config).await });
+    let text_generator = text_generator.clone();
+    join_set.spawn(async move {
+        run_agent(
+            plan,
+            routing_slot,
+            admitted_at,
+            client,
+            config,
+            text_generator,
+        )
+        .await
+    });
 }
 
-fn build_agent_plans(config: &AgentLoopConfig) -> Result<Vec<AgentPlan>> {
-    let tokenizer = load_tokenizer(&config.tokenizer_model)?;
+fn build_agent_plans(config: &AgentLoopConfig) -> Result<(Vec<AgentPlan>, u64)> {
     let root_seed = match config.seed {
         Some(seed) => seed,
         None => rand::thread_rng().gen(),
@@ -671,7 +838,7 @@ fn build_agent_plans(config: &AgentLoopConfig) -> Result<Vec<AgentPlan>> {
 
     if let Some(path) = config.agent_plans_jsonl.as_deref() {
         let specs = load_trajectory_plan_specs(path)?;
-        return build_replay_agent_plans(config, &tokenizer, root_seed, specs);
+        return Ok((build_replay_agent_plans(config, specs)?, root_seed));
     }
 
     let mut plans = Vec::with_capacity(config.agent_count);
@@ -680,16 +847,12 @@ fn build_agent_plans(config: &AgentLoopConfig) -> Result<Vec<AgentPlan>> {
         let mut invocation_rng = stream_rng(root_seed, agent_id, 1);
         let mut output_rng = stream_rng(root_seed, agent_id, 2);
         let mut environment_rng = stream_rng(root_seed, agent_id, 3);
-        let mut text_rng = stream_rng(root_seed, agent_id, 4);
         let mut tool_call_latency_rng = stream_rng(root_seed, agent_id, 5);
 
         let initial_prompt_tokens = config.input_tokens.sample(&mut input_rng, "input tokens")?;
         let invocation_count = config
             .tool_invocations
             .sample(&mut invocation_rng, "tool invocations")?;
-        let initial_prompt =
-            generate_synthetic_text(&tokenizer, initial_prompt_tokens, &mut text_rng)?;
-
         let mut turns = Vec::with_capacity(invocation_count);
         let mut target_prompt_tokens = initial_prompt_tokens;
         for _ in 0..invocation_count {
@@ -705,16 +868,13 @@ fn build_agent_plans(config: &AgentLoopConfig) -> Result<Vec<AgentPlan>> {
             };
             let tool_call_latency_ms = u64::try_from(tool_call_latency_ms)
                 .context("sampled tool call latency exceeds u64::MAX milliseconds")?;
-            let environment_content =
-                generate_synthetic_text(&tokenizer, environment_tokens, &mut text_rng)?;
             turns.push(AgentTurnPlan {
                 input_content_tokens: target_prompt_tokens,
                 target_prompt_tokens,
                 output_tokens,
                 environment_tokens,
-                environment_content,
                 tool_call_latency: Duration::from_millis(tool_call_latency_ms),
-                reset_prompt: None,
+                reset_prompt_tokens: None,
             });
             target_prompt_tokens = target_prompt_tokens
                 .checked_add(output_tokens)
@@ -730,11 +890,12 @@ fn build_agent_plans(config: &AgentLoopConfig) -> Result<Vec<AgentPlan>> {
                 config.user_prefix.as_deref(),
                 agent_id,
             ),
-            initial_prompt,
+            initial_prompt_tokens,
+            initial_prompt: None,
             turns,
         });
     }
-    Ok(plans)
+    Ok((plans, root_seed))
 }
 
 fn load_trajectory_plan_specs(path: &Path) -> Result<Vec<TrajectoryPlanSpec>> {
@@ -849,13 +1010,10 @@ fn inferred_environment_tokens(
 
 fn build_replay_agent_plans(
     config: &AgentLoopConfig,
-    tokenizer: &Tokenizer,
-    root_seed: u64,
     specs: Vec<TrajectoryPlanSpec>,
 ) -> Result<Vec<AgentPlan>> {
     let mut plans = Vec::with_capacity(specs.len());
     for (agent_id, spec) in specs.into_iter().enumerate() {
-        let mut text_rng = stream_rng(root_seed, agent_id, 4);
         let initial_prompt_tokens = spec.requests[0]
             .prompt_tokens
             .checked_sub(config.replay_initial_overhead_tokens)
@@ -868,8 +1026,6 @@ fn build_replay_agent_plans(
                     config.replay_initial_overhead_tokens
                 )
             })?;
-        let initial_prompt =
-            generate_synthetic_text(tokenizer, initial_prompt_tokens, &mut text_rng)?;
         let mut turns = Vec::with_capacity(spec.requests.len());
         let mut current_input_content_tokens = initial_prompt_tokens;
 
@@ -887,13 +1043,9 @@ fn build_replay_agent_plans(
                             request.prompt_tokens,
                             config.replay_initial_overhead_tokens
                         )
-                    })?;
+                })?;
                 current_input_content_tokens = reset_prompt_tokens;
-                Some(generate_synthetic_text(
-                    tokenizer,
-                    reset_prompt_tokens,
-                    &mut text_rng,
-                )?)
+                Some(reset_prompt_tokens)
             } else {
                 None
             };
@@ -913,16 +1065,13 @@ fn build_replay_agent_plans(
                 })?,
                 None => 0,
             };
-            let environment_content =
-                generate_synthetic_text(tokenizer, environment_tokens, &mut text_rng)?;
             turns.push(AgentTurnPlan {
                 input_content_tokens: current_input_content_tokens,
                 target_prompt_tokens: request.prompt_tokens,
                 output_tokens: request.output_tokens,
                 environment_tokens,
-                environment_content,
                 tool_call_latency: Duration::from_millis(request.delay_after_ms),
-                reset_prompt,
+                reset_prompt_tokens: reset_prompt,
             });
             if spec
                 .requests
@@ -949,7 +1098,8 @@ fn build_replay_agent_plans(
                 config.user_prefix.as_deref(),
                 agent_id,
             ),
-            initial_prompt,
+            initial_prompt_tokens,
+            initial_prompt: None,
             turns,
         });
     }
@@ -963,6 +1113,91 @@ fn stream_rng(root_seed: u64, agent_id: usize, stream_id: u64) -> rand::rngs::St
     rand::rngs::StdRng::seed_from_u64(mixed)
 }
 
+impl SyntheticTextGenerator {
+    fn new(tokenizer: std::sync::Arc<Tokenizer>, root_seed: u64) -> Result<Self> {
+        let (eligible_token_ids, special_token_ids) = synthetic_token_ids(&tokenizer)?;
+        let worker_count = std::thread::available_parallelism()
+            .map(|count| count.get())
+            .unwrap_or(1)
+            .min(32);
+        Ok(Self {
+            tokenizer,
+            eligible_token_ids: std::sync::Arc::new(eligible_token_ids),
+            special_token_ids: std::sync::Arc::new(special_token_ids),
+            permits: std::sync::Arc::new(tokio::sync::Semaphore::new(worker_count)),
+            root_seed,
+        })
+    }
+
+    async fn generate(
+        &self,
+        agent_id: usize,
+        field: SyntheticTextField,
+        target_tokens: usize,
+    ) -> Result<String> {
+        if target_tokens == 0 {
+            return Ok(String::new());
+        }
+
+        let permit = std::sync::Arc::clone(&self.permits)
+            .acquire_owned()
+            .await
+            .map_err(|_| anyhow!("synthetic-text worker pool closed unexpectedly"))?;
+        let tokenizer = std::sync::Arc::clone(&self.tokenizer);
+        let eligible_token_ids = std::sync::Arc::clone(&self.eligible_token_ids);
+        let special_token_ids = std::sync::Arc::clone(&self.special_token_ids);
+        let mut rng = stream_rng(self.root_seed, agent_id, synthetic_text_stream_id(field));
+
+        tokio::task::spawn_blocking(move || {
+            let _permit = permit;
+            generate_synthetic_text_with_ids(
+                &tokenizer,
+                &eligible_token_ids,
+                &special_token_ids,
+                target_tokens,
+                &mut rng,
+            )
+        })
+        .await
+        .map_err(|error| anyhow!("synthetic-text worker failed: {error}"))?
+    }
+}
+
+fn synthetic_text_stream_id(field: SyntheticTextField) -> u64 {
+    match field {
+        SyntheticTextField::InitialPrompt => 0x1000_0000_0000_0000,
+        SyntheticTextField::ResetPrompt(turn_index) => {
+            0x2000_0000_0000_0000u64.wrapping_add((turn_index as u64).wrapping_mul(2))
+        }
+        SyntheticTextField::Environment(turn_index) => {
+            0x2000_0000_0000_0001u64.wrapping_add((turn_index as u64).wrapping_mul(2))
+        }
+    }
+}
+
+fn synthetic_token_ids(tokenizer: &Tokenizer) -> Result<(Vec<u32>, HashSet<u32>)> {
+    let vocab_size = tokenizer.get_vocab_size(false);
+    if vocab_size == 0 {
+        return Err(anyhow!("tokenizer vocabulary is empty"));
+    }
+
+    let special_token_ids: HashSet<u32> = tokenizer
+        .get_added_tokens_decoder()
+        .into_iter()
+        .filter_map(|(id, token)| token.special.then_some(id))
+        .collect();
+    let eligible_token_ids: Vec<u32> = (0..vocab_size as u32)
+        .filter(|id| !special_token_ids.contains(id))
+        .collect();
+    if eligible_token_ids.is_empty() {
+        return Err(anyhow!(
+            "tokenizer vocabulary contains no non-special tokens"
+        ));
+    }
+    Ok((eligible_token_ids, special_token_ids))
+}
+
+#[cfg(test)]
 fn generate_synthetic_text<R: Rng + ?Sized>(
     tokenizer: &Tokenizer,
     target_tokens: usize,
@@ -971,51 +1206,45 @@ fn generate_synthetic_text<R: Rng + ?Sized>(
     if target_tokens == 0 {
         return Ok(String::new());
     }
-    let vocab_size = tokenizer.get_vocab_size(false);
-    if vocab_size == 0 {
-        return Err(anyhow!("tokenizer vocabulary is empty"));
+    let (eligible_token_ids, special_token_ids) = synthetic_token_ids(tokenizer)?;
+    generate_synthetic_text_with_ids(
+        tokenizer,
+        &eligible_token_ids,
+        &special_token_ids,
+        target_tokens,
+        rng,
+    )
+}
+
+fn generate_synthetic_text_with_ids<R: Rng + ?Sized>(
+    tokenizer: &Tokenizer,
+    eligible_token_ids: &[u32],
+    special_token_ids: &HashSet<u32>,
+    target_tokens: usize,
+    rng: &mut R,
+) -> Result<String> {
+    if target_tokens == 0 {
+        return Ok(String::new());
     }
 
-    let special_ids: HashSet<u32> = tokenizer
-        .get_added_tokens_decoder()
-        .into_iter()
-        .filter_map(|(id, token)| token.special.then_some(id))
-        .collect();
-    let special_base_ids = special_ids
-        .iter()
-        .filter(|id| (**id as usize) < vocab_size)
-        .count();
-    if special_base_ids == vocab_size {
-        return Err(anyhow!(
-            "tokenizer vocabulary contains no non-special tokens"
-        ));
-    }
+    let mut text = decode_random_tokens(tokenizer, eligible_token_ids, target_tokens, rng)
+        .context("failed to decode synthetic tokens")?;
+    let mut last_actual_tokens = None;
 
-    let random_ids = |count: usize, rng: &mut R| -> Vec<u32> {
-        let mut ids = Vec::with_capacity(count);
-        while ids.len() < count {
-            let id = rng.gen_range(0..vocab_size) as u32;
-            if !special_ids.contains(&id) {
-                ids.push(id);
-            }
-        }
-        ids
-    };
-    let mut text = tokenizer
-        .decode(&random_ids(target_tokens, rng), false)
-        .map_err(|err| anyhow!("failed to decode synthetic tokens: {}", err))?;
-    let mut actual_tokens = 0usize;
-
-    for _ in 0..32 {
+    for _ in 0..256 {
         let encoding = tokenizer
             .encode(text.as_str(), false)
             .map_err(|err| anyhow!("failed to re-encode synthetic text: {}", err))?;
-        actual_tokens = encoding.len();
-        let encoded_special = encoding.get_ids().iter().any(|id| special_ids.contains(id));
-        if encoded_special {
-            text = tokenizer
-                .decode(&random_ids(target_tokens, rng), false)
-                .map_err(|err| anyhow!("failed to replace synthetic special tokens: {}", err))?;
+        let actual_tokens = encoding.len();
+        last_actual_tokens = Some(actual_tokens);
+        let encoded_special = encoding
+            .get_ids()
+            .iter()
+            .any(|id| special_token_ids.contains(id));
+        if encoded_special || text.is_empty() {
+            text =
+                resample_different_text(tokenizer, eligible_token_ids, target_tokens, &text, rng)
+                    .context("failed to replace invalid synthetic text")?;
             continue;
         }
         if actual_tokens == target_tokens && !text.is_empty() {
@@ -1023,37 +1252,161 @@ fn generate_synthetic_text<R: Rng + ?Sized>(
         }
 
         if actual_tokens > target_tokens {
-            let end_offset = encoding.get_offsets()[target_tokens - 1].1;
-            if end_offset > 0 && end_offset < text.len() && text.is_char_boundary(end_offset) {
-                text.truncate(end_offset);
-            } else {
-                text = tokenizer
-                    .decode(&random_ids(target_tokens, rng), false)
-                    .map_err(|err| anyhow!("failed to resample synthetic text: {}", err))?;
-            }
+            text = match repair_oversized_text(tokenizer, &text, &encoding, target_tokens)? {
+                Some(candidate) => candidate,
+                None => resample_different_text(
+                    tokenizer,
+                    eligible_token_ids,
+                    target_tokens,
+                    &text,
+                    rng,
+                )
+                .context("failed to resample oversized synthetic text")?,
+            };
         } else {
             let missing = target_tokens - actual_tokens;
-            let extra = tokenizer
-                .decode(&random_ids(missing.max(1), rng), false)
-                .map_err(|err| anyhow!("failed to extend synthetic text: {}", err))?;
+            let extra = decode_random_tokens(tokenizer, eligible_token_ids, missing.max(1), rng)
+                .context("failed to extend synthetic text")?;
+            let original_length = text.len();
             if !text.ends_with(char::is_whitespace) {
                 text.push(' ');
             }
             text.push_str(&extra);
+            if text.len() == original_length {
+                text = resample_different_text(
+                    tokenizer,
+                    eligible_token_ids,
+                    target_tokens,
+                    &text,
+                    rng,
+                )
+                .context("failed to replace a non-progressing synthetic extension")?;
+            }
         }
     }
 
     Err(anyhow!(
-        "failed to generate synthetic text with exactly {target_tokens} tokens after 32 attempts (last count: {actual_tokens})"
+        "failed to generate synthetic text with exactly {target_tokens} tokens after 256 attempts (last count: {})",
+        last_actual_tokens
+            .map(|count| count.to_string())
+            .unwrap_or_else(|| "unknown".to_string())
     ))
 }
 
+fn decode_random_tokens<R: Rng + ?Sized>(
+    tokenizer: &Tokenizer,
+    eligible_token_ids: &[u32],
+    count: usize,
+    rng: &mut R,
+) -> Result<String> {
+    let ids: Vec<u32> = (0..count)
+        .map(|_| eligible_token_ids[rng.gen_range(0..eligible_token_ids.len())])
+        .collect();
+    tokenizer
+        .decode(&ids, false)
+        .map_err(|error| anyhow!("tokenizer decode failed: {error}"))
+}
+
+fn resample_different_text<R: Rng + ?Sized>(
+    tokenizer: &Tokenizer,
+    eligible_token_ids: &[u32],
+    target_tokens: usize,
+    previous: &str,
+    rng: &mut R,
+) -> Result<String> {
+    for _ in 0..8 {
+        let candidate = decode_random_tokens(tokenizer, eligible_token_ids, target_tokens, rng)?;
+        if candidate != previous {
+            return Ok(candidate);
+        }
+    }
+    Err(anyhow!(
+        "tokenizer produced the same candidate in 8 consecutive deterministic resamples"
+    ))
+}
+
+fn repair_oversized_text(
+    tokenizer: &Tokenizer,
+    text: &str,
+    encoding: &tokenizers::Encoding,
+    target_tokens: usize,
+) -> Result<Option<String>> {
+    let mut boundaries_examined = 0usize;
+    let mut previous_boundary = None;
+    let mut best_under_target: Option<(usize, String)> = None;
+
+    for &(_, end_offset) in encoding.get_offsets()[..target_tokens].iter().rev() {
+        if previous_boundary == Some(end_offset) {
+            continue;
+        }
+        previous_boundary = Some(end_offset);
+        if end_offset == 0 || end_offset >= text.len() || !text.is_char_boundary(end_offset) {
+            continue;
+        }
+
+        let candidate = &text[..end_offset];
+        let candidate_tokens = tokenizer
+            .encode(candidate, false)
+            .map_err(|err| anyhow!("failed to verify trimmed synthetic text: {err}"))?
+            .len();
+        if candidate_tokens == target_tokens {
+            return Ok(Some(candidate.to_string()));
+        }
+        if candidate_tokens < target_tokens
+            && best_under_target
+                .as_ref()
+                .is_none_or(|(best_count, _)| candidate_tokens > *best_count)
+        {
+            best_under_target = Some((candidate_tokens, candidate.to_string()));
+        }
+
+        boundaries_examined += 1;
+        if boundaries_examined >= 16 {
+            break;
+        }
+    }
+
+    Ok(best_under_target.map(|(_, candidate)| candidate))
+}
+
+async fn generate_next_reset_prompt(
+    text_generator: &SyntheticTextGenerator,
+    plan: &AgentPlan,
+    current_turn_index: usize,
+) -> Result<Option<String>> {
+    let next_turn_index = current_turn_index + 1;
+    let Some(reset_prompt_tokens) = plan
+        .turns
+        .get(next_turn_index)
+        .and_then(|turn| turn.reset_prompt_tokens)
+    else {
+        return Ok(None);
+    };
+
+    text_generator
+        .generate(
+            plan.agent_id,
+            SyntheticTextField::ResetPrompt(next_turn_index),
+            reset_prompt_tokens,
+        )
+        .await
+        .map(Some)
+        .with_context(|| {
+            format!(
+                "failed to prefetch reset prompt for trajectory {:?} invocation {}",
+                plan.trajectory_id,
+                next_turn_index + 1
+            )
+        })
+}
+
 async fn run_agent(
-    plan: AgentPlan,
+    mut plan: AgentPlan,
     routing_slot: usize,
     admitted_at: Duration,
     client: Client,
     config: std::sync::Arc<AgentLoopConfig>,
+    text_generator: SyntheticTextGenerator,
 ) -> Result<AgentWorkerReport> {
     let agent_start = Instant::now();
     let mut report = AgentWorkerReport::new(
@@ -1062,22 +1415,56 @@ async fn run_agent(
         routing_slot,
         admitted_at,
     );
-    let mut messages = vec![json!({
-        "role": "user",
-        "content": plan.initial_prompt,
-    })];
+    let initial_prompt = plan.initial_prompt.take().ok_or_else(|| {
+        anyhow!(
+            "trajectory {:?} was admitted without a materialized initial prompt",
+            plan.trajectory_id
+        )
+    })?;
+    let mut messages = if config.dry_run {
+        Vec::new()
+    } else {
+        vec![json!({
+            "role": "user",
+            "content": initial_prompt,
+        })]
+    };
     let mut previous_prompt_tokens = 0u64;
+    let mut prefetched_reset_prompt = None;
 
     for (turn_index, turn) in plan.turns.iter().enumerate() {
         let invocation = turn_index + 1;
-        if let Some(reset_prompt) = turn.reset_prompt.as_deref() {
-            messages = vec![json!({
-                "role": "user",
-                "content": reset_prompt,
-            })];
+        if turn.reset_prompt_tokens.is_some() {
+            let reset_prompt = prefetched_reset_prompt.take().ok_or_else(|| {
+                anyhow!(
+                    "trajectory {:?} invocation {} is missing its prefetched reset prompt",
+                    plan.trajectory_id,
+                    invocation
+                )
+            })?;
+            if !config.dry_run {
+                messages = vec![json!({
+                    "role": "user",
+                    "content": reset_prompt,
+                })];
+            }
             previous_prompt_tokens = 0;
         }
         if config.dry_run {
+            let environment = text_generator.generate(
+                plan.agent_id,
+                SyntheticTextField::Environment(turn_index),
+                turn.environment_tokens,
+            );
+            let next_reset = generate_next_reset_prompt(&text_generator, &plan, turn_index);
+            let (environment_content, next_reset_prompt) = tokio::join!(environment, next_reset);
+            environment_content.with_context(|| {
+                format!(
+                    "failed to generate environment content for trajectory {:?} invocation {}",
+                    plan.trajectory_id, invocation
+                )
+            })?;
+            prefetched_reset_prompt = next_reset_prompt?;
             report.dry_run_records.push(DryRunRecord {
                 agent_id: plan.agent_id,
                 trajectory_id: plan.trajectory_id.clone(),
@@ -1089,33 +1476,41 @@ async fn run_agent(
                 output_tokens: turn.output_tokens,
                 environment_tokens: turn.environment_tokens,
                 tool_call_latency_ms: turn.tool_call_latency.as_millis() as usize,
-                reset_before: turn.reset_prompt.is_some(),
+                reset_before: turn.reset_prompt_tokens.is_some(),
             });
-            append_synthetic_turn(
-                &mut messages,
-                plan.agent_id,
-                invocation,
-                &format!("synthetic model response ({} tokens)", turn.output_tokens),
-                &turn.environment_content,
-            );
             continue;
         }
 
-        let body = build_request_body(
+        let body = serialize_request_body(
             &config,
             &messages,
             turn.output_tokens,
             plan.user_tag.as_deref(),
-        );
-        match request_with_retries(
+        )?;
+        let request = request_with_retries(
             &client,
             &config,
             &body,
             plan.user_tag.as_deref(),
             routing_slot,
-        )
-        .await
-        {
+        );
+        let environment = text_generator.generate(
+            plan.agent_id,
+            SyntheticTextField::Environment(turn_index),
+            turn.environment_tokens,
+        );
+        let next_reset = generate_next_reset_prompt(&text_generator, &plan, turn_index);
+        let (request_result, environment_content, next_reset_prompt) =
+            tokio::join!(request, environment, next_reset);
+        prefetched_reset_prompt = next_reset_prompt?;
+        let environment_content = environment_content.with_context(|| {
+            format!(
+                "failed to generate environment content for trajectory {:?} invocation {}",
+                plan.trajectory_id, invocation
+            )
+        })?;
+
+        match request_result {
             Ok(result) => {
                 report.successful_requests += 1;
                 report.input_tokens = report.input_tokens.saturating_add(result.prompt_tokens);
@@ -1143,7 +1538,7 @@ async fn run_agent(
                     result.assistant_message,
                     plan.agent_id,
                     invocation,
-                    &turn.environment_content,
+                    &environment_content,
                 ) {
                     report.failures.push(AgentFailureRecord {
                         agent_id: plan.agent_id,
@@ -1181,43 +1576,62 @@ fn generate_user_tag(enabled: bool, prefix: Option<&str>, agent_id: usize) -> Op
     })
 }
 
+#[derive(Serialize)]
+struct AgentRequestPayload<'a> {
+    model: &'a str,
+    messages: &'a [Value],
+    #[serde(skip_serializing_if = "Option::is_none")]
+    max_tokens: Option<usize>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    min_tokens: Option<usize>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    max_new_tokens: Option<usize>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    min_new_tokens: Option<usize>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    ignore_eos: Option<bool>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    user: Option<&'a str>,
+}
+
+fn serialize_request_body(
+    config: &AgentLoopConfig,
+    messages: &[Value],
+    output_tokens: usize,
+    user_tag: Option<&str>,
+) -> Result<Bytes> {
+    let payload = AgentRequestPayload {
+        model: &config.model,
+        messages,
+        max_tokens: (!config.sglang).then_some(output_tokens),
+        min_tokens: (!config.sglang).then_some(output_tokens),
+        max_new_tokens: config.sglang.then_some(output_tokens),
+        min_new_tokens: config.sglang.then_some(output_tokens),
+        ignore_eos: config.ignore_eos.then_some(true),
+        user: user_tag,
+    };
+    serde_json::to_vec(&payload)
+        .map(Bytes::from)
+        .context("failed to serialize agent request")
+}
+
+#[cfg(test)]
 fn build_request_body(
     config: &AgentLoopConfig,
     messages: &[Value],
     output_tokens: usize,
     user_tag: Option<&str>,
 ) -> Value {
-    let mut body = json!({
-        "model": config.model,
-        "messages": messages
-    });
-
-    let (max_key, min_key) = output_token_field_names(config.sglang);
-    if let Some(map) = body.as_object_mut() {
-        map.insert(max_key.to_string(), json!(output_tokens));
-        map.insert(min_key.to_string(), json!(output_tokens));
-        if config.ignore_eos {
-            map.insert("ignore_eos".to_string(), json!(true));
-        }
-        if let Some(user_tag) = user_tag {
-            map.insert("user".to_string(), json!(user_tag));
-        }
-    }
-    body
-}
-
-fn output_token_field_names(use_sglang: bool) -> (&'static str, &'static str) {
-    if use_sglang {
-        ("max_new_tokens", "min_new_tokens")
-    } else {
-        ("max_tokens", "min_tokens")
-    }
+    serde_json::from_slice(
+        &serialize_request_body(config, messages, output_tokens, user_tag).unwrap(),
+    )
+    .unwrap()
 }
 
 async fn request_with_retries(
     client: &Client,
     config: &AgentLoopConfig,
-    body: &Value,
+    body: &Bytes,
     user_tag: Option<&str>,
     routing_slot: usize,
 ) -> Result<RequestResult> {
@@ -1246,18 +1660,20 @@ async fn request_with_retries(
 async fn single_attempt(
     client: &Client,
     config: &AgentLoopConfig,
-    body: &Value,
+    body: &Bytes,
     user_tag: Option<&str>,
     routing_slot: usize,
 ) -> Result<RequestResult> {
     if config.verbose {
-        println!("[AGENT REQUEST] {}", sanitize_request(body));
+        let parsed: Value = serde_json::from_slice(body)
+            .context("failed to parse serialized request for verbose logging")?;
+        println!("[AGENT REQUEST] {}", sanitize_request(&parsed));
     }
 
     let request = client
         .post(config.endpoint.clone())
         .headers(build_request_headers(config, user_tag, routing_slot)?);
-    let response = request.json(body).send().await?;
+    let response = request.body(body.clone()).send().await?;
     let status = response.status();
     let bytes = response.bytes().await?;
     if !status.is_success() {
@@ -1347,33 +1763,6 @@ fn append_model_and_environment(
     Ok(())
 }
 
-fn append_synthetic_turn(
-    messages: &mut Vec<Value>,
-    agent_id: usize,
-    invocation: usize,
-    model_content: &str,
-    environment_content: &str,
-) {
-    let tool_call_id = synthetic_tool_call_id(agent_id, invocation);
-    messages.push(json!({
-        "role": "assistant",
-        "content": model_content,
-        "tool_calls": [{
-            "id": tool_call_id,
-            "type": "function",
-            "function": {
-                "name": "environment",
-                "arguments": "{\"request\":\"continue\"}"
-            }
-        }]
-    }));
-    messages.push(json!({
-        "role": "tool",
-        "tool_call_id": synthetic_tool_call_id(agent_id, invocation),
-        "content": environment_content,
-    }));
-}
-
 fn normalize_assistant_message(message: Value) -> Result<Value> {
     let source = message
         .as_object()
@@ -1457,6 +1846,49 @@ fn percentile(sorted_latencies: &[Duration], quantile: f64) -> Option<Duration> 
 mod tests {
     use super::*;
 
+    fn byte_level_tokenizer() -> Tokenizer {
+        use tokenizers::models::bpe::{Vocab, BPE};
+        use tokenizers::pre_tokenizers::byte_level::ByteLevel;
+
+        let mut alphabet: Vec<_> = ByteLevel::alphabet().into_iter().collect();
+        alphabet.sort_unstable();
+        let vocab: Vocab = alphabet
+            .into_iter()
+            .enumerate()
+            .map(|(id, character)| (character.to_string(), id as u32))
+            .collect();
+        let model = BPE::builder()
+            .vocab_and_merges(vocab, vec![])
+            .build()
+            .unwrap();
+        let mut tokenizer = Tokenizer::new(model);
+        tokenizer.with_pre_tokenizer(Some(ByteLevel::default().add_prefix_space(false)));
+        tokenizer.with_decoder(Some(ByteLevel::default()));
+        tokenizer
+    }
+
+    fn word_level_tokenizer() -> Tokenizer {
+        use tokenizers::models::wordlevel::WordLevel;
+        use tokenizers::pre_tokenizers::whitespace::Whitespace;
+
+        let vocab = [
+            ("[UNK]".to_string(), 0),
+            ("alpha".to_string(), 1),
+            ("beta".to_string(), 2),
+            ("gamma".to_string(), 3),
+        ]
+        .into_iter()
+        .collect();
+        let model = WordLevel::builder()
+            .vocab(vocab)
+            .unk_token("[UNK]".to_string())
+            .build()
+            .unwrap();
+        let mut tokenizer = Tokenizer::new(model);
+        tokenizer.with_pre_tokenizer(Some(Whitespace));
+        tokenizer
+    }
+
     #[test]
     fn fixed_and_lognormal_specs_validate() {
         assert!(SampleSpec::fixed(8).is_ok());
@@ -1515,27 +1947,161 @@ mod tests {
 
     #[test]
     fn synthetic_text_resamples_when_byte_offsets_cannot_be_trimmed() {
-        use tokenizers::models::bpe::{Vocab, BPE};
-        use tokenizers::pre_tokenizers::byte_level::ByteLevel;
-
-        let mut alphabet: Vec<_> = ByteLevel::alphabet().into_iter().collect();
-        alphabet.sort_unstable();
-        let vocab: Vocab = alphabet
-            .into_iter()
-            .enumerate()
-            .map(|(id, character)| (character.to_string(), id as u32))
-            .collect();
-        let model = BPE::builder()
-            .vocab_and_merges(vocab, vec![])
-            .build()
-            .unwrap();
-        let mut tokenizer = Tokenizer::new(model);
-        tokenizer.with_pre_tokenizer(Some(ByteLevel::default().add_prefix_space(false)));
-        tokenizer.with_decoder(Some(ByteLevel::default()));
+        let tokenizer = byte_level_tokenizer();
         let mut rng = rand::rngs::StdRng::seed_from_u64(0);
 
         let text = generate_synthetic_text(&tokenizer, 1, &mut rng).unwrap();
         assert_eq!(tokenizer.encode(text, false).unwrap().len(), 1);
+    }
+
+    #[test]
+    fn synthetic_text_handles_the_glm_regression_target_exactly() {
+        let tokenizer = byte_level_tokenizer();
+        let mut rng = rand::rngs::StdRng::seed_from_u64(17);
+
+        let text = generate_synthetic_text(&tokenizer, 2_857, &mut rng).unwrap();
+        assert_eq!(tokenizer.encode(text, false).unwrap().len(), 2_857);
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn lazy_text_is_deterministic_across_scheduling_and_unique_per_agent() {
+        let tokenizer = std::sync::Arc::new(word_level_tokenizer());
+        let generator = SyntheticTextGenerator::new(tokenizer.clone(), 42).unwrap();
+
+        let initial = generator
+            .generate(0, SyntheticTextField::InitialPrompt, 64)
+            .await
+            .unwrap();
+        let environment = generator
+            .generate(0, SyntheticTextField::Environment(7), 64)
+            .await
+            .unwrap();
+        let (environment_reordered, initial_reordered) = tokio::join!(
+            generator.generate(0, SyntheticTextField::Environment(7), 64),
+            generator.generate(0, SyntheticTextField::InitialPrompt, 64),
+        );
+        assert_eq!(environment_reordered.unwrap(), environment);
+        assert_eq!(initial_reordered.unwrap(), initial);
+
+        let other_agent = generator
+            .generate(1, SyntheticTextField::InitialPrompt, 64)
+            .await
+            .unwrap();
+        assert_ne!(other_agent, initial);
+        for text in [&initial, &environment, &other_agent] {
+            assert_eq!(tokenizer.encode(text.as_str(), false).unwrap().len(), 64);
+        }
+        assert!(generator.permits.available_permits() <= 32);
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn initial_prompts_are_materialized_before_admission() {
+        let config = AgentLoopConfig::try_new(
+            "http://localhost:8000/v1/chat/completions",
+            None,
+            "test-model",
+            2,
+            SampleSpec::fixed(32).unwrap(),
+            SampleSpec::fixed(4).unwrap(),
+            SampleSpec::fixed(6).unwrap(),
+            SampleSpec::fixed(2).unwrap(),
+        )
+        .unwrap()
+        .with_seed(7);
+        let (plans, root_seed) = build_agent_plans(&config).unwrap();
+        assert!(plans.iter().all(|plan| plan.initial_prompt.is_none()));
+        let tokenizer = std::sync::Arc::new(word_level_tokenizer());
+        let generator = SyntheticTextGenerator::new(tokenizer.clone(), root_seed).unwrap();
+        let admissions = plans.into_iter().enumerate().collect();
+
+        let prepared = materialize_initial_prompts(admissions, &generator)
+            .await
+            .unwrap();
+
+        assert_eq!(prepared.len(), 2);
+        let prompts: Vec<_> = prepared
+            .iter()
+            .map(|(_, plan)| plan.initial_prompt.as_ref().unwrap())
+            .collect();
+        assert_ne!(prompts[0], prompts[1]);
+        assert!(prompts.iter().all(|prompt| tokenizer
+            .encode(prompt.as_str(), false)
+            .unwrap()
+            .len()
+            == 32));
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn reset_prefetch_matches_direct_deterministic_generation() {
+        let input = r#"{"schema_version":1,"trajectory_id":"reset","requests":[{"prompt_tokens":32,"output_tokens":4},{"prompt_tokens":24,"output_tokens":3,"reset_before":true}]}"#;
+        let specs = parse_trajectory_plan_specs(std::io::Cursor::new(input), "fixture").unwrap();
+        let config = AgentLoopConfig::try_new(
+            "http://localhost:8000/v1/chat/completions",
+            None,
+            "test-model",
+            1,
+            SampleSpec::fixed(8).unwrap(),
+            SampleSpec::fixed(4).unwrap(),
+            SampleSpec::fixed(6).unwrap(),
+            SampleSpec::fixed(2).unwrap(),
+        )
+        .unwrap();
+        let plans = build_replay_agent_plans(&config, specs).unwrap();
+        let tokenizer = std::sync::Arc::new(word_level_tokenizer());
+        let generator = SyntheticTextGenerator::new(tokenizer.clone(), 99).unwrap();
+
+        let prefetched = generate_next_reset_prompt(&generator, &plans[0], 0)
+            .await
+            .unwrap()
+            .unwrap();
+        let direct = generator
+            .generate(0, SyntheticTextField::ResetPrompt(1), 24)
+            .await
+            .unwrap();
+
+        assert_eq!(prefetched, direct);
+        assert_eq!(tokenizer.encode(prefetched, false).unwrap().len(), 24);
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn initial_agents_are_admitted_at_benchmark_time_zero() {
+        let tokenizer_path = std::env::temp_dir().join(format!(
+            "batchbench-agent-tokenizer-{}.json",
+            Uuid::new_v4()
+        ));
+        word_level_tokenizer().save(&tokenizer_path, false).unwrap();
+        let config = AgentLoopConfig::try_new(
+            "http://localhost:8000/v1/chat/completions",
+            None,
+            "test-model",
+            8,
+            SampleSpec::fixed(32).unwrap(),
+            SampleSpec::fixed(4).unwrap(),
+            SampleSpec::fixed(6).unwrap(),
+            SampleSpec::fixed(1).unwrap(),
+        )
+        .unwrap()
+        .with_tokenizer_model(tokenizer_path.display().to_string())
+        .with_seed(7)
+        .with_dry_run(true)
+        .with_max_active_agents(4)
+        .unwrap();
+
+        let report = run_agent_benchmark(config).await.unwrap();
+        std::fs::remove_file(&tokenizer_path).unwrap();
+
+        assert_eq!(report.completed_agents, 8);
+        assert_eq!(report.max_active_agents, 4);
+        assert!(report
+            .agent_lifecycles
+            .iter()
+            .filter(|record| record.agent_id < 4)
+            .all(|record| record.admitted_at == Duration::ZERO));
+        assert!(report
+            .agent_lifecycles
+            .iter()
+            .filter(|record| record.agent_id >= 4)
+            .all(|record| record.admitted_at > Duration::ZERO));
     }
 
     #[test]
@@ -1869,25 +2435,6 @@ mod tests {
 
     #[test]
     fn replay_compiler_applies_overhead_and_reset_boundaries() {
-        use tokenizers::models::wordlevel::WordLevel;
-        use tokenizers::pre_tokenizers::whitespace::Whitespace;
-
-        let vocab = [
-            ("[UNK]".to_string(), 0),
-            ("alpha".to_string(), 1),
-            ("beta".to_string(), 2),
-            ("gamma".to_string(), 3),
-        ]
-        .into_iter()
-        .collect();
-        let model = WordLevel::builder()
-            .vocab(vocab)
-            .unk_token("[UNK]".to_string())
-            .build()
-            .unwrap();
-        let mut tokenizer = Tokenizer::new(model);
-        tokenizer.with_pre_tokenizer(Some(Whitespace));
-
         let input = r#"{"schema_version":1,"trajectory_id":"shape","requests":[{"prompt_tokens":100,"output_tokens":20},{"prompt_tokens":150,"output_tokens":10,"delay_after_ms":25},{"prompt_tokens":60,"output_tokens":5,"reset_before":true}]}"#;
         let specs = parse_trajectory_plan_specs(std::io::Cursor::new(input), "fixture").unwrap();
         let config = AgentLoopConfig::try_new(
@@ -1903,16 +2450,11 @@ mod tests {
         .unwrap()
         .with_replay_prompt_overhead(5, 10);
 
-        let plans = build_replay_agent_plans(&config, &tokenizer, 42, specs).unwrap();
+        let plans = build_replay_agent_plans(&config, specs).unwrap();
         let plan = &plans[0];
         assert_eq!(plan.trajectory_id, "shape");
-        assert_eq!(
-            tokenizer
-                .encode(plan.initial_prompt.as_str(), false)
-                .unwrap()
-                .len(),
-            95
-        );
+        assert_eq!(plan.initial_prompt_tokens, 95);
+        assert!(plan.initial_prompt.is_none());
         assert_eq!(plan.turns.len(), 3);
         assert_eq!(plan.turns[0].input_content_tokens, 95);
         assert_eq!(plan.turns[0].target_prompt_tokens, 100);
@@ -1921,17 +2463,10 @@ mod tests {
         assert_eq!(plan.turns[1].target_prompt_tokens, 150);
         assert_eq!(plan.turns[1].environment_tokens, 0);
         assert_eq!(plan.turns[1].tool_call_latency, Duration::from_millis(25));
-        assert!(plan.turns[1].reset_prompt.is_none());
+        assert!(plan.turns[1].reset_prompt_tokens.is_none());
         assert_eq!(plan.turns[2].input_content_tokens, 55);
         assert_eq!(plan.turns[2].target_prompt_tokens, 60);
-        let reset_prompt = plan.turns[2].reset_prompt.as_ref().unwrap();
-        assert_eq!(
-            tokenizer
-                .encode(reset_prompt.as_str(), false)
-                .unwrap()
-                .len(),
-            55
-        );
+        assert_eq!(plan.turns[2].reset_prompt_tokens, Some(55));
     }
 
     #[test]
@@ -1978,6 +2513,59 @@ mod tests {
         assert_eq!(admission.replacement(1), Some((1, "c")));
         assert_eq!(admission.replacement(0), Some((0, "d")));
         assert_eq!(admission.replacement(1), None);
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn near_simultaneous_replacements_prepare_concurrently() {
+        let mut preparations: JoinSet<Result<(usize, &'static str)>> = JoinSet::new();
+        let barrier = std::sync::Arc::new(tokio::sync::Barrier::new(3));
+        let started = std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0));
+
+        for (routing_slot, item) in [(0, "first"), (1, "second")] {
+            let barrier = barrier.clone();
+            let started = started.clone();
+            spawn_admission_preparation(
+                &mut preparations,
+                routing_slot,
+                item,
+                move |item| async move {
+                    started.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+                    barrier.wait().await;
+                    Ok(item)
+                },
+            );
+        }
+
+        tokio::time::timeout(Duration::from_secs(1), barrier.wait())
+            .await
+            .expect("both replacement preparations should start before either is admitted");
+        assert_eq!(started.load(std::sync::atomic::Ordering::SeqCst), 2);
+
+        let mut prepared = Vec::new();
+        while let Some(joined) = preparations.join_next().await {
+            prepared.push(joined.unwrap().unwrap());
+        }
+        prepared.sort_by_key(|(routing_slot, _)| *routing_slot);
+        assert_eq!(prepared, vec![(0, "first"), (1, "second")]);
+    }
+
+    #[test]
+    fn out_of_order_preparations_are_admitted_in_fifo_order() {
+        let mut prepared = BTreeMap::from([(1, "second")]);
+        let mut next_sequence = 0;
+        assert!(
+            take_prepared_in_fifo_order(&mut prepared, &mut next_sequence)
+                .unwrap()
+                .is_empty()
+        );
+
+        prepared.insert(0, "first");
+        assert_eq!(
+            take_prepared_in_fifo_order(&mut prepared, &mut next_sequence).unwrap(),
+            vec!["first", "second"]
+        );
+        assert_eq!(next_sequence, 2);
+        assert!(prepared.is_empty());
     }
 
     #[test]

@@ -167,10 +167,12 @@ subtracts these values when generating content while retaining the manifest's
 absolute prompt targets for reporting.
 
 `--max-active-agents` bounds simultaneous trajectories while retaining every plan
-in the manifest. BatchBench initially admits up to that limit and immediately
-admits the next queued trajectory whenever any active trajectory terminates. The
-replacement inherits the freed scheduler/routing slot, keeping active load balanced
-across data-parallel ranks when perfect routing is enabled.
+in the manifest. BatchBench initially admits up to that limit. Whenever an active
+trajectory terminates, the next queued trajectory prepares its initial prompt and
+then inherits the freed scheduler/routing slot. Multiple replacements prepare
+concurrently through the same bounded worker pool while preserving FIFO admission
+order, keeping active load balanced across data-parallel ranks when perfect routing
+is enabled.
 
 ```bash
 batchbench-agent \
@@ -187,7 +189,16 @@ batchbench-agent \
 
 Do not combine `--agent-plans-jsonl` with `--agents` or the synthetic workload-shape
 flags. `--seed` remains useful because it makes generated placeholder text
-reproducible.
+reproducible. Generated content is accepted only when it re-encodes to the requested
+token count; an unconstructable field fails with its trajectory context instead of
+silently changing the workload.
+
+Replay manifests remain compact in memory: BatchBench materializes the initially
+active prompts before the benchmark clock starts, then generates only the current
+environment response and the next reset prompt while the current HTTP request is in
+flight. Token generation uses a bounded worker pool, and its per-agent/per-turn random
+streams are independent of asynchronous scheduling. Request JSON is serialized from
+the live conversation without first cloning the complete message tree.
 
 `--agent-events-jsonl` writes each trajectory's queue/admission time, reusable
 routing slot, optional DP rank, finish time, runtime, and completion status. The
