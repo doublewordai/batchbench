@@ -1,5 +1,13 @@
 # Changelog
 
+## [0.6.2](https://github.com/doublewordai/batchbench/compare/v0.6.1...v0.6.2) (2026-08-28)
+
+
+### Bug Fixes
+
+* **agent:** bound exact trajectory materialization ([db25278](https://github.com/doublewordai/batchbench/commit/db2527853190b9c3752ffc245099504fc7a52f63))
+* **agent:** bound exact trajectory materialization ([7548edd](https://github.com/doublewordai/batchbench/commit/7548edd4c9ef51309f7ae5b5829cc6d5f9191c25))
+
 ## [0.6.1](https://github.com/doublewordai/batchbench/compare/v0.6.0...v0.6.1) (2026-08-26)
 
 
