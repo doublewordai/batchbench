@@ -185,7 +185,7 @@ struct Args {
 }
 
 enum ParsedArgs {
-    Ready(Args),
+    Ready(Box<Args>),
     Displayed,
 }
 
@@ -195,7 +195,7 @@ where
     T: Into<OsString> + Clone,
 {
     match Args::try_parse_from(argv) {
-        Ok(args) => Ok(ParsedArgs::Ready(args)),
+        Ok(args) => Ok(ParsedArgs::Ready(Box::new(args))),
         Err(err) => match err.kind() {
             clap::error::ErrorKind::DisplayHelp | clap::error::ErrorKind::DisplayVersion => {
                 err.print()
@@ -209,7 +209,7 @@ where
 
 pub fn run_from_env() -> Result<()> {
     match parse_args(std::env::args_os()) {
-        Ok(ParsedArgs::Ready(args)) => run_with_runtime(args),
+        Ok(ParsedArgs::Ready(args)) => run_with_runtime(*args),
         Ok(ParsedArgs::Displayed) => Ok(()),
         Err(err) => Err(err),
     }
@@ -220,7 +220,7 @@ pub fn run_from_argv(argv: Vec<String>) -> Result<()> {
     full_argv.push("batchbench".to_string());
     full_argv.extend(argv);
     match parse_args(full_argv) {
-        Ok(ParsedArgs::Ready(args)) => run_with_runtime(args),
+        Ok(ParsedArgs::Ready(args)) => run_with_runtime(*args),
         Ok(ParsedArgs::Displayed) => Ok(()),
         Err(err) => Err(err),
     }
@@ -359,11 +359,9 @@ async fn run(args: Args) -> Result<()> {
                 return Err(anyhow!("--output-lognorm-median must be greater than zero"));
             }
             median.ln()
-        } else if let Some(mu) = args.output_lognorm_mu {
-            mu
         } else {
-            // no lognorm
-            f64::NAN
+            // NaN means no log-normal output sampling was requested
+            args.output_lognorm_mu.unwrap_or(f64::NAN)
         };
 
         if mu.is_nan() {

@@ -25,3 +25,4 @@ pricing/
 examples/*
 !examples/trajectory-replay/
 !examples/trajectory-replay/plans.jsonl
+!examples/trajectory-replay/plans-v2.jsonl
