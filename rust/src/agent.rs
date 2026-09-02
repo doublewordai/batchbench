@@ -354,6 +354,8 @@ struct AgentTurnPlan {
     stream: Option<bool>,
     /// Schema v2: per-request output cap override.
     max_tokens: Option<usize>,
+    /// Schema v2: live blocks that can never receive a previous reply and are generated instead.
+    live_fallbacks: u64,
 }
 
 impl AgentTurnPlan {
@@ -1435,6 +1437,7 @@ fn build_agent_plans(config: &AgentLoopConfig) -> Result<BuiltAgentPlans> {
                 blocks: None,
                 stream: None,
                 max_tokens: None,
+                live_fallbacks: 0,
             });
             target_prompt_tokens = target_prompt_tokens
                 .checked_add(output_tokens)
@@ -1559,7 +1562,29 @@ fn validate_trajectory_plan_spec(spec: &TrajectoryPlanSpec) -> Result<()> {
         }
     }
 
-    if !uses_blocks {
+    if uses_blocks {
+        // Block content is cached per seed for the whole trajectory, so a seed must always
+        // describe the same block.
+        let mut definitions: HashMap<&str, (usize, BlockRole)> = HashMap::new();
+        for (request_index, request) in spec.requests.iter().enumerate() {
+            for block in request.blocks.iter().flatten() {
+                match definitions.insert(block.seed.as_str(), (block.tokens, block.role)) {
+                    Some(previous) if previous != (block.tokens, block.role) => {
+                        return Err(anyhow!(
+                            "request {} redefines block seed {:?} as {} {} tokens; it was first defined as {} {} tokens",
+                            request_index + 1,
+                            block.seed,
+                            block.role.as_str(),
+                            block.tokens,
+                            previous.1.as_str(),
+                            previous.0
+                        ));
+                    }
+                    _ => {}
+                }
+            }
+        }
+    } else {
         // Without blocks the next prompt is inferred from the current one, so every transition
         // must leave room for the appended output and environment response.
         let overheads = effective_overheads(&spec.requests, 0, 0);
@@ -1650,12 +1675,13 @@ fn inferred_environment_tokens_from_content(
         })
 }
 
-fn scale_millis(millis: u64, time_scale: f64) -> Duration {
+fn scale_millis(millis: u64, time_scale: f64) -> Result<Duration> {
     if time_scale == 1.0 {
-        Duration::from_millis(millis)
-    } else {
-        Duration::from_secs_f64(millis as f64 / 1000.0 / time_scale)
+        return Ok(Duration::from_millis(millis));
     }
+    Duration::try_from_secs_f64(millis as f64 / 1000.0 / time_scale).map_err(|_| {
+        anyhow!("{millis} ms divided by time scale {time_scale} is not a representable duration")
+    })
 }
 
 fn build_replay_agent_plans(
@@ -1737,12 +1763,20 @@ fn build_growth_replay_plan(
             target_prompt_tokens: request.prompt_tokens,
             output_tokens: request.output_tokens,
             environment_tokens,
-            tool_call_latency: scale_millis(request.delay_after_ms, config.time_scale),
+            tool_call_latency: scale_millis(request.delay_after_ms, config.time_scale)
+                .with_context(|| {
+                    format!(
+                        "trajectory {:?} request {} delay_after_ms",
+                        spec.trajectory_id,
+                        request_index + 1
+                    )
+                })?,
             reset_prompt_tokens: reset_prompt,
             reset_before: request.reset_before && request_index > 0,
             blocks: None,
             stream: request.stream,
             max_tokens: request.max_tokens,
+            live_fallbacks: 0,
         });
         if spec
             .requests
@@ -1768,8 +1802,34 @@ fn build_growth_replay_plan(
         initial_prompt_tokens,
         initial_content: None,
         turns,
-        start_after: scale_millis(spec.start_after_ms.unwrap_or(0), config.time_scale),
+        start_after: scale_millis(spec.start_after_ms.unwrap_or(0), config.time_scale)
+            .with_context(|| format!("trajectory {:?} start_after_ms", spec.trajectory_id))?,
     })
+}
+
+/// Decide at plan time which live blocks can receive the previous reply. Only the first unseen
+/// live block of a request that follows another request in the same conversation can; every
+/// other live block is demoted to a generated block so it is synthesized ahead of time.
+/// Returns the number of demoted blocks.
+fn plan_live_fallbacks(
+    blocks: &mut [BlockSpec],
+    sent_seeds: &mut HashSet<String>,
+    reply_available: bool,
+) -> u64 {
+    let mut fallbacks = 0;
+    let mut reply_taken = !reply_available;
+    for block in blocks.iter_mut() {
+        if block.is_live() && !sent_seeds.contains(&block.seed) {
+            if reply_taken {
+                block.live = false;
+                fallbacks += 1;
+            } else {
+                reply_taken = true;
+            }
+        }
+        sent_seeds.insert(block.seed.clone());
+    }
+    fallbacks
 }
 
 /// Schema v2 with blocks: every request's prompt is fully described by its blocks, so no
@@ -1783,12 +1843,22 @@ fn build_block_replay_plan(
     let mut turns = Vec::with_capacity(spec.requests.len());
     let mut warned_mismatch = false;
     let mut initial_prompt_tokens = 0;
+    let mut sent_seeds: HashSet<String> = HashSet::new();
 
     for (request_index, request) in spec.requests.iter().enumerate() {
-        let blocks = request
+        let reset_before = request.reset_before && request_index > 0;
+        if reset_before {
+            sent_seeds.clear();
+        }
+        let mut blocks = request
             .blocks
             .clone()
             .ok_or_else(|| anyhow!("validated block trajectory lost its blocks"))?;
+        let live_fallbacks = plan_live_fallbacks(
+            &mut blocks,
+            &mut sent_seeds,
+            request_index > 0 && !reset_before,
+        );
         let content_tokens = request
             .block_content_tokens()
             .transpose()?
@@ -1813,12 +1883,20 @@ fn build_block_replay_plan(
             target_prompt_tokens: request.prompt_tokens,
             output_tokens: request.output_tokens,
             environment_tokens: 0,
-            tool_call_latency: scale_millis(request.delay_after_ms, config.time_scale),
+            tool_call_latency: scale_millis(request.delay_after_ms, config.time_scale)
+                .with_context(|| {
+                    format!(
+                        "trajectory {:?} request {} delay_after_ms",
+                        spec.trajectory_id,
+                        request_index + 1
+                    )
+                })?,
             reset_prompt_tokens: None,
-            reset_before: request.reset_before && request_index > 0,
+            reset_before,
             blocks: Some(blocks),
             stream: request.stream,
             max_tokens: request.max_tokens,
+            live_fallbacks,
         });
     }
 
@@ -1829,7 +1907,8 @@ fn build_block_replay_plan(
         initial_prompt_tokens,
         initial_content: None,
         turns,
-        start_after: scale_millis(spec.start_after_ms.unwrap_or(0), config.time_scale),
+        start_after: scale_millis(spec.start_after_ms.unwrap_or(0), config.time_scale)
+            .with_context(|| format!("trajectory {:?} start_after_ms", spec.trajectory_id))?,
     })
 }
 
@@ -2687,6 +2766,7 @@ async fn run_block_agent(
             last_reply = None;
             previous_prompt_tokens = 0;
         }
+        report.live_block_fallbacks += turn.live_fallbacks;
         for (seed, text) in prefetched.drain(..) {
             cache.entry(seed).or_insert(BlockContent::Generated(text));
         }
@@ -2708,13 +2788,9 @@ async fn run_block_agent(
         }
 
         if config.dry_run {
-            let next_blocks = plan
-                .turns
-                .get(turn_index + 1)
-                .and_then(|next| next.blocks.as_deref())
-                .map(|next| missing_generated_blocks(next, &cache))
-                .unwrap_or_default();
-            prefetched = text_generator.generate_blocks(next_blocks).await?;
+            prefetched = text_generator
+                .generate_blocks(next_turn_prefetch(&plan, turn_index, &cache))
+                .await?;
             report.dry_run_records.push(dry_run_record(
                 &plan,
                 turn,
@@ -2761,13 +2837,8 @@ async fn run_block_agent(
             routing_slot,
             stream,
         );
-        let next_blocks = plan
-            .turns
-            .get(turn_index + 1)
-            .and_then(|next| next.blocks.as_deref())
-            .map(|next| missing_generated_blocks(next, &cache))
-            .unwrap_or_default();
-        let prefetch = text_generator.generate_blocks(next_blocks);
+        let prefetch =
+            text_generator.generate_blocks(next_turn_prefetch(&plan, turn_index, &cache));
         let (request_result, prefetched_now) = tokio::join!(request, prefetch);
         prefetched = prefetched_now.with_context(|| {
             format!(
@@ -2808,8 +2879,25 @@ async fn run_block_agent(
     Ok(report)
 }
 
-/// Substitute the previous reply into the first unseen live block; any further unseen live
-/// block (or a live block with no previous reply) is generated instead. Returns the fallback count.
+/// Blocks of the next turn to generate while the current request is in flight. A reset drops
+/// the cache first, so everything the reset request needs is regenerated.
+fn next_turn_prefetch(plan: &AgentPlan, turn_index: usize, cache: &BlockCache) -> Vec<BlockSpec> {
+    let Some(next) = plan.turns.get(turn_index + 1) else {
+        return Vec::new();
+    };
+    let Some(blocks) = next.blocks.as_deref() else {
+        return Vec::new();
+    };
+    if next.reset_before {
+        missing_generated_blocks(blocks, &BlockCache::new())
+    } else {
+        missing_generated_blocks(blocks, cache)
+    }
+}
+
+/// Substitute the previous reply into the first unseen live block. Plan building already
+/// demoted every live block that cannot receive a reply, so a fallback here only covers a
+/// reply missing at runtime. Returns the fallback count.
 async fn resolve_live_blocks(
     blocks: &[BlockSpec],
     cache: &mut BlockCache,
@@ -4190,7 +4278,62 @@ mod tests {
         assert_eq!(first.turns[1].input_content_tokens, 38);
         assert_eq!(first.start_after, Duration::ZERO);
         assert_eq!(plans[1].start_after, Duration::from_millis(200));
-        assert_eq!(scale_millis(250, 1.0), Duration::from_millis(250));
+        assert_eq!(scale_millis(250, 1.0).unwrap(), Duration::from_millis(250));
+        assert!(scale_millis(1, 1e-320).is_err());
+    }
+
+    #[test]
+    fn v2_manifest_rejects_redefined_block_seeds() {
+        let input = r#"{"schema_version":2,"trajectory_id":"r","requests":[{"prompt_tokens":10,"output_tokens":1,"blocks":[{"seed":"s","tokens":10,"role":"system"}]},{"prompt_tokens":20,"output_tokens":1,"blocks":[{"seed":"s","tokens":12,"role":"system"}]}]}"#;
+        let error =
+            parse_trajectory_plan_specs(std::io::Cursor::new(input), "fixture").unwrap_err();
+        assert!(format!("{error:#}").contains("redefines block seed"));
+    }
+
+    #[test]
+    fn live_blocks_without_a_possible_reply_are_planned_as_fallbacks() {
+        let input = r#"{"schema_version":2,"trajectory_id":"f","requests":[{"prompt_tokens":8,"output_tokens":1,"blocks":[{"seed":"u","tokens":4,"role":"user"},{"seed":"a0","tokens":4,"role":"assistant","live":true}]},{"prompt_tokens":16,"output_tokens":1,"blocks":[{"seed":"u","tokens":4,"role":"user"},{"seed":"a0","tokens":4,"role":"assistant","live":true},{"seed":"a1","tokens":4,"role":"assistant","live":true},{"seed":"a2","tokens":4,"role":"assistant","live":true}]},{"prompt_tokens":8,"output_tokens":1,"reset_before":true,"blocks":[{"seed":"u","tokens":4,"role":"user"},{"seed":"a3","tokens":4,"role":"assistant","live":true}]}]}"#;
+        let specs = parse_trajectory_plan_specs(std::io::Cursor::new(input), "fixture").unwrap();
+        let plans = build_replay_agent_plans(&replay_config(), specs).unwrap();
+        let turns = &plans[0].turns;
+        let live_seeds = |turn: &AgentTurnPlan| {
+            turn.blocks
+                .as_deref()
+                .unwrap()
+                .iter()
+                .filter(|block| block.is_live())
+                .map(|block| block.seed.clone())
+                .collect::<Vec<_>>()
+        };
+        // First request: no previous reply exists, so the live block is generated.
+        assert_eq!(turns[0].live_fallbacks, 1);
+        assert!(live_seeds(&turns[0]).is_empty());
+        // Second request: a0 stays live but is served from the cache, a1 takes the reply,
+        // a2 falls back.
+        assert_eq!(turns[1].live_fallbacks, 1);
+        assert_eq!(live_seeds(&turns[1]), vec!["a0", "a1"]);
+        // A reset starts a fresh conversation without a reply.
+        assert!(turns[2].reset_before);
+        assert_eq!(turns[2].live_fallbacks, 1);
+        assert!(live_seeds(&turns[2]).is_empty());
+
+        // Prefetch for a reset request ignores the cache that is about to be dropped.
+        let mut cache = BlockCache::new();
+        cache.insert(
+            "u".to_string(),
+            BlockContent::Generated(std::sync::Arc::from("cached")),
+        );
+        let prefetch: Vec<_> = next_turn_prefetch(&plans[0], 1, &cache)
+            .into_iter()
+            .map(|block| block.seed)
+            .collect();
+        assert_eq!(prefetch, vec!["u", "a3"]);
+        let prefetch: Vec<_> = next_turn_prefetch(&plans[0], 0, &cache)
+            .into_iter()
+            .map(|block| block.seed)
+            .collect();
+        assert_eq!(prefetch, vec!["a2"]);
+        assert!(next_turn_prefetch(&plans[0], 2, &cache).is_empty());
     }
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
