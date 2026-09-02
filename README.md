@@ -357,7 +357,10 @@ the sampled or replayed plans without sending requests.
 ClickHouse prompt-chain records into a schema version 2 manifest. Each
 `clay.prompt_chains` row is one chat-completions request as a chain of keyed content
 hashes, one per prompt block, joined with `clay.http_analytics` on
-`(instance_id, correlation_id)` for its token counts and request scalars. Install the
+`(instance_id, correlation_id)` for its token counts and request scalars. The chains
+are read through the deduplicating `clay.prompt_chains_current` view by default
+(`--chains-table` / `--chains-final` select the base table with `FINAL` instead), and
+both sides of the join are bounded to the window before joining. Install the
 ClickHouse client with `uv pip install "batchbench[export]"`.
 
 ```bash
@@ -389,8 +392,9 @@ a positive prompt or completion count are dropped and counted in the summary.
 session-length buckets so short and long sessions are both represented.
 `--time-scale` divides the start offsets and delays. Filters: `--principal-id`,
 `--model`, `--served-by`. `--dump-rows-jsonl` saves the fetched rows and
-`--rows-jsonl` re-exports from such a file without ClickHouse. The output is
-validated against the schema version 2 rules before it is written, and replays with:
+`--rows-jsonl` re-exports from such a file without ClickHouse. An export with no
+trajectories is an error, and the output is validated against the schema version 2
+rules before it is written. It replays with:
 
 ```bash
 batchbench-agent --agent-plans-jsonl plans.jsonl --admission open-loop --model <model> --host <host>

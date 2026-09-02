@@ -155,7 +155,12 @@ class SessionReconstructionTest(unittest.TestCase):
     def test_branching_child_resets_and_carries_no_live_block(self):
         root, child_a = two_turn_session()
         child_b = row(T0 + timedelta(seconds=9), [SYS, U1, A1, "u2-alt"], ["system", "user", "assistant", "user"])
-        plans = plans_for([root, child_a, child_b])
+        child_b["block_tokens"] = [12, 20, 30, 40]  # re-tokenized system block across a reset
+        stats = ExportStats()
+        plans = plans_for([root, child_a, child_b], stats=stats)
+        self.assertEqual(validate_plans(plans), [])
+        self.assertEqual(stats.normalized_block_tokens, 1)
+        self.assertEqual(plans[0]["requests"][2]["blocks"][0]["tokens"], 10)
         self.assertEqual(len(plans), 1)
         requests = plans[0]["requests"]
         self.assertEqual(len(requests), 3)
@@ -260,6 +265,10 @@ class SamplingTest(unittest.TestCase):
         self.assertNotEqual([p["trajectory_id"] for p in first], [p["trajectory_id"] for p in other_seed])
         self.assertEqual(sample_plans(plans, None), plans)
         self.assertEqual(sample_plans(plans, 1.0), plans)
+        self.assertEqual(sample_plans(plans, 0.0), [])
+        for bad in (1.5, -0.1, float("nan"), float("inf")):
+            with self.assertRaises(export_plans.ExportError):
+                sample_plans(plans, bad)
 
     def test_stratified_sampling_keeps_every_length_bucket(self):
         plans = self.make_plans(40)
@@ -302,15 +311,19 @@ class ValidatorTest(unittest.TestCase):
 
 class QueryTest(unittest.TestCase):
     def test_query_applies_filters_as_parameters(self):
-        sql, parameters = build_query("clay.prompt_chains", "clay.http_analytics", PRINCIPAL, "glm-5.2", "dynamo")
+        sql, parameters = build_query("clay.prompt_chains", "clay.http_analytics", PRINCIPAL, "glm-5.2", "dynamo", chains_final=True)
         self.assertIn("FROM clay.prompt_chains FINAL", sql)
         self.assertIn("principal_id = {principal_id:UUID}", sql)
         self.assertIn("model = {model:String}", sql)
         self.assertIn("h.served_by = {served_by:String}", sql)
+        # Both join sides are bounded by the window before joining.
+        self.assertIn("timestamp >= {lookback_start:DateTime64(3)} - INTERVAL 1 DAY", sql)
         self.assertEqual(parameters, {"principal_id": PRINCIPAL, "model": "glm-5.2", "served_by": "dynamo"})
-        sql, parameters = build_query("clay.prompt_chains_current", "clay.http_analytics", None, None, None, chains_final=False)
+        sql, parameters = build_query(export_plans.DEFAULT_CHAINS_TABLE, "clay.http_analytics", None, None, None, analytics_ts_column="ts")
+        self.assertIn("FROM clay.prompt_chains_current\n", sql)
         self.assertNotIn("FINAL", sql)
         self.assertNotIn("WHERE h.", sql)
+        self.assertIn("ts >= {lookback_start:DateTime64(3)} - INTERVAL 1 DAY", sql)
         self.assertEqual(parameters, {})
 
 
@@ -370,6 +383,19 @@ class CliTest(unittest.TestCase):
         self.assertEqual(len(lines), 1)
         self.assertEqual(lines[0]["requests"][0]["delay_after_ms"], 2_000)
         self.assertEqual(validate_plans(lines), [])
+
+    def test_cli_rejects_an_empty_export(self):
+        rows_path = self.write_rows(two_turn_session(principal=OTHER_PRINCIPAL))
+        output = self.directory / "plans.jsonl"
+        code = export_plans.main([
+            "--rows-jsonl", str(rows_path),
+            "--start", WINDOW_START.isoformat(),
+            "--end", WINDOW_END.isoformat(),
+            "--principal-id", PRINCIPAL,
+            "--output", str(output),
+        ])
+        self.assertEqual(code, 1)
+        self.assertFalse(output.exists())
 
     def test_cli_rejects_a_bad_window(self):
         rows_path = self.write_rows(two_turn_session())
