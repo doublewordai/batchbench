@@ -367,7 +367,7 @@ ClickHouse client with `uv pip install "batchbench[export]"`.
 CLICKHOUSE_URL=https://user:password@warehouse.example.com:8443 \
 batchbench export-plans \
   --start 2026-09-01T09:00:00Z --end 2026-09-01T10:00:00Z \
-  --model runware-zai/glm-5.2 \
+  --model vendor/model-a \
   --sample 0.1 --seed 7 --stratify-by-session-length \
   --time-scale 4 \
   --output plans.jsonl
