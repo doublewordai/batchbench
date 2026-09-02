@@ -1,10 +1,21 @@
 import json
 from typing import Any, Mapping
 
-from . import _core
+try:
+    from . import _core
+except ImportError:  # pragma: no cover - pure-Python checkout without the compiled extension
+    _core = None
 
 
 JSONDict = dict[str, Any]
+
+
+def _require_core():
+    if _core is None:
+        raise RuntimeError(
+            "batchbench._core is not built; install the batchbench wheel or run maturin develop"
+        )
+    return _core
 
 
 def request_entry(body: Mapping[str, Any], line_idx: int = 0, input_tokens: int = 0) -> JSONDict:
@@ -30,17 +41,17 @@ def long_running_mode(duration_secs: float) -> JSONDict:
 
 
 def generate_requests(options: Mapping[str, Any], model: str) -> list[JSONDict]:
-    payload = _core.generate_requests_json(json.dumps(options), model)
+    payload = _require_core().generate_requests_json(json.dumps(options), model)
     return json.loads(payload)
 
 
 def run_benchmark(config: Mapping[str, Any]) -> JSONDict:
-    payload = _core.run_benchmark_json(json.dumps(config))
+    payload = _require_core().run_benchmark_json(json.dumps(config))
     return json.loads(payload)
 
 
 def run_cli(argv: list[str]) -> None:
-    _core.run_cli(argv)
+    _require_core().run_cli(argv)
 
 
 __all__ = [
