@@ -22,11 +22,13 @@ classifiers = [
 
 [project.optional-dependencies]
 harness = ["requests>=2.28.0", "paramiko>=3.0.0", "prime"]
+export = ["clickhouse-connect>=0.7"]
 
 [project.scripts]
 batchbench = "batchbench.__main__:main"
 batchbench-agent = "batchbench.agent:main"
 batchbench-harness = "batchbench.harness:main"
+batchbench-export-plans = "batchbench.export_plans:main"
 'batchbench.harness' = "batchbench.harness:main"
 
 [tool.maturin]

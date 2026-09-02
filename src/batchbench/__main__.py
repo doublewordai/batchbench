@@ -1,10 +1,16 @@
 import sys
 
-from ._core import run_cli
-
 
 def main(argv: list[str] | None = None) -> int:
-    run_cli(list(sys.argv[1:] if argv is None else argv))
+    args = list(sys.argv[1:] if argv is None else argv)
+    if args and args[0] == "export-plans":
+        from .export_plans import main as export_plans_main
+
+        return export_plans_main(args[1:])
+
+    from ._core import run_cli
+
+    run_cli(args)
     return 0
 
 

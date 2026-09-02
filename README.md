@@ -351,6 +351,55 @@ Retries and failed requests are excluded because they do not provide reliable us
 data. Use `--results-csv <path>` to persist the same totals, or `--dry-run` to inspect
 the sampled or replayed plans without sending requests.
 
+## Exporting plans from production records
+
+`batchbench export-plans` (also `python -m batchbench.export_plans`) turns a window of
+ClickHouse prompt-chain records into a schema version 2 manifest. Each
+`clay.prompt_chains` row is one chat-completions request as a chain of keyed content
+hashes, one per prompt block, joined with `clay.http_analytics` on
+`(instance_id, correlation_id)` for its token counts and request scalars. The chains
+are read through the deduplicating `clay.prompt_chains_current` view by default
+(`--chains-table` / `--chains-final` select the base table with `FINAL` instead), and
+both sides of the join are bounded to the window before joining. Install the
+ClickHouse client with `uv pip install "batchbench[export]"`.
+
+```bash
+CLICKHOUSE_URL=https://user:password@warehouse.example.com:8443 \
+batchbench export-plans \
+  --start 2026-09-01T09:00:00Z --end 2026-09-01T10:00:00Z \
+  --model runware-zai/glm-5.2 \
+  --sample 0.1 --seed 7 --stratify-by-session-length \
+  --time-scale 4 \
+  --output plans.jsonl
+```
+
+Sessions are reconstructed from the chains themselves: within a principal, a request
+continues the latest earlier request (within `--link-window-hours`, default 24) whose
+full chain is a strict prefix of its own chain, and each root with its descendants
+forms one trajectory ordered by timestamp. The query starts one link window before
+`--start` so that sessions which began earlier are recognised; their first in-window
+request carries `reset_before`. Per request, `prompt_tokens` and `output_tokens` come
+from the analytics row, `delay_after_ms` is the gap between this request's end and
+the next request's start, `blocks` zips the chain hashes (as seeds) with the block
+roles and token counts, `overhead_tokens` is `prompt_tokens - sum(block_tokens)`, and
+the block that is the reply to the previous request in the trajectory is marked
+`live`. Requests whose block token counts are missing become a single `user` block of
+`prompt_tokens`. `stream` and `max_tokens` are copied when recorded. Requests without
+a positive prompt or completion count are dropped and counted in the summary.
+
+`--sample` keeps a deterministic fraction of trajectories (seeded by `--seed`);
+`--stratify-by-session-length` applies the fraction within power-of-two
+session-length buckets so short and long sessions are both represented.
+`--time-scale` divides the start offsets and delays. Filters: `--principal-id`,
+`--model`, `--served-by`. `--dump-rows-jsonl` saves the fetched rows and
+`--rows-jsonl` re-exports from such a file without ClickHouse. An export with no
+trajectories is an error, and the output is validated against the schema version 2
+rules before it is written. It replays with:
+
+```bash
+batchbench-agent --agent-plans-jsonl plans.jsonl --admission open-loop --model <model> --host <host>
+```
+
 ## Rust CLI
 
 The existing Rust CLI is unchanged:
