@@ -33,8 +33,9 @@ from typing import Any, Iterable, Mapping, Optional, Sequence
 
 SCHEMA_VERSION = 2
 DEFAULT_LINK_WINDOW = timedelta(hours=24)
-DEFAULT_CHAINS_TABLE = "clay.prompt_chains"
+DEFAULT_CHAINS_TABLE = "clay.prompt_chains_current"
 DEFAULT_ANALYTICS_TABLE = "clay.http_analytics"
+DEFAULT_ANALYTICS_TS_COLUMN = "timestamp"
 BLOCK_ROLES = ("tool_definition", "system", "user", "assistant", "tool", "tool_call")
 
 TRAJECTORY_FIELDS = {"schema_version", "trajectory_id", "start_after_ms", "requests", "metadata"}
@@ -411,8 +412,7 @@ def trajectory_plan(
             reset_before = trajectory.began_before_window
         else:
             reset_before = not extends(previous.chain, record.chain)
-        if reset_before and position > 0:
-            seed_tokens = {}
+        # Seed definitions persist across resets: the replay validates them per trajectory.
         blocks, overhead = request_blocks(
             record, None if reset_before else previous, seed_tokens, stats
         )
@@ -502,10 +502,12 @@ def sample_plans(
     ``ceil`` instead of ``round``, so every non-empty bucket keeps at least one trajectory.
     """
 
-    if fraction is None or fraction >= 1.0:
+    if fraction is None:
         return list(plans)
-    if fraction < 0.0:
+    if not math.isfinite(fraction) or fraction < 0.0 or fraction > 1.0:
         raise ExportError("sample fraction must be between 0 and 1")
+    if fraction == 1.0:
+        return list(plans)
 
     def take(group: list[dict[str, Any]], rounding) -> list[dict[str, Any]]:
         ordered = sorted(group, key=lambda plan: (sample_key(seed, plan["trajectory_id"]), plan["trajectory_id"]))
@@ -658,11 +660,21 @@ def build_query(
     principal_id: Optional[str],
     model: Optional[str],
     served_by: Optional[str],
-    chains_final: bool = True,
+    chains_final: bool = False,
+    analytics_ts_column: str = DEFAULT_ANALYTICS_TS_COLUMN,
 ) -> tuple[str, dict[str, Any]]:
-    """The ClickHouse query and its named parameters (window bounds are filled in later)."""
+    """The ClickHouse query and its named parameters (window bounds are filled in later).
+
+    Both sides of the join are restricted to the lookback window before joining; the analytics
+    side is widened by a day on each end because its timestamp is the request start while the
+    chain timestamp is taken at capture.
+    """
 
     chain_filters = ["ts >= {lookback_start:DateTime64(3)}", "ts < {window_end:DateTime64(3)}"]
+    analytics_filters = [
+        f"{analytics_ts_column} >= {{lookback_start:DateTime64(3)}} - INTERVAL 1 DAY",
+        f"{analytics_ts_column} < {{window_end:DateTime64(3)}} + INTERVAL 1 DAY",
+    ]
     parameters: dict[str, Any] = {}
     if principal_id:
         chain_filters.append("principal_id = {principal_id:UUID}")
@@ -700,7 +712,13 @@ FROM (
     SELECT * FROM {chains_table}{final}
     WHERE {' AND '.join(chain_filters)}
 ) AS c
-LEFT JOIN {analytics_table} AS h
+LEFT JOIN (
+    SELECT instance_id, correlation_id, prompt_tokens, completion_tokens, stream, max_tokens,
+        finish_reason, served_by, request_origin, user_id, api_key_id, duration_ms,
+        duration_to_first_byte_ms
+    FROM {analytics_table}
+    WHERE {' AND '.join(analytics_filters)}
+) AS h
     ON h.instance_id = c.instance_id AND h.correlation_id = c.correlation_id
 {('WHERE ' + ' AND '.join(outer_filters)) if outer_filters else ''}
 ORDER BY c.principal_id, c.ts, c.instance_id, c.correlation_id
@@ -750,9 +768,10 @@ def build_parser() -> argparse.ArgumentParser:
     source.add_argument("--clickhouse-url", default=os.environ.get("CLICKHOUSE_URL"), help="ClickHouse HTTP(S) URL (env CLICKHOUSE_URL)")
     source.add_argument("--clickhouse-user", default=os.environ.get("CLICKHOUSE_USER"), help="ClickHouse user (env CLICKHOUSE_USER)")
     source.add_argument("--clickhouse-password", default=os.environ.get("CLICKHOUSE_PASSWORD"), help="ClickHouse password (env CLICKHOUSE_PASSWORD)")
-    source.add_argument("--chains-table", default=DEFAULT_CHAINS_TABLE, help=f"prompt-chain table (default {DEFAULT_CHAINS_TABLE})")
+    source.add_argument("--chains-table", default=DEFAULT_CHAINS_TABLE, help=f"prompt-chain table or view (default {DEFAULT_CHAINS_TABLE})")
+    source.add_argument("--chains-final", action="store_true", help="read the chains table with FINAL (when reading the ReplacingMergeTree base table instead of its deduplicating view)")
     source.add_argument("--analytics-table", default=DEFAULT_ANALYTICS_TABLE, help=f"request analytics table (default {DEFAULT_ANALYTICS_TABLE})")
-    source.add_argument("--no-chains-final", action="store_true", help="do not read the chains table with FINAL (for views)")
+    source.add_argument("--analytics-ts-column", default=DEFAULT_ANALYTICS_TS_COLUMN, help=f"timestamp column used to bound the analytics side of the join (default {DEFAULT_ANALYTICS_TS_COLUMN})")
     source.add_argument("--rows-jsonl", help="read previously fetched rows from this JSONL file instead of ClickHouse")
     source.add_argument("--dump-rows-jsonl", help="also write the fetched rows to this JSONL file")
 
@@ -804,7 +823,8 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
                 args.principal_id,
                 args.model,
                 args.served_by,
-                chains_final=not args.no_chains_final,
+                chains_final=args.chains_final,
+                analytics_ts_column=args.analytics_ts_column,
             )
             parameters["lookback_start"] = (window_start - link_window).replace(tzinfo=None)
             parameters["window_end"] = window_end.replace(tzinfo=None)
@@ -827,6 +847,9 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
         plans = build_plans(records, window_start, window_end, args.time_scale, link_window, stats)
         plans = sample_plans(plans, args.sample, args.seed, args.stratify_by_session_length)
         stats.sampled = len(plans)
+        if not plans:
+            summary = ", ".join(f"{key}={value}" for key, value in stats.as_dict().items())
+            raise ExportError(f"no trajectories to export ({summary})")
         problems = validate_plans(plans)
         if problems:
             preview = "\n".join(problems[:10])
