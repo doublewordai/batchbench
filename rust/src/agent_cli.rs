@@ -5,12 +5,13 @@ use std::path::{Path, PathBuf};
 use std::time::Duration;
 
 use anyhow::{anyhow, Context, Result};
-use clap::Parser;
+use clap::{Parser, ValueEnum};
 use serde::Serialize;
 use sha2::{Digest, Sha256};
 
-use crate::agent::TRAJECTORY_PLAN_SCHEMA_VERSION;
-use crate::{run_agent_benchmark, AgentBenchmarkReport, AgentLoopConfig, SampleSpec};
+use crate::{
+    run_agent_benchmark, AdmissionMode, AgentBenchmarkReport, AgentLoopConfig, SampleSpec,
+};
 
 const DEFAULT_MODEL: &str = "Qwen/Qwen3-VL-235B-A22B-Instruct-FP8";
 
@@ -37,8 +38,18 @@ struct Args {
     replay_turn_overhead_tokens: Option<usize>,
 
     /// Maximum simultaneously active agents; completed agents are replaced from the pending queue
+    /// (closed loop) or later admissions are delayed and counted as late (open loop)
     #[arg(long, value_parser = parse_positive_usize)]
     max_active_agents: Option<usize>,
+
+    /// How replayed trajectories are admitted: closed-loop refills freed slots in manifest
+    /// order; open-loop starts each trajectory at its start_after_ms offset
+    #[arg(long, value_enum, requires = "agent_plans_jsonl")]
+    admission: Option<AdmissionArg>,
+
+    /// Divide every manifest start_after_ms and delay_after_ms value by this factor
+    #[arg(long, requires = "agent_plans_jsonl", value_parser = parse_positive_f64)]
+    time_scale: Option<f64>,
 
     /// OpenAI-style model identifier
     #[arg(long, default_value = DEFAULT_MODEL)]
@@ -232,6 +243,31 @@ struct Args {
     agent_events_jsonl: Option<PathBuf>,
 }
 
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, ValueEnum)]
+enum AdmissionArg {
+    #[default]
+    ClosedLoop,
+    OpenLoop,
+}
+
+impl AdmissionArg {
+    fn as_str(self) -> &'static str {
+        match self {
+            Self::ClosedLoop => "closed-loop",
+            Self::OpenLoop => "open-loop",
+        }
+    }
+}
+
+impl From<AdmissionArg> for AdmissionMode {
+    fn from(value: AdmissionArg) -> Self {
+        match value {
+            AdmissionArg::ClosedLoop => Self::ClosedLoop,
+            AdmissionArg::OpenLoop => Self::OpenLoop,
+        }
+    }
+}
+
 #[derive(Debug, Serialize)]
 struct CsvResult {
     timestamp: String,
@@ -240,9 +276,14 @@ struct CsvResult {
     agent_plans_jsonl: Option<String>,
     agent_plans_sha256: Option<String>,
     trajectory_schema_version: Option<u32>,
+    admission_mode: String,
+    time_scale: f64,
     agents: usize,
     requested_max_active_agents: Option<usize>,
     max_active_agents: usize,
+    late_admissions: u64,
+    max_admission_lag_ms: f64,
+    live_block_fallbacks: u64,
     completed_agents: usize,
     planned_tool_invocations: u64,
     total_requests: u64,
@@ -288,6 +329,7 @@ struct AgentLifecycleJson<'a> {
     trajectory_id: &'a str,
     routing_slot: usize,
     dp_rank: Option<usize>,
+    scheduled_at_seconds: f64,
     admitted_at_seconds: f64,
     queue_wait_seconds: f64,
     finished_at_seconds: f64,
@@ -298,6 +340,16 @@ struct AgentLifecycleJson<'a> {
 enum ParsedArgs {
     Ready(Box<Args>),
     Displayed,
+}
+
+fn parse_positive_f64(value: &str) -> std::result::Result<f64, String> {
+    let parsed = value
+        .parse::<f64>()
+        .map_err(|_| format!("{value:?} is not a valid number"))?;
+    if !parsed.is_finite() || parsed <= 0.0 {
+        return Err("value must be a positive finite number".to_string());
+    }
+    Ok(parsed)
 }
 
 fn parse_positive_usize(value: &str) -> std::result::Result<usize, String> {
@@ -453,6 +505,11 @@ async fn run(args: Args) -> Result<()> {
                 .map(|limit| limit.to_string())
                 .unwrap_or_else(|| "all manifest trajectories".to_string())
         );
+        println!(
+            "Admission: {}; time scale {}",
+            args.admission.unwrap_or_default().as_str(),
+            args.time_scale.unwrap_or(1.0)
+        );
     } else {
         println!("Total synthetic agents: {}", agent_count);
         println!(
@@ -523,6 +580,10 @@ async fn run(args: Args) -> Result<()> {
             args.replay_initial_overhead_tokens.unwrap_or(0),
             args.replay_turn_overhead_tokens.unwrap_or(0),
         );
+        config = config.with_admission(args.admission.unwrap_or_default().into());
+        if let Some(time_scale) = args.time_scale {
+            config = config.with_time_scale(time_scale)?;
+        }
     }
     if let Some(max_active_agents) = args.max_active_agents {
         config = config.with_max_active_agents(max_active_agents)?;
@@ -563,10 +624,15 @@ async fn run(args: Args) -> Result<()> {
                 .as_ref()
                 .map(|path| path.display().to_string()),
             agent_plans_sha256: agent_plans_sha256.clone(),
-            trajectory_schema_version: replay_mode.then_some(TRAJECTORY_PLAN_SCHEMA_VERSION),
+            trajectory_schema_version: report.trajectory_schema_version,
+            admission_mode: args.admission.unwrap_or_default().as_str().to_string(),
+            time_scale: args.time_scale.unwrap_or(1.0),
             agents: report.total_agents,
             requested_max_active_agents: args.max_active_agents,
             max_active_agents: report.max_active_agents,
+            late_admissions: report.late_admissions,
+            max_admission_lag_ms: report.max_admission_lag.as_secs_f64() * 1000.0,
+            live_block_fallbacks: report.live_block_fallbacks,
             completed_agents: report.completed_agents,
             planned_tool_invocations: report.planned_tool_invocations,
             total_requests: report.total_requests,
@@ -806,6 +872,17 @@ fn print_summary(report: &AgentBenchmarkReport) {
         report.final_drain_duration.as_secs_f64()
     );
     println!(
+        "Open-loop admission: {} late admissions; maximum admission lag {:.2}ms",
+        report.late_admissions,
+        report.max_admission_lag.as_secs_f64() * 1000.0
+    );
+    if report.live_block_fallbacks > 0 {
+        println!(
+            "Live block fallbacks (generated in place of a missing previous reply): {}",
+            report.live_block_fallbacks
+        );
+    }
+    println!(
         "Tool invocations: {} planned; requests {} (success {}, failure {})",
         report.planned_tool_invocations,
         report.total_requests,
@@ -919,8 +996,12 @@ fn write_agent_events_jsonl(
             trajectory_id: &record.trajectory_id,
             routing_slot: record.routing_slot,
             dp_rank: dp_rank_count.map(|ranks| record.routing_slot % ranks),
+            scheduled_at_seconds: record.scheduled_at.as_secs_f64(),
             admitted_at_seconds: record.admitted_at.as_secs_f64(),
-            queue_wait_seconds: record.admitted_at.as_secs_f64(),
+            queue_wait_seconds: record
+                .admitted_at
+                .saturating_sub(record.scheduled_at)
+                .as_secs_f64(),
             finished_at_seconds: record.finished_at.as_secs_f64(),
             runtime_seconds: runtime.as_secs_f64(),
             completed: record.completed,
@@ -1109,6 +1190,51 @@ mod tests {
         assert!(error
             .to_string()
             .contains("value must be greater than zero"));
+    }
+
+    #[test]
+    fn admission_and_time_scale_flags_parse_with_a_manifest() {
+        let args = Args::try_parse_from([
+            "batchbench-agent",
+            "--agent-plans-jsonl",
+            "plans.jsonl",
+            "--admission",
+            "open-loop",
+            "--time-scale",
+            "4",
+        ])
+        .unwrap();
+        assert_eq!(args.admission, Some(AdmissionArg::OpenLoop));
+        assert_eq!(args.time_scale, Some(4.0));
+        assert_eq!(
+            AdmissionMode::from(AdmissionArg::OpenLoop),
+            AdmissionMode::OpenLoop
+        );
+        assert_eq!(AdmissionArg::default().as_str(), "closed-loop");
+
+        let error =
+            Args::try_parse_from(["batchbench-agent", "--admission", "open-loop"]).unwrap_err();
+        assert!(error.to_string().contains("--agent-plans-jsonl"));
+
+        let error = Args::try_parse_from([
+            "batchbench-agent",
+            "--agent-plans-jsonl",
+            "plans.jsonl",
+            "--time-scale",
+            "0",
+        ])
+        .unwrap_err();
+        assert!(error.to_string().contains("positive finite number"));
+
+        let error = Args::try_parse_from([
+            "batchbench-agent",
+            "--agent-plans-jsonl",
+            "plans.jsonl",
+            "--admission",
+            "sometimes",
+        ])
+        .unwrap_err();
+        assert!(error.to_string().contains("invalid value"));
     }
 
     #[test]

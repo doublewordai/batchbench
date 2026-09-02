@@ -1,4 +1,5 @@
-use std::collections::{BTreeMap, HashSet, VecDeque};
+use std::cmp::Reverse;
+use std::collections::{BTreeMap, BinaryHeap, HashMap, HashSet, VecDeque};
 use std::fs::File;
 use std::io::{BufRead, BufReader};
 use std::path::{Path, PathBuf};
@@ -12,6 +13,7 @@ use reqwest::header::{HeaderMap, HeaderName, HeaderValue, AUTHORIZATION, CONTENT
 use reqwest::{Client, Url};
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Map, Value};
+use sha2::{Digest, Sha256};
 use tokenizers::Tokenizer;
 use tokio::task::JoinSet;
 use uuid::Uuid;
@@ -138,6 +140,20 @@ pub struct AgentLoopConfig {
     pub max_active_agents: Option<usize>,
     pub replay_initial_overhead_tokens: usize,
     pub replay_turn_overhead_tokens: usize,
+    pub admission: AdmissionMode,
+    pub time_scale: f64,
+}
+
+/// How replayed trajectories enter the benchmark.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum AdmissionMode {
+    /// Keep up to `max_active_agents` trajectories active; admit the next queued trajectory
+    /// whenever one finishes (manifest order).
+    #[default]
+    ClosedLoop,
+    /// Admit each trajectory at its `start_after_ms` offset regardless of free slots.
+    /// `max_active_agents` becomes a hard cap that delays admission when reached.
+    OpenLoop,
 }
 
 impl AgentLoopConfig {
@@ -203,6 +219,8 @@ impl AgentLoopConfig {
             max_active_agents: None,
             replay_initial_overhead_tokens: 0,
             replay_turn_overhead_tokens: 0,
+            admission: AdmissionMode::ClosedLoop,
+            time_scale: 1.0,
         })
     }
 
@@ -300,6 +318,20 @@ impl AgentLoopConfig {
         self
     }
 
+    pub fn with_admission(mut self, admission: AdmissionMode) -> Self {
+        self.admission = admission;
+        self
+    }
+
+    /// Divide every manifest `start_after_ms` and `delay_after_ms` value by `time_scale`.
+    pub fn with_time_scale(mut self, time_scale: f64) -> Result<Self> {
+        if !time_scale.is_finite() || time_scale <= 0.0 {
+            return Err(anyhow!("time scale must be a positive finite number"));
+        }
+        self.time_scale = time_scale;
+        Ok(self)
+    }
+
     pub fn add_header(mut self, name: HeaderName, value: HeaderValue) -> Self {
         self.headers.insert(name, value);
         self
@@ -314,6 +346,20 @@ struct AgentTurnPlan {
     environment_tokens: usize,
     tool_call_latency: Duration,
     reset_prompt_tokens: Option<usize>,
+    /// Schema v2: start a fresh conversation before this request (drops the block cache).
+    reset_before: bool,
+    /// Schema v2: ordered content blocks that fully define this request's prompt.
+    blocks: Option<Vec<BlockSpec>>,
+    /// Schema v2: per-request streaming override.
+    stream: Option<bool>,
+    /// Schema v2: per-request output cap override.
+    max_tokens: Option<usize>,
+}
+
+impl AgentTurnPlan {
+    fn uses_blocks(&self) -> bool {
+        self.blocks.is_some()
+    }
 }
 
 #[derive(Clone, Debug)]
@@ -322,14 +368,45 @@ struct AgentPlan {
     trajectory_id: String,
     user_tag: Option<String>,
     initial_prompt_tokens: usize,
-    initial_prompt: Option<String>,
+    initial_content: Option<InitialContent>,
     turns: Vec<AgentTurnPlan>,
+    /// Open-loop admission offset (already divided by the time scale).
+    start_after: Duration,
+}
+
+impl AgentPlan {
+    fn uses_blocks(&self) -> bool {
+        self.turns.first().is_some_and(AgentTurnPlan::uses_blocks)
+    }
+}
+
+/// Content prepared for a trajectory's first request before it is admitted.
+#[derive(Clone, Debug)]
+enum InitialContent {
+    /// Schema v1 (and v2 without blocks): the generated initial user prompt.
+    Prompt(String),
+    /// Schema v2 with blocks: generated text for every non-live block of the first request.
+    Blocks(BlockCache),
+}
+
+/// Per-trajectory cache of block content keyed by block seed. Equal seeds always resolve to the
+/// exact bytes already sent earlier in the trajectory, including live assistant replies.
+type BlockCache = HashMap<String, BlockContent>;
+
+#[derive(Clone, Debug)]
+enum BlockContent {
+    Generated(std::sync::Arc<str>),
+    /// The model's own normalized reply from an earlier request in this conversation.
+    Live(Value),
 }
 
 #[derive(Clone)]
 struct SyntheticTextGenerator {
     tokenizer: std::sync::Arc<Tokenizer>,
     eligible_token_ids: std::sync::Arc<Vec<u32>>,
+    /// Lazily computed subset of `eligible_token_ids` whose text survives JSON string
+    /// serialization unchanged (no quotes, backslashes, or control characters).
+    json_safe_token_ids: std::sync::Arc<std::sync::OnceLock<Vec<u32>>>,
     special_token_ids: std::sync::Arc<HashSet<u32>>,
     permits: std::sync::Arc<tokio::sync::Semaphore>,
     root_seed: u64,
@@ -355,6 +432,9 @@ pub struct AgentLifecycleRecord {
     pub agent_id: usize,
     pub trajectory_id: String,
     pub routing_slot: usize,
+    /// When the trajectory was due to start: its scaled `start_after_ms` under open-loop
+    /// admission, zero under closed-loop admission.
+    pub scheduled_at: Duration,
     pub admitted_at: Duration,
     pub finished_at: Duration,
     pub completed: bool,
@@ -387,6 +467,14 @@ pub struct AgentBenchmarkReport {
     pub agent_end_to_end_latency_p99: Option<Duration>,
     pub failures: Vec<AgentFailureRecord>,
     pub agent_lifecycles: Vec<AgentLifecycleRecord>,
+    /// Schema v2 live assistant blocks that had no previous reply to substitute.
+    pub live_block_fallbacks: u64,
+    /// Open-loop admissions delayed because `max_active_agents` was reached.
+    pub late_admissions: u64,
+    /// Largest gap between a trajectory's scheduled and actual admission.
+    pub max_admission_lag: Duration,
+    /// Highest `schema_version` present in the replayed manifest.
+    pub trajectory_schema_version: Option<u32>,
 }
 
 #[derive(Debug)]
@@ -394,6 +482,7 @@ struct AgentWorkerReport {
     agent_id: usize,
     trajectory_id: String,
     routing_slot: usize,
+    scheduled_at: Duration,
     admitted_at: Duration,
     completed: bool,
     end_to_end_latency: Duration,
@@ -406,6 +495,7 @@ struct AgentWorkerReport {
     latencies: Vec<Duration>,
     failures: Vec<AgentFailureRecord>,
     dry_run_records: Vec<DryRunRecord>,
+    live_block_fallbacks: u64,
 }
 
 impl AgentWorkerReport {
@@ -419,6 +509,7 @@ impl AgentWorkerReport {
             agent_id,
             trajectory_id,
             routing_slot,
+            scheduled_at: Duration::ZERO,
             admitted_at,
             completed: false,
             end_to_end_latency: Duration::ZERO,
@@ -431,6 +522,7 @@ impl AgentWorkerReport {
             latencies: Vec::new(),
             failures: Vec::new(),
             dry_run_records: Vec::new(),
+            live_block_fallbacks: 0,
         }
     }
 }
@@ -448,9 +540,14 @@ struct DryRunRecord {
     environment_tokens: usize,
     tool_call_latency_ms: usize,
     reset_before: bool,
+    /// Schema v2 blocks: (block count, live block count).
+    blocks: Option<(usize, usize)>,
+    stream: Option<bool>,
+    max_tokens: Option<usize>,
 }
 
-pub(crate) const TRAJECTORY_PLAN_SCHEMA_VERSION: u32 = 1;
+/// Manifest schema versions accepted by `--agent-plans-jsonl`.
+pub(crate) const SUPPORTED_TRAJECTORY_PLAN_SCHEMA_VERSIONS: [u32; 2] = [1, 2];
 
 #[derive(Clone, Debug, Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -460,6 +557,9 @@ struct TrajectoryPlanSpec {
     requests: Vec<TrajectoryRequestSpec>,
     #[serde(default, rename = "metadata")]
     _metadata: Option<Value>,
+    /// Schema v2: admission offset from benchmark start under open-loop admission.
+    #[serde(default)]
+    start_after_ms: Option<u64>,
 }
 
 #[derive(Clone, Debug, Deserialize)]
@@ -471,6 +571,84 @@ struct TrajectoryRequestSpec {
     reset_before: bool,
     #[serde(default)]
     delay_after_ms: u64,
+    /// Schema v2: template/scaffolding tokens the backend adds on top of the content.
+    #[serde(default)]
+    overhead_tokens: Option<usize>,
+    /// Schema v2: request streamed output for this request.
+    #[serde(default)]
+    stream: Option<bool>,
+    /// Schema v2: output cap for this request.
+    #[serde(default)]
+    max_tokens: Option<usize>,
+    /// Schema v2: ordered content blocks defining the prompt.
+    #[serde(default)]
+    blocks: Option<Vec<BlockSpec>>,
+}
+
+impl TrajectoryRequestSpec {
+    fn has_schema_v2_fields(&self) -> Option<&'static str> {
+        if self.overhead_tokens.is_some() {
+            Some("overhead_tokens")
+        } else if self.stream.is_some() {
+            Some("stream")
+        } else if self.max_tokens.is_some() {
+            Some("max_tokens")
+        } else if self.blocks.is_some() {
+            Some("blocks")
+        } else {
+            None
+        }
+    }
+
+    fn block_content_tokens(&self) -> Option<Result<usize>> {
+        self.blocks.as_ref().map(|blocks| {
+            blocks
+                .iter()
+                .try_fold(0usize, |total, block| total.checked_add(block.tokens))
+                .ok_or_else(|| anyhow!("block token sum overflowed usize"))
+        })
+    }
+}
+
+#[derive(Clone, Copy, Debug, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+enum BlockRole {
+    ToolDefinition,
+    System,
+    User,
+    Assistant,
+    Tool,
+    ToolCall,
+}
+
+impl BlockRole {
+    fn as_str(self) -> &'static str {
+        match self {
+            Self::ToolDefinition => "tool_definition",
+            Self::System => "system",
+            Self::User => "user",
+            Self::Assistant => "assistant",
+            Self::Tool => "tool",
+            Self::ToolCall => "tool_call",
+        }
+    }
+}
+
+#[derive(Clone, Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct BlockSpec {
+    seed: String,
+    tokens: usize,
+    role: BlockRole,
+    #[serde(default)]
+    live: bool,
+}
+
+impl BlockSpec {
+    /// A live assistant block is substituted with the model's previous reply instead of generated.
+    fn is_live(&self) -> bool {
+        self.live && self.role == BlockRole::Assistant
+    }
 }
 
 #[derive(Debug)]
@@ -522,7 +700,7 @@ impl<T> RollingAdmission<T> {
 /// tool response is appended to that agent's messages before its next request, preserving the
 /// previous request as a prefix for server-side KV-cache testing.
 pub async fn run_agent_benchmark(config: AgentLoopConfig) -> Result<AgentBenchmarkReport> {
-    let (plans, root_seed) = build_agent_plans(&config)?;
+    let (plans, root_seed, trajectory_schema_version) = build_agent_plans(&config)?;
     let text_generator = SyntheticTextGenerator::new(
         std::sync::Arc::new(load_tokenizer(&config.tokenizer_model)?),
         root_seed,
@@ -536,18 +714,223 @@ pub async fn run_agent_benchmark(config: AgentLoopConfig) -> Result<AgentBenchma
         })
         .ok_or_else(|| anyhow!("planned tool invocation count overflowed"))?;
 
-    let mut admission = RollingAdmission::new(plans, requested_max_active_agents)?;
-    let max_active_agents = admission.max_active;
-    // Initial prompt synthesis is deliberately outside the benchmark clock. The live working set
-    // still starts together instead of being accidentally ramped by client-side token generation.
-    let initial_admissions =
-        materialize_initial_prompts(admission.initial_admissions(), &text_generator).await?;
-
     let client = Client::builder()
         .timeout(config.request_timeout)
         .build()
         .context("failed to construct HTTP client")?;
     let config = std::sync::Arc::new(config);
+    let mut accumulator = ReportAccumulator::with_capacity(total_agents);
+    let outcome = match config.admission {
+        AdmissionMode::ClosedLoop => {
+            run_closed_loop(
+                plans,
+                requested_max_active_agents,
+                &client,
+                &config,
+                &text_generator,
+                &mut accumulator,
+            )
+            .await?
+        }
+        AdmissionMode::OpenLoop => {
+            run_open_loop(
+                plans,
+                config.max_active_agents,
+                &client,
+                &config,
+                &text_generator,
+                &mut accumulator,
+            )
+            .await?
+        }
+    };
+
+    if config.dry_run {
+        let mut dry_run_records = std::mem::take(&mut accumulator.dry_run_records);
+        dry_run_records.sort_by_key(|record| (record.agent_id, record.invocation));
+        for record in dry_run_records {
+            println!("{}", format_dry_run_record(&record));
+        }
+    }
+
+    Ok(accumulator.into_report(
+        total_agents,
+        planned_tool_invocations,
+        trajectory_schema_version,
+        outcome,
+    ))
+}
+
+fn format_dry_run_record(record: &DryRunRecord) -> String {
+    let mut line = format!(
+        "[DRY-RUN] agent={} invocation={} input_content_tokens={} output_tokens={} environment_tokens={} tool_call_latency_ms={} trajectory_id={} routing_slot={} admitted_at_ms={} target_prompt_tokens={} reset_before={}",
+        record.agent_id,
+        record.invocation,
+        record.input_content_tokens,
+        record.output_tokens,
+        record.environment_tokens,
+        record.tool_call_latency_ms,
+        record.trajectory_id,
+        record.routing_slot,
+        record.admitted_at.as_millis(),
+        record.target_prompt_tokens,
+        record.reset_before
+    );
+    if let Some((block_count, live_block_count)) = record.blocks {
+        line.push_str(&format!(
+            " blocks={block_count} live_blocks={live_block_count}"
+        ));
+    }
+    if let Some(stream) = record.stream {
+        line.push_str(&format!(" stream={stream}"));
+    }
+    if let Some(max_tokens) = record.max_tokens {
+        line.push_str(&format!(" max_tokens={max_tokens}"));
+    }
+    line
+}
+
+/// Scheduler results that do not come from individual worker reports.
+#[derive(Debug)]
+struct AdmissionOutcome {
+    total_duration: Duration,
+    max_active_agents: usize,
+    last_agent_admitted_at: Duration,
+    late_admissions: u64,
+    max_admission_lag: Duration,
+}
+
+#[derive(Debug, Default)]
+struct ReportAccumulator {
+    completed_agents: usize,
+    successful_requests: u64,
+    failed_requests: u64,
+    total_input_tokens: u64,
+    total_output_tokens: u64,
+    estimated_cached_input_tokens: u64,
+    total_tool_call_latency: Duration,
+    latencies: Vec<Duration>,
+    agent_end_to_end_latencies: Vec<Duration>,
+    failures: Vec<AgentFailureRecord>,
+    dry_run_records: Vec<DryRunRecord>,
+    agent_lifecycles: Vec<AgentLifecycleRecord>,
+    live_block_fallbacks: u64,
+}
+
+impl ReportAccumulator {
+    fn with_capacity(total_agents: usize) -> Self {
+        Self {
+            agent_lifecycles: Vec::with_capacity(total_agents),
+            ..Self::default()
+        }
+    }
+
+    fn absorb(&mut self, worker: AgentWorkerReport, finished_at: Duration) {
+        self.agent_lifecycles.push(AgentLifecycleRecord {
+            agent_id: worker.agent_id,
+            trajectory_id: worker.trajectory_id.clone(),
+            routing_slot: worker.routing_slot,
+            scheduled_at: worker.scheduled_at,
+            admitted_at: worker.admitted_at,
+            finished_at,
+            completed: worker.completed,
+        });
+        if worker.completed {
+            self.completed_agents += 1;
+            self.agent_end_to_end_latencies
+                .push(worker.end_to_end_latency);
+        }
+        self.successful_requests = self
+            .successful_requests
+            .saturating_add(worker.successful_requests);
+        self.failed_requests = self.failed_requests.saturating_add(worker.failed_requests);
+        self.total_input_tokens = self.total_input_tokens.saturating_add(worker.input_tokens);
+        self.total_output_tokens = self
+            .total_output_tokens
+            .saturating_add(worker.output_tokens);
+        self.estimated_cached_input_tokens = self
+            .estimated_cached_input_tokens
+            .saturating_add(worker.estimated_cached_input_tokens);
+        self.total_tool_call_latency = self
+            .total_tool_call_latency
+            .saturating_add(worker.tool_call_latency);
+        self.live_block_fallbacks = self
+            .live_block_fallbacks
+            .saturating_add(worker.live_block_fallbacks);
+        self.latencies.extend(worker.latencies);
+        self.failures.extend(worker.failures);
+        self.dry_run_records.extend(worker.dry_run_records);
+    }
+
+    fn into_report(
+        mut self,
+        total_agents: usize,
+        planned_tool_invocations: u64,
+        trajectory_schema_version: Option<u32>,
+        outcome: AdmissionOutcome,
+    ) -> AgentBenchmarkReport {
+        let total_duration = outcome.total_duration;
+        let final_drain_duration = total_duration.saturating_sub(outcome.last_agent_admitted_at);
+        self.latencies.sort();
+        self.agent_end_to_end_latencies.sort();
+        self.failures
+            .sort_by_key(|failure| (failure.agent_id, failure.invocation));
+        self.agent_lifecycles.sort_by_key(|record| record.agent_id);
+        let total_requests = self
+            .successful_requests
+            .saturating_add(self.failed_requests);
+        let duration_secs = total_duration.as_secs_f64();
+
+        AgentBenchmarkReport {
+            total_agents,
+            max_active_agents: outcome.max_active_agents,
+            completed_agents: self.completed_agents,
+            planned_tool_invocations,
+            total_requests,
+            successful_requests: self.successful_requests,
+            failed_requests: self.failed_requests,
+            total_input_tokens: self.total_input_tokens,
+            total_output_tokens: self.total_output_tokens,
+            estimated_cached_input_tokens: self.estimated_cached_input_tokens,
+            total_tool_call_latency: self.total_tool_call_latency,
+            total_duration,
+            last_agent_admitted_at: outcome.last_agent_admitted_at,
+            final_drain_duration,
+            input_tokens_per_second: rate(self.total_input_tokens, duration_secs),
+            output_tokens_per_second: rate(self.total_output_tokens, duration_secs),
+            requests_per_second: rate(total_requests, duration_secs),
+            latency_p50: percentile(&self.latencies, 0.50),
+            latency_p90: percentile(&self.latencies, 0.90),
+            latency_p99: percentile(&self.latencies, 0.99),
+            agent_end_to_end_latency_p50: percentile(&self.agent_end_to_end_latencies, 0.50),
+            agent_end_to_end_latency_p90: percentile(&self.agent_end_to_end_latencies, 0.90),
+            agent_end_to_end_latency_p99: percentile(&self.agent_end_to_end_latencies, 0.99),
+            failures: self.failures,
+            agent_lifecycles: self.agent_lifecycles,
+            live_block_fallbacks: self.live_block_fallbacks,
+            late_admissions: outcome.late_admissions,
+            max_admission_lag: outcome.max_admission_lag,
+            trajectory_schema_version,
+        }
+    }
+}
+
+/// Closed-loop admission: keep up to `max_active` trajectories running and refill a freed slot
+/// from the manifest queue whenever a trajectory finishes.
+async fn run_closed_loop(
+    plans: Vec<AgentPlan>,
+    requested_max_active_agents: usize,
+    client: &Client,
+    config: &std::sync::Arc<AgentLoopConfig>,
+    text_generator: &SyntheticTextGenerator,
+    accumulator: &mut ReportAccumulator,
+) -> Result<AdmissionOutcome> {
+    let mut admission = RollingAdmission::new(plans, requested_max_active_agents)?;
+    let max_active_agents = admission.max_active;
+    // Initial prompt synthesis is deliberately outside the benchmark clock. The live working set
+    // still starts together instead of being accidentally ramped by client-side token generation.
+    let initial_admissions =
+        materialize_initial_prompts(admission.initial_admissions(), text_generator).await?;
     let start = Instant::now();
 
     let mut join_set = JoinSet::new();
@@ -557,25 +940,12 @@ pub async fn run_agent_benchmark(config: AgentLoopConfig) -> Result<AgentBenchma
             plan,
             routing_slot,
             Duration::ZERO,
-            &client,
-            &config,
-            &text_generator,
+            client,
+            config,
+            text_generator,
         );
     }
     let mut last_agent_admitted_at = Duration::ZERO;
-
-    let mut completed_agents = 0usize;
-    let mut successful_requests = 0u64;
-    let mut failed_requests = 0u64;
-    let mut total_input_tokens = 0u64;
-    let mut total_output_tokens = 0u64;
-    let mut estimated_cached_input_tokens = 0u64;
-    let mut total_tool_call_latency = Duration::ZERO;
-    let mut latencies = Vec::new();
-    let mut agent_end_to_end_latencies = Vec::new();
-    let mut failures = Vec::new();
-    let mut dry_run_records = Vec::new();
-    let mut agent_lifecycles = Vec::with_capacity(total_agents);
     // Keep prompt preparation off the sole worker-completion drain path. Sequence numbers retain
     // manifest FIFO admission even when later prompt preparations finish first.
     let mut replacement_preparations = JoinSet::new();
@@ -592,31 +962,8 @@ pub async fn run_agent_benchmark(config: AgentLoopConfig) -> Result<AgentBenchma
             joined = join_set.join_next(), if !join_set.is_empty() => {
                 let joined = joined.expect("guarded non-empty agent worker set returned no task");
                 let worker = joined.map_err(|err| anyhow!("agent worker task failed: {}", err))??;
-                let finished_at = start.elapsed();
                 let routing_slot = worker.routing_slot;
-                agent_lifecycles.push(AgentLifecycleRecord {
-                    agent_id: worker.agent_id,
-                    trajectory_id: worker.trajectory_id.clone(),
-                    routing_slot,
-                    admitted_at: worker.admitted_at,
-                    finished_at,
-                    completed: worker.completed,
-                });
-                if worker.completed {
-                    completed_agents += 1;
-                    agent_end_to_end_latencies.push(worker.end_to_end_latency);
-                }
-                successful_requests = successful_requests.saturating_add(worker.successful_requests);
-                failed_requests = failed_requests.saturating_add(worker.failed_requests);
-                total_input_tokens = total_input_tokens.saturating_add(worker.input_tokens);
-                total_output_tokens = total_output_tokens.saturating_add(worker.output_tokens);
-                estimated_cached_input_tokens = estimated_cached_input_tokens
-                    .saturating_add(worker.estimated_cached_input_tokens);
-                total_tool_call_latency =
-                    total_tool_call_latency.saturating_add(worker.tool_call_latency);
-                latencies.extend(worker.latencies);
-                failures.extend(worker.failures);
-                dry_run_records.extend(worker.dry_run_records);
+                accumulator.absorb(worker, start.elapsed());
 
                 if let Some((routing_slot, plan)) = admission.replacement(routing_slot) {
                     let text_generator = text_generator.clone();
@@ -660,9 +1007,9 @@ pub async fn run_agent_benchmark(config: AgentLoopConfig) -> Result<AgentBenchma
                         plan,
                         routing_slot,
                         admitted_at,
-                        &client,
-                        &config,
-                        &text_generator,
+                        client,
+                        config,
+                        text_generator,
                     );
                 }
             }
@@ -675,62 +1022,231 @@ pub async fn run_agent_benchmark(config: AgentLoopConfig) -> Result<AgentBenchma
         ));
     }
 
-    if config.dry_run {
-        dry_run_records.sort_by_key(|record| (record.agent_id, record.invocation));
-        for record in dry_run_records {
-            println!(
-                "[DRY-RUN] agent={} invocation={} input_content_tokens={} output_tokens={} environment_tokens={} tool_call_latency_ms={} trajectory_id={} routing_slot={} admitted_at_ms={} target_prompt_tokens={} reset_before={}",
-                record.agent_id,
-                record.invocation,
-                record.input_content_tokens,
-                record.output_tokens,
-                record.environment_tokens,
-                record.tool_call_latency_ms,
-                record.trajectory_id,
-                record.routing_slot,
-                record.admitted_at.as_millis(),
-                record.target_prompt_tokens,
-                record.reset_before
-            );
+    Ok(AdmissionOutcome {
+        total_duration: start.elapsed(),
+        max_active_agents,
+        last_agent_admitted_at,
+        late_admissions: 0,
+        max_admission_lag: Duration::ZERO,
+    })
+}
+
+/// Upper bound on trajectories whose first request is prepared ahead of their open-loop start
+/// time. Bounds memory while keeping generation off the admission path.
+const OPEN_LOOP_PREPARE_LOOKAHEAD: usize = 256;
+
+#[derive(Debug, Default)]
+struct OpenLoopStats {
+    late_admissions: u64,
+    max_admission_lag: Duration,
+    last_agent_admitted_at: Duration,
+}
+
+/// Routing slots for open-loop admission: the lowest free slot is reused so that concurrent
+/// trajectories occupy consecutive slots (balanced data-parallel routing).
+#[derive(Debug, Default)]
+struct SlotPool {
+    free: BinaryHeap<Reverse<usize>>,
+    allocated: usize,
+}
+
+impl SlotPool {
+    fn acquire(&mut self) -> usize {
+        match self.free.pop() {
+            Some(Reverse(slot)) => slot,
+            None => {
+                let slot = self.allocated;
+                self.allocated += 1;
+                slot
+            }
         }
     }
 
-    let total_duration = start.elapsed();
-    let final_drain_duration = total_duration.saturating_sub(last_agent_admitted_at);
-    latencies.sort();
-    agent_end_to_end_latencies.sort();
-    failures.sort_by_key(|failure| (failure.agent_id, failure.invocation));
-    agent_lifecycles.sort_by_key(|record| record.agent_id);
-    let total_requests = successful_requests.saturating_add(failed_requests);
-    let duration_secs = total_duration.as_secs_f64();
+    fn release(&mut self, slot: usize) {
+        self.free.push(Reverse(slot));
+    }
 
-    Ok(AgentBenchmarkReport {
-        total_agents,
-        max_active_agents,
-        completed_agents,
-        planned_tool_invocations,
-        total_requests,
-        successful_requests,
-        failed_requests,
-        total_input_tokens,
-        total_output_tokens,
-        estimated_cached_input_tokens,
-        total_tool_call_latency,
-        total_duration,
-        last_agent_admitted_at,
-        final_drain_duration,
-        input_tokens_per_second: rate(total_input_tokens, duration_secs),
-        output_tokens_per_second: rate(total_output_tokens, duration_secs),
-        requests_per_second: rate(total_requests, duration_secs),
-        latency_p50: percentile(&latencies, 0.50),
-        latency_p90: percentile(&latencies, 0.90),
-        latency_p99: percentile(&latencies, 0.99),
-        agent_end_to_end_latency_p50: percentile(&agent_end_to_end_latencies, 0.50),
-        agent_end_to_end_latency_p90: percentile(&agent_end_to_end_latencies, 0.90),
-        agent_end_to_end_latency_p99: percentile(&agent_end_to_end_latencies, 0.99),
-        failures,
-        agent_lifecycles,
+    /// Highest number of simultaneously held slots so far.
+    fn peak(&self) -> usize {
+        self.allocated
+    }
+}
+
+struct OpenLoopShared {
+    start: tokio::time::Instant,
+    cap: Option<std::sync::Arc<tokio::sync::Semaphore>>,
+    slots: std::sync::Mutex<SlotPool>,
+    stats: std::sync::Mutex<OpenLoopStats>,
+}
+
+/// Open-loop admission: every trajectory starts at its `start_after` offset. The optional cap
+/// only delays admission (counted as late) instead of queueing trajectories for free slots.
+async fn run_open_loop(
+    mut plans: Vec<AgentPlan>,
+    max_active_agents: Option<usize>,
+    client: &Client,
+    config: &std::sync::Arc<AgentLoopConfig>,
+    text_generator: &SyntheticTextGenerator,
+    accumulator: &mut ReportAccumulator,
+) -> Result<AdmissionOutcome> {
+    plans.sort_by_key(|plan| plan.start_after);
+    let lookahead = std::sync::Arc::new(tokio::sync::Semaphore::new(OPEN_LOOP_PREPARE_LOOKAHEAD));
+    let remaining = plans.split_off(plans.len().min(OPEN_LOOP_PREPARE_LOOKAHEAD));
+    // The earliest trajectories are prepared before the clock starts, as in closed-loop mode.
+    let prepared =
+        materialize_initial_prompts(plans.into_iter().enumerate().collect(), text_generator)
+            .await?;
+
+    let shared = std::sync::Arc::new(OpenLoopShared {
+        start: tokio::time::Instant::now(),
+        cap: max_active_agents.map(|cap| std::sync::Arc::new(tokio::sync::Semaphore::new(cap))),
+        slots: std::sync::Mutex::new(SlotPool::default()),
+        stats: std::sync::Mutex::new(OpenLoopStats::default()),
+    });
+    let mut join_set = JoinSet::new();
+    for (_, plan) in prepared {
+        let permit = std::sync::Arc::clone(&lookahead)
+            .try_acquire_owned()
+            .map_err(|_| anyhow!("open-loop lookahead permits exhausted before admission"))?;
+        spawn_open_loop_agent(
+            &mut join_set,
+            plan,
+            permit,
+            &shared,
+            client,
+            config,
+            text_generator,
+        );
+    }
+
+    let mut pending = remaining.into_iter();
+    let mut next_plan = pending.next();
+    loop {
+        if next_plan.is_none() && join_set.is_empty() {
+            break;
+        }
+        tokio::select! {
+            permit = std::sync::Arc::clone(&lookahead).acquire_owned(), if next_plan.is_some() => {
+                let permit = permit.map_err(|_| anyhow!("open-loop lookahead pool closed unexpectedly"))?;
+                let plan = next_plan.take().expect("guarded pending plan is present");
+                spawn_open_loop_agent(
+                    &mut join_set,
+                    plan,
+                    permit,
+                    &shared,
+                    client,
+                    config,
+                    text_generator,
+                );
+                next_plan = pending.next();
+            }
+            joined = join_set.join_next(), if !join_set.is_empty() => {
+                let joined = joined.expect("guarded non-empty agent worker set returned no task");
+                let worker = joined.map_err(|err| anyhow!("agent worker task failed: {}", err))??;
+                accumulator.absorb(worker, shared.start.elapsed());
+            }
+        }
+    }
+
+    let stats = shared
+        .stats
+        .lock()
+        .map_err(|_| anyhow!("open-loop statistics lock poisoned"))?;
+    let peak_active = shared
+        .slots
+        .lock()
+        .map_err(|_| anyhow!("open-loop slot pool lock poisoned"))?
+        .peak();
+    Ok(AdmissionOutcome {
+        total_duration: shared.start.elapsed(),
+        max_active_agents: peak_active,
+        last_agent_admitted_at: stats.last_agent_admitted_at,
+        late_admissions: stats.late_admissions,
+        max_admission_lag: stats.max_admission_lag,
     })
+}
+
+fn spawn_open_loop_agent(
+    join_set: &mut JoinSet<Result<AgentWorkerReport>>,
+    plan: AgentPlan,
+    lookahead_permit: tokio::sync::OwnedSemaphorePermit,
+    shared: &std::sync::Arc<OpenLoopShared>,
+    client: &Client,
+    config: &std::sync::Arc<AgentLoopConfig>,
+    text_generator: &SyntheticTextGenerator,
+) {
+    let shared = std::sync::Arc::clone(shared);
+    let client = client.clone();
+    let config = std::sync::Arc::clone(config);
+    let text_generator = text_generator.clone();
+    join_set.spawn(async move {
+        let plan = if plan.initial_content.is_some() {
+            plan
+        } else {
+            materialize_initial_prompt(plan, &text_generator).await?
+        };
+        let scheduled_at = plan.start_after;
+        tokio::time::sleep_until(shared.start + scheduled_at).await;
+        let (cap_permit, late) = admit_under_cap(shared.cap.as_ref()).await?;
+        let admitted_at = shared.start.elapsed();
+        drop(lookahead_permit);
+        {
+            let mut stats = shared
+                .stats
+                .lock()
+                .map_err(|_| anyhow!("open-loop statistics lock poisoned"))?;
+            if late {
+                stats.late_admissions += 1;
+            }
+            stats.max_admission_lag = stats
+                .max_admission_lag
+                .max(admitted_at.saturating_sub(scheduled_at));
+            stats.last_agent_admitted_at = stats.last_agent_admitted_at.max(admitted_at);
+        }
+        let routing_slot = shared
+            .slots
+            .lock()
+            .map_err(|_| anyhow!("open-loop slot pool lock poisoned"))?
+            .acquire();
+        let result = run_agent(
+            plan,
+            routing_slot,
+            admitted_at,
+            client,
+            config,
+            text_generator,
+        )
+        .await;
+        if let Ok(mut slots) = shared.slots.lock() {
+            slots.release(routing_slot);
+        }
+        drop(cap_permit);
+        let mut report = result?;
+        report.scheduled_at = scheduled_at;
+        Ok(report)
+    });
+}
+
+/// Acquire an active-agent permit; `true` when the cap was full and admission had to wait.
+async fn admit_under_cap(
+    cap: Option<&std::sync::Arc<tokio::sync::Semaphore>>,
+) -> Result<(Option<tokio::sync::OwnedSemaphorePermit>, bool)> {
+    let Some(cap) = cap else {
+        return Ok((None, false));
+    };
+    match std::sync::Arc::clone(cap).try_acquire_owned() {
+        Ok(permit) => Ok((Some(permit), false)),
+        Err(tokio::sync::TryAcquireError::NoPermits) => {
+            let permit = std::sync::Arc::clone(cap)
+                .acquire_owned()
+                .await
+                .map_err(|_| anyhow!("active-agent cap closed unexpectedly"))?;
+            Ok((Some(permit), true))
+        }
+        Err(tokio::sync::TryAcquireError::Closed) => {
+            Err(anyhow!("active-agent cap closed unexpectedly"))
+        }
+    }
 }
 
 async fn materialize_initial_prompts(
@@ -757,21 +1273,53 @@ async fn materialize_initial_prompt(
     mut plan: AgentPlan,
     text_generator: &SyntheticTextGenerator,
 ) -> Result<AgentPlan> {
-    let initial_prompt = text_generator
-        .generate(
-            plan.agent_id,
-            SyntheticTextField::InitialPrompt,
-            plan.initial_prompt_tokens,
-        )
-        .await
-        .with_context(|| {
-            format!(
-                "failed to generate initial prompt for trajectory {:?}",
-                plan.trajectory_id
-            )
-        })?;
-    plan.initial_prompt = Some(initial_prompt);
+    let initial_content = match plan.turns.first().and_then(|turn| turn.blocks.as_deref()) {
+        Some(blocks) => {
+            let mut cache = BlockCache::new();
+            let generated = text_generator
+                .generate_blocks(missing_generated_blocks(blocks, &cache))
+                .await
+                .with_context(|| {
+                    format!(
+                        "failed to generate initial blocks for trajectory {:?}",
+                        plan.trajectory_id
+                    )
+                })?;
+            for (seed, text) in generated {
+                cache.insert(seed, BlockContent::Generated(text));
+            }
+            InitialContent::Blocks(cache)
+        }
+        None => InitialContent::Prompt(
+            text_generator
+                .generate(
+                    plan.agent_id,
+                    SyntheticTextField::InitialPrompt,
+                    plan.initial_prompt_tokens,
+                )
+                .await
+                .with_context(|| {
+                    format!(
+                        "failed to generate initial prompt for trajectory {:?}",
+                        plan.trajectory_id
+                    )
+                })?,
+        ),
+    };
+    plan.initial_content = Some(initial_content);
     Ok(plan)
+}
+
+/// Blocks that still need generated content: not live, not cached, first occurrence per seed.
+fn missing_generated_blocks(blocks: &[BlockSpec], cache: &BlockCache) -> Vec<BlockSpec> {
+    let mut seen = HashSet::new();
+    blocks
+        .iter()
+        .filter(|block| {
+            !block.is_live() && !cache.contains_key(&block.seed) && seen.insert(block.seed.clone())
+        })
+        .cloned()
+        .collect()
 }
 
 fn spawn_admission_preparation<T, Prepare, Prepared>(
@@ -830,7 +1378,10 @@ fn spawn_agent(
     });
 }
 
-fn build_agent_plans(config: &AgentLoopConfig) -> Result<(Vec<AgentPlan>, u64)> {
+/// Agent plans plus the root seed and, for replay, the highest manifest schema version.
+type BuiltAgentPlans = (Vec<AgentPlan>, u64, Option<u32>);
+
+fn build_agent_plans(config: &AgentLoopConfig) -> Result<BuiltAgentPlans> {
     let root_seed = match config.seed {
         Some(seed) => seed,
         None => rand::thread_rng().gen(),
@@ -838,7 +1389,12 @@ fn build_agent_plans(config: &AgentLoopConfig) -> Result<(Vec<AgentPlan>, u64)> 
 
     if let Some(path) = config.agent_plans_jsonl.as_deref() {
         let specs = load_trajectory_plan_specs(path)?;
-        return Ok((build_replay_agent_plans(config, specs)?, root_seed));
+        let schema_version = specs.iter().map(|spec| spec.schema_version).max();
+        return Ok((
+            build_replay_agent_plans(config, specs)?,
+            root_seed,
+            schema_version,
+        ));
     }
 
     let mut plans = Vec::with_capacity(config.agent_count);
@@ -875,6 +1431,10 @@ fn build_agent_plans(config: &AgentLoopConfig) -> Result<(Vec<AgentPlan>, u64)> 
                 environment_tokens,
                 tool_call_latency: Duration::from_millis(tool_call_latency_ms),
                 reset_prompt_tokens: None,
+                reset_before: false,
+                blocks: None,
+                stream: None,
+                max_tokens: None,
             });
             target_prompt_tokens = target_prompt_tokens
                 .checked_add(output_tokens)
@@ -891,11 +1451,12 @@ fn build_agent_plans(config: &AgentLoopConfig) -> Result<(Vec<AgentPlan>, u64)> 
                 agent_id,
             ),
             initial_prompt_tokens,
-            initial_prompt: None,
+            initial_content: None,
             turns,
+            start_after: Duration::ZERO,
         });
     }
-    Ok((plans, root_seed))
+    Ok((plans, root_seed, None))
 }
 
 fn load_trajectory_plan_specs(path: &Path) -> Result<Vec<TrajectoryPlanSpec>> {
@@ -939,12 +1500,16 @@ fn parse_trajectory_plan_specs<R: BufRead>(
 }
 
 fn validate_trajectory_plan_spec(spec: &TrajectoryPlanSpec) -> Result<()> {
-    if spec.schema_version != TRAJECTORY_PLAN_SCHEMA_VERSION {
+    if !SUPPORTED_TRAJECTORY_PLAN_SCHEMA_VERSIONS.contains(&spec.schema_version) {
         return Err(anyhow!(
-            "unsupported schema_version {}; expected {}",
+            "unsupported schema_version {}; expected one of {:?}",
             spec.schema_version,
-            TRAJECTORY_PLAN_SCHEMA_VERSION
+            SUPPORTED_TRAJECTORY_PLAN_SCHEMA_VERSIONS
         ));
+    }
+    let schema_v2 = spec.schema_version >= 2;
+    if !schema_v2 && spec.start_after_ms.is_some() {
+        return Err(anyhow!("start_after_ms requires schema_version 2"));
     }
     if spec.trajectory_id.trim().is_empty() {
         return Err(anyhow!("trajectory_id must not be empty"));
@@ -953,25 +1518,69 @@ fn validate_trajectory_plan_spec(spec: &TrajectoryPlanSpec) -> Result<()> {
         return Err(anyhow!("requests must contain at least one request"));
     }
 
+    let uses_blocks = spec.requests[0].blocks.is_some();
     for (request_index, request) in spec.requests.iter().enumerate() {
+        let request_number = request_index + 1;
+        if !schema_v2 {
+            if let Some(field) = request.has_schema_v2_fields() {
+                return Err(anyhow!(
+                    "request {request_number} field {field} requires schema_version 2"
+                ));
+            }
+        }
         if request.prompt_tokens == 0 {
             return Err(anyhow!(
-                "request {} prompt_tokens must be greater than zero",
-                request_index + 1
+                "request {request_number} prompt_tokens must be greater than zero"
             ));
         }
         if request.output_tokens == 0 {
             return Err(anyhow!(
-                "request {} output_tokens must be greater than zero",
-                request_index + 1
+                "request {request_number} output_tokens must be greater than zero"
             ));
         }
-        if request_index == 0 && request.reset_before {
+        if request.max_tokens == Some(0) {
+            return Err(anyhow!(
+                "request {request_number} max_tokens must be greater than zero"
+            ));
+        }
+        if request_index == 0 && request.reset_before && !schema_v2 {
             return Err(anyhow!("the first request cannot set reset_before"));
         }
-        if request_index > 0 {
+        if request.blocks.is_some() != uses_blocks {
+            return Err(anyhow!(
+                "request {request_number} must {} blocks because the trajectory's first request {}",
+                if uses_blocks { "define" } else { "omit" },
+                if uses_blocks { "does" } else { "does not" }
+            ));
+        }
+        if let Some(blocks) = request.blocks.as_deref() {
+            validate_blocks(blocks)
+                .with_context(|| format!("request {request_number} blocks are invalid"))?;
+        }
+    }
+
+    if !uses_blocks {
+        // Without blocks the next prompt is inferred from the current one, so every transition
+        // must leave room for the appended output and environment response.
+        let overheads = effective_overheads(&spec.requests, 0, 0);
+        for request_index in 1..spec.requests.len() {
             let previous = &spec.requests[request_index - 1];
-            inferred_environment_tokens(previous, request, 0).with_context(|| {
+            let request = &spec.requests[request_index];
+            if request.reset_before {
+                continue;
+            }
+            let previous_content = previous
+                .prompt_tokens
+                .saturating_sub(overheads[request_index - 1]);
+            let content = request
+                .prompt_tokens
+                .saturating_sub(overheads[request_index]);
+            inferred_environment_tokens_from_content(
+                previous_content,
+                previous.output_tokens,
+                content,
+            )
+            .with_context(|| {
                 format!(
                     "request {} prompt_tokens ({}) cannot follow the preceding prompt and output; set reset_before=true to model compaction or reset",
                     request_index + 1,
@@ -983,29 +1592,70 @@ fn validate_trajectory_plan_spec(spec: &TrajectoryPlanSpec) -> Result<()> {
     Ok(())
 }
 
-fn inferred_environment_tokens(
-    current: &TrajectoryRequestSpec,
-    next: &TrajectoryRequestSpec,
-    transition_overhead_tokens: usize,
-) -> Result<usize> {
-    if next.reset_before {
-        return Ok(0);
+fn validate_blocks(blocks: &[BlockSpec]) -> Result<()> {
+    if blocks.is_empty() {
+        return Err(anyhow!("blocks must contain at least one block"));
     }
-    let current_context = current
-        .prompt_tokens
-        .checked_add(current.output_tokens)
-        .ok_or_else(|| anyhow!("trajectory prompt-token count overflowed usize"))?;
-    let current_context = current_context
-        .checked_add(transition_overhead_tokens)
-        .ok_or_else(|| anyhow!("trajectory prompt-token count overflowed usize"))?;
-    next.prompt_tokens
+    for (block_index, block) in blocks.iter().enumerate() {
+        if block.seed.is_empty() {
+            return Err(anyhow!("block {} seed must not be empty", block_index + 1));
+        }
+        if block.live && block.role != BlockRole::Assistant {
+            return Err(anyhow!(
+                "block {} is live but has role {}; only assistant blocks can be live",
+                block_index + 1,
+                block.role.as_str()
+            ));
+        }
+    }
+    Ok(())
+}
+
+/// Template/scaffolding tokens the backend adds to each request's content.
+///
+/// A per-request `overhead_tokens` wins. Otherwise a first or reset request carries the
+/// initial overhead and every appended turn adds the turn overhead to the previous value.
+fn effective_overheads(
+    requests: &[TrajectoryRequestSpec],
+    initial_overhead_tokens: usize,
+    turn_overhead_tokens: usize,
+) -> Vec<usize> {
+    let mut overheads: Vec<usize> = Vec::with_capacity(requests.len());
+    for (request_index, request) in requests.iter().enumerate() {
+        let overhead = match request.overhead_tokens {
+            Some(overhead) => overhead,
+            None if request_index == 0 || request.reset_before => initial_overhead_tokens,
+            None => overheads[request_index - 1].saturating_add(turn_overhead_tokens),
+        };
+        overheads.push(overhead);
+    }
+    overheads
+}
+
+/// Environment tokens appended after the current turn so that the next content target is met.
+fn inferred_environment_tokens_from_content(
+    current_content_tokens: usize,
+    current_output_tokens: usize,
+    next_content_tokens: usize,
+) -> Result<usize> {
+    let current_context = current_content_tokens
+        .checked_add(current_output_tokens)
+        .ok_or_else(|| anyhow!("trajectory content-token count overflowed usize"))?;
+    next_content_tokens
         .checked_sub(current_context)
         .ok_or_else(|| {
             anyhow!(
-                "next prompt ({}) is smaller than current prompt plus output ({current_context})",
-                next.prompt_tokens
+                "next content ({next_content_tokens}) is smaller than current content plus output ({current_context})"
             )
         })
+}
+
+fn scale_millis(millis: u64, time_scale: f64) -> Duration {
+    if time_scale == 1.0 {
+        Duration::from_millis(millis)
+    } else {
+        Duration::from_secs_f64(millis as f64 / 1000.0 / time_scale)
+    }
 }
 
 fn build_replay_agent_plans(
@@ -1014,96 +1664,173 @@ fn build_replay_agent_plans(
 ) -> Result<Vec<AgentPlan>> {
     let mut plans = Vec::with_capacity(specs.len());
     for (agent_id, spec) in specs.into_iter().enumerate() {
-        let initial_prompt_tokens = spec.requests[0]
+        let overheads = effective_overheads(
+            &spec.requests,
+            config.replay_initial_overhead_tokens,
+            config.replay_turn_overhead_tokens,
+        );
+        let plan = if spec.requests[0].blocks.is_some() {
+            build_block_replay_plan(config, agent_id, &spec, &overheads)?
+        } else {
+            build_growth_replay_plan(config, agent_id, &spec, &overheads)?
+        };
+        plans.push(plan);
+    }
+    Ok(plans)
+}
+
+/// Schema v1 semantics (also v2 without blocks): the next prompt is the current prompt plus the
+/// model output plus an inferred environment response.
+fn build_growth_replay_plan(
+    config: &AgentLoopConfig,
+    agent_id: usize,
+    spec: &TrajectoryPlanSpec,
+    overheads: &[usize],
+) -> Result<AgentPlan> {
+    let content_tokens = |request_index: usize| -> Result<usize> {
+        let request = &spec.requests[request_index];
+        request
             .prompt_tokens
-            .checked_sub(config.replay_initial_overhead_tokens)
+            .checked_sub(overheads[request_index])
             .filter(|tokens| *tokens > 0)
             .ok_or_else(|| {
                 anyhow!(
-                    "trajectory {:?} first prompt ({}) must exceed replay initial overhead ({})",
+                    "trajectory {:?} request {} prompt ({}) must exceed its replay overhead ({})",
                     spec.trajectory_id,
-                    spec.requests[0].prompt_tokens,
-                    config.replay_initial_overhead_tokens
+                    request_index + 1,
+                    request.prompt_tokens,
+                    overheads[request_index]
                 )
-            })?;
-        let mut turns = Vec::with_capacity(spec.requests.len());
-        let mut current_input_content_tokens = initial_prompt_tokens;
+            })
+    };
 
-        for (request_index, request) in spec.requests.iter().enumerate() {
-            let reset_prompt = if request.reset_before {
-                let reset_prompt_tokens = request
-                    .prompt_tokens
-                    .checked_sub(config.replay_initial_overhead_tokens)
-                    .filter(|tokens| *tokens > 0)
-                    .ok_or_else(|| {
-                        anyhow!(
-                            "trajectory {:?} request {} prompt ({}) must exceed replay initial overhead ({})",
-                            spec.trajectory_id,
-                            request_index + 1,
-                            request.prompt_tokens,
-                            config.replay_initial_overhead_tokens
-                        )
-                })?;
-                current_input_content_tokens = reset_prompt_tokens;
-                Some(reset_prompt_tokens)
-            } else {
-                None
-            };
-            let environment_tokens = match spec.requests.get(request_index + 1) {
-                Some(next) => inferred_environment_tokens(
-                    request,
-                    next,
-                    config.replay_turn_overhead_tokens,
+    let initial_prompt_tokens = content_tokens(0)?;
+    let mut turns = Vec::with_capacity(spec.requests.len());
+    let mut current_input_content_tokens = initial_prompt_tokens;
+
+    for (request_index, request) in spec.requests.iter().enumerate() {
+        let reset_prompt = if request.reset_before && request_index > 0 {
+            let reset_prompt_tokens = content_tokens(request_index)?;
+            current_input_content_tokens = reset_prompt_tokens;
+            Some(reset_prompt_tokens)
+        } else {
+            None
+        };
+        let environment_tokens = match spec.requests.get(request_index + 1) {
+            Some(next) if !next.reset_before => inferred_environment_tokens_from_content(
+                current_input_content_tokens,
+                request.output_tokens,
+                content_tokens(request_index + 1)?,
+            )
+            .with_context(|| {
+                format!(
+                    "trajectory {:?} request {} cannot satisfy its replay overhead ({} tokens); lower the overhead or set reset_before=true",
+                    spec.trajectory_id,
+                    request_index + 2,
+                    overheads[request_index + 1]
                 )
-                .with_context(|| {
-                    format!(
-                        "trajectory {:?} request {} cannot satisfy replay turn overhead {}; lower the overhead or set reset_before=true",
-                        spec.trajectory_id,
-                        request_index + 2,
-                        config.replay_turn_overhead_tokens
+            })?,
+            _ => 0,
+        };
+        turns.push(AgentTurnPlan {
+            input_content_tokens: current_input_content_tokens,
+            target_prompt_tokens: request.prompt_tokens,
+            output_tokens: request.output_tokens,
+            environment_tokens,
+            tool_call_latency: scale_millis(request.delay_after_ms, config.time_scale),
+            reset_prompt_tokens: reset_prompt,
+            reset_before: request.reset_before && request_index > 0,
+            blocks: None,
+            stream: request.stream,
+            max_tokens: request.max_tokens,
+        });
+        if spec
+            .requests
+            .get(request_index + 1)
+            .is_some_and(|next| !next.reset_before)
+        {
+            current_input_content_tokens = current_input_content_tokens
+                .checked_add(request.output_tokens)
+                .and_then(|tokens| tokens.checked_add(environment_tokens))
+                .ok_or_else(|| {
+                    anyhow!(
+                        "trajectory {:?} generated content-token count overflowed usize",
+                        spec.trajectory_id
                     )
-                })?,
-                None => 0,
-            };
-            turns.push(AgentTurnPlan {
-                input_content_tokens: current_input_content_tokens,
-                target_prompt_tokens: request.prompt_tokens,
-                output_tokens: request.output_tokens,
-                environment_tokens,
-                tool_call_latency: Duration::from_millis(request.delay_after_ms),
-                reset_prompt_tokens: reset_prompt,
-            });
-            if spec
-                .requests
-                .get(request_index + 1)
-                .is_some_and(|next| !next.reset_before)
-            {
-                current_input_content_tokens = current_input_content_tokens
-                    .checked_add(request.output_tokens)
-                    .and_then(|tokens| tokens.checked_add(environment_tokens))
-                    .ok_or_else(|| {
-                        anyhow!(
-                            "trajectory {:?} generated content-token count overflowed usize",
-                            spec.trajectory_id
-                        )
-                    })?;
-            }
+                })?;
         }
+    }
 
-        plans.push(AgentPlan {
-            agent_id,
-            trajectory_id: spec.trajectory_id,
-            user_tag: generate_user_tag(
-                config.user_tagging,
-                config.user_prefix.as_deref(),
-                agent_id,
-            ),
-            initial_prompt_tokens,
-            initial_prompt: None,
-            turns,
+    Ok(AgentPlan {
+        agent_id,
+        trajectory_id: spec.trajectory_id.clone(),
+        user_tag: generate_user_tag(config.user_tagging, config.user_prefix.as_deref(), agent_id),
+        initial_prompt_tokens,
+        initial_content: None,
+        turns,
+        start_after: scale_millis(spec.start_after_ms.unwrap_or(0), config.time_scale),
+    })
+}
+
+/// Schema v2 with blocks: every request's prompt is fully described by its blocks, so no
+/// environment growth is inferred. `prompt_tokens` remains the reporting target.
+fn build_block_replay_plan(
+    config: &AgentLoopConfig,
+    agent_id: usize,
+    spec: &TrajectoryPlanSpec,
+    overheads: &[usize],
+) -> Result<AgentPlan> {
+    let mut turns = Vec::with_capacity(spec.requests.len());
+    let mut warned_mismatch = false;
+    let mut initial_prompt_tokens = 0;
+
+    for (request_index, request) in spec.requests.iter().enumerate() {
+        let blocks = request
+            .blocks
+            .clone()
+            .ok_or_else(|| anyhow!("validated block trajectory lost its blocks"))?;
+        let content_tokens = request
+            .block_content_tokens()
+            .transpose()?
+            .unwrap_or_default();
+        let expected_prompt_tokens = content_tokens.saturating_add(overheads[request_index]);
+        if expected_prompt_tokens != request.prompt_tokens && !warned_mismatch {
+            warned_mismatch = true;
+            eprintln!(
+                "warning: trajectory {:?} request {}: prompt_tokens {} != sum(blocks.tokens) {} + overhead_tokens {}; replaying the blocks as written",
+                spec.trajectory_id,
+                request_index + 1,
+                request.prompt_tokens,
+                content_tokens,
+                overheads[request_index]
+            );
+        }
+        if request_index == 0 {
+            initial_prompt_tokens = content_tokens;
+        }
+        turns.push(AgentTurnPlan {
+            input_content_tokens: content_tokens,
+            target_prompt_tokens: request.prompt_tokens,
+            output_tokens: request.output_tokens,
+            environment_tokens: 0,
+            tool_call_latency: scale_millis(request.delay_after_ms, config.time_scale),
+            reset_prompt_tokens: None,
+            reset_before: request.reset_before && request_index > 0,
+            blocks: Some(blocks),
+            stream: request.stream,
+            max_tokens: request.max_tokens,
         });
     }
-    Ok(plans)
+
+    Ok(AgentPlan {
+        agent_id,
+        trajectory_id: spec.trajectory_id.clone(),
+        user_tag: generate_user_tag(config.user_tagging, config.user_prefix.as_deref(), agent_id),
+        initial_prompt_tokens,
+        initial_content: None,
+        turns,
+        start_after: scale_millis(spec.start_after_ms.unwrap_or(0), config.time_scale),
+    })
 }
 
 fn stream_rng(root_seed: u64, agent_id: usize, stream_id: u64) -> rand::rngs::StdRng {
@@ -1123,10 +1850,66 @@ impl SyntheticTextGenerator {
         Ok(Self {
             tokenizer,
             eligible_token_ids: std::sync::Arc::new(eligible_token_ids),
+            json_safe_token_ids: std::sync::Arc::new(std::sync::OnceLock::new()),
             special_token_ids: std::sync::Arc::new(special_token_ids),
             permits: std::sync::Arc::new(tokio::sync::Semaphore::new(worker_count)),
             root_seed,
         })
+    }
+
+    /// Generate a schema v2 block's content from its seed alone, so equal seeds produce identical
+    /// bytes in every trajectory, request, and run.
+    async fn generate_block(&self, block: &BlockSpec) -> Result<std::sync::Arc<str>> {
+        let permit = std::sync::Arc::clone(&self.permits)
+            .acquire_owned()
+            .await
+            .map_err(|_| anyhow!("synthetic-text worker pool closed unexpectedly"))?;
+        let tokenizer = std::sync::Arc::clone(&self.tokenizer);
+        let eligible_token_ids = std::sync::Arc::clone(&self.eligible_token_ids);
+        let json_safe_token_ids = std::sync::Arc::clone(&self.json_safe_token_ids);
+        let special_token_ids = std::sync::Arc::clone(&self.special_token_ids);
+        let block = block.clone();
+
+        tokio::task::spawn_blocking(move || {
+            let _permit = permit;
+            generate_block_text(
+                &tokenizer,
+                &eligible_token_ids,
+                &json_safe_token_ids,
+                &special_token_ids,
+                &block,
+            )
+            .map(std::sync::Arc::from)
+        })
+        .await
+        .map_err(|error| anyhow!("synthetic-text worker failed: {error}"))?
+    }
+
+    /// Generate several blocks concurrently through the bounded worker pool, returning
+    /// `(seed, text)` pairs in input order.
+    async fn generate_blocks(
+        &self,
+        blocks: Vec<BlockSpec>,
+    ) -> Result<Vec<(String, std::sync::Arc<str>)>> {
+        let mut join_set = JoinSet::new();
+        for (index, block) in blocks.into_iter().enumerate() {
+            let generator = self.clone();
+            join_set.spawn(async move {
+                generator
+                    .generate_block(&block)
+                    .await
+                    .map(|text| (index, block.seed, text))
+            });
+        }
+        let mut generated = Vec::with_capacity(join_set.len());
+        while let Some(joined) = join_set.join_next().await {
+            generated.push(joined.map_err(|error| anyhow!("block worker failed: {error}"))??);
+        }
+        generated.sort_by_key(|(index, _, _)| *index);
+        Ok(generated
+            .into_iter()
+            .map(|(_, seed, text)| (seed, text))
+            .collect())
     }
 
     async fn generate(
@@ -1161,6 +1944,274 @@ impl SyntheticTextGenerator {
         .await
         .map_err(|error| anyhow!("synthetic-text worker failed: {error}"))?
     }
+}
+
+fn seed_digest_hex(seed: &str) -> String {
+    format!("{:x}", Sha256::digest(seed.as_bytes()))
+}
+
+/// Deterministic RNG derived from a block seed and nothing else.
+fn block_seed_rng(seed: &str) -> rand::rngs::StdRng {
+    let digest = Sha256::digest(seed.as_bytes());
+    let mut bytes = [0u8; 8];
+    bytes.copy_from_slice(&digest[..8]);
+    rand::rngs::StdRng::seed_from_u64(u64::from_le_bytes(bytes))
+}
+
+fn synthetic_tool_name(seed: &str) -> String {
+    format!("fn_{}", &seed_digest_hex(seed)[..12])
+}
+
+fn synthetic_block_tool_call_id(seed: &str) -> String {
+    format!("call_{}", &seed_digest_hex(seed)[..24])
+}
+
+fn synthetic_tool_definition(name: &str, description: &str) -> Value {
+    json!({
+        "type": "function",
+        "function": {
+            "name": name,
+            "description": description,
+            "parameters": {"type": "object", "properties": {}}
+        }
+    })
+}
+
+fn synthetic_tool_call_arguments(input: &str) -> String {
+    serde_json::to_string(&json!({ "input": input }))
+        .expect("a JSON object with one string value always serializes")
+}
+
+fn generate_block_text(
+    tokenizer: &Tokenizer,
+    eligible_token_ids: &[u32],
+    json_safe_token_ids: &std::sync::OnceLock<Vec<u32>>,
+    special_token_ids: &HashSet<u32>,
+    block: &BlockSpec,
+) -> Result<String> {
+    let seed = block.seed.as_str();
+    let text = match block.role {
+        BlockRole::ToolDefinition => {
+            let name = synthetic_tool_name(seed);
+            generate_wrapped_text(
+                tokenizer,
+                json_safe_token_ids
+                    .get_or_init(|| json_safe_token_ids_for(tokenizer, eligible_token_ids)),
+                special_token_ids,
+                block.tokens,
+                || block_seed_rng(seed),
+                |description| {
+                    serde_json::to_string(&synthetic_tool_definition(&name, description))
+                        .expect("a synthetic tool definition always serializes")
+                },
+            )
+        }
+        BlockRole::ToolCall => generate_wrapped_text(
+            tokenizer,
+            json_safe_token_ids
+                .get_or_init(|| json_safe_token_ids_for(tokenizer, eligible_token_ids)),
+            special_token_ids,
+            block.tokens,
+            || block_seed_rng(seed),
+            synthetic_tool_call_arguments,
+        ),
+        BlockRole::System | BlockRole::User | BlockRole::Assistant | BlockRole::Tool => {
+            let mut rng = block_seed_rng(seed);
+            generate_synthetic_text_with_ids(
+                tokenizer,
+                eligible_token_ids,
+                special_token_ids,
+                block.tokens,
+                &mut rng,
+            )
+        }
+    };
+    text.with_context(|| {
+        format!(
+            "failed to generate {} block content for seed {:?} ({} tokens)",
+            block.role.as_str(),
+            block.seed,
+            block.tokens
+        )
+    })
+}
+
+/// Token ids whose text survives JSON string serialization byte-for-byte.
+fn json_safe_token_ids_for(tokenizer: &Tokenizer, eligible_token_ids: &[u32]) -> Vec<u32> {
+    let safe: Vec<u32> = eligible_token_ids
+        .iter()
+        .copied()
+        .filter(|id| {
+            tokenizer
+                .decode(&[*id], false)
+                .map(|text| {
+                    text.chars().all(|character| {
+                        character != '"' && character != '\\' && !character.is_control()
+                    })
+                })
+                .unwrap_or(false)
+        })
+        .collect();
+    if safe.is_empty() {
+        eligible_token_ids.to_vec()
+    } else {
+        safe
+    }
+}
+
+/// Generate text so that `wrap(text)` (a serialized JSON form) re-encodes to `target_tokens`.
+///
+/// The content length is adjusted by the measured difference until the wrapped form matches;
+/// when the tokenizer cannot hit the target exactly the closest constructible form is used.
+fn generate_wrapped_text<SeedRng, Wrap>(
+    tokenizer: &Tokenizer,
+    eligible_token_ids: &[u32],
+    special_token_ids: &HashSet<u32>,
+    target_tokens: usize,
+    seed_rng: SeedRng,
+    wrap: Wrap,
+) -> Result<String>
+where
+    SeedRng: Fn() -> rand::rngs::StdRng,
+    Wrap: Fn(&str) -> String,
+{
+    if target_tokens == 0 {
+        return Ok(String::new());
+    }
+    let wrapped_tokens = |text: &str| -> Result<usize> {
+        tokenizer
+            .encode(wrap(text).as_str(), false)
+            .map(|encoding| encoding.len())
+            .map_err(|error| anyhow!("failed to encode wrapped synthetic text: {error}"))
+    };
+    let scaffold_tokens = wrapped_tokens("")?;
+    let mut content_target = target_tokens.saturating_sub(scaffold_tokens).max(1);
+    let mut tried = HashSet::new();
+    let mut best: Option<(usize, String)> = None;
+
+    while tried.len() < 8 && tried.insert(content_target) {
+        let mut rng = seed_rng();
+        let text = generate_synthetic_text_with_ids(
+            tokenizer,
+            eligible_token_ids,
+            special_token_ids,
+            content_target,
+            &mut rng,
+        )?;
+        let actual_tokens = wrapped_tokens(&text)?;
+        if actual_tokens == target_tokens {
+            return Ok(text);
+        }
+        let distance = actual_tokens.abs_diff(target_tokens);
+        if best
+            .as_ref()
+            .is_none_or(|(best_distance, _)| distance < *best_distance)
+        {
+            best = Some((distance, text));
+        }
+        let adjusted = content_target as i64 + target_tokens as i64 - actual_tokens as i64;
+        content_target = adjusted.max(1) as usize;
+    }
+
+    best.map(|(_, text)| text)
+        .ok_or_else(|| anyhow!("failed to construct wrapped synthetic text"))
+}
+
+/// Request content assembled from schema v2 blocks.
+#[derive(Debug, Default)]
+struct BlockRequest {
+    tools: Vec<Value>,
+    messages: Vec<Value>,
+}
+
+fn build_block_request(blocks: &[BlockSpec], cache: &BlockCache) -> Result<BlockRequest> {
+    let mut request = BlockRequest::default();
+    let mut pending_tool_call_ids = VecDeque::new();
+
+    for block in blocks {
+        let content = cache.get(&block.seed).ok_or_else(|| {
+            anyhow!(
+                "{} block with seed {:?} has no prepared content",
+                block.role.as_str(),
+                block.seed
+            )
+        })?;
+        let text = match content {
+            BlockContent::Generated(text) => text.as_ref(),
+            BlockContent::Live(message) => {
+                if block.role != BlockRole::Assistant {
+                    return Err(anyhow!(
+                        "live content cannot be used for a {} block",
+                        block.role.as_str()
+                    ));
+                }
+                request.messages.push(message.clone());
+                continue;
+            }
+        };
+        match block.role {
+            BlockRole::ToolDefinition => request.tools.push(synthetic_tool_definition(
+                &synthetic_tool_name(&block.seed),
+                text,
+            )),
+            BlockRole::System => request
+                .messages
+                .push(json!({"role": "system", "content": text})),
+            BlockRole::User => request
+                .messages
+                .push(json!({"role": "user", "content": text})),
+            BlockRole::Assistant => request
+                .messages
+                .push(json!({"role": "assistant", "content": text})),
+            BlockRole::Tool => {
+                let tool_call_id = pending_tool_call_ids
+                    .pop_front()
+                    .unwrap_or_else(|| synthetic_block_tool_call_id(&block.seed));
+                request.messages.push(json!({
+                    "role": "tool",
+                    "tool_call_id": tool_call_id,
+                    "content": text,
+                }));
+            }
+            BlockRole::ToolCall => {
+                let tool_call_id = synthetic_block_tool_call_id(&block.seed);
+                let tool_call = json!({
+                    "id": tool_call_id,
+                    "type": "function",
+                    "function": {
+                        "name": synthetic_tool_name(&block.seed),
+                        "arguments": synthetic_tool_call_arguments(text),
+                    }
+                });
+                attach_tool_call(&mut request.messages, tool_call)?;
+                pending_tool_call_ids.push_back(tool_call_id);
+            }
+        }
+    }
+    Ok(request)
+}
+
+/// Attach a synthetic tool call to the preceding assistant message, creating one if needed.
+fn attach_tool_call(messages: &mut Vec<Value>, tool_call: Value) -> Result<()> {
+    let last_is_assistant = messages
+        .last()
+        .and_then(|message| message.get("role"))
+        .and_then(Value::as_str)
+        == Some("assistant");
+    if !last_is_assistant {
+        messages.push(json!({"role": "assistant", "content": null, "tool_calls": []}));
+    }
+    let assistant = messages
+        .last_mut()
+        .and_then(Value::as_object_mut)
+        .ok_or_else(|| anyhow!("assistant message is not an object"))?;
+    match assistant.get_mut("tool_calls") {
+        Some(Value::Array(tool_calls)) => tool_calls.push(tool_call),
+        _ => {
+            assistant.insert("tool_calls".to_string(), json!([tool_call]));
+        }
+    }
+    Ok(())
 }
 
 fn synthetic_text_stream_id(field: SyntheticTextField) -> u64 {
@@ -1408,6 +2459,55 @@ async fn run_agent(
     config: std::sync::Arc<AgentLoopConfig>,
     text_generator: SyntheticTextGenerator,
 ) -> Result<AgentWorkerReport> {
+    let initial_content = plan.initial_content.take().ok_or_else(|| {
+        anyhow!(
+            "trajectory {:?} was admitted without materialized initial content",
+            plan.trajectory_id
+        )
+    })?;
+    match (initial_content, plan.uses_blocks()) {
+        (InitialContent::Prompt(initial_prompt), false) => {
+            run_growth_agent(
+                plan,
+                initial_prompt,
+                routing_slot,
+                admitted_at,
+                client,
+                config,
+                text_generator,
+            )
+            .await
+        }
+        (InitialContent::Blocks(cache), true) => {
+            run_block_agent(
+                plan,
+                cache,
+                routing_slot,
+                admitted_at,
+                client,
+                config,
+                text_generator,
+            )
+            .await
+        }
+        _ => Err(anyhow!(
+            "trajectory {:?} initial content does not match its plan shape",
+            plan.trajectory_id
+        )),
+    }
+}
+
+/// Schema v1 semantics: a growing conversation where each turn appends the model reply and a
+/// synthetic environment response sized from the manifest.
+async fn run_growth_agent(
+    plan: AgentPlan,
+    initial_prompt: String,
+    routing_slot: usize,
+    admitted_at: Duration,
+    client: Client,
+    config: std::sync::Arc<AgentLoopConfig>,
+    text_generator: SyntheticTextGenerator,
+) -> Result<AgentWorkerReport> {
     let agent_start = Instant::now();
     let mut report = AgentWorkerReport::new(
         plan.agent_id,
@@ -1415,12 +2515,6 @@ async fn run_agent(
         routing_slot,
         admitted_at,
     );
-    let initial_prompt = plan.initial_prompt.take().ok_or_else(|| {
-        anyhow!(
-            "trajectory {:?} was admitted without a materialized initial prompt",
-            plan.trajectory_id
-        )
-    })?;
     let mut messages = if config.dry_run {
         Vec::new()
     } else {
@@ -1465,26 +2559,25 @@ async fn run_agent(
                 )
             })?;
             prefetched_reset_prompt = next_reset_prompt?;
-            report.dry_run_records.push(DryRunRecord {
-                agent_id: plan.agent_id,
-                trajectory_id: plan.trajectory_id.clone(),
+            report.dry_run_records.push(dry_run_record(
+                &plan,
+                turn,
                 routing_slot,
                 admitted_at,
                 invocation,
-                input_content_tokens: turn.input_content_tokens,
-                target_prompt_tokens: turn.target_prompt_tokens,
-                output_tokens: turn.output_tokens,
-                environment_tokens: turn.environment_tokens,
-                tool_call_latency_ms: turn.tool_call_latency.as_millis() as usize,
-                reset_before: turn.reset_prompt_tokens.is_some(),
-            });
+            ));
             continue;
         }
 
-        let body = serialize_request_body(
+        let body = serialize_request_body_with(
             &config,
             &messages,
-            turn.output_tokens,
+            RequestOptions {
+                output_tokens: turn.output_tokens,
+                max_tokens: turn.max_tokens,
+                stream: turn.stream.unwrap_or(false),
+                tools: None,
+            },
             plan.user_tag.as_deref(),
         )?;
         let request = request_with_retries(
@@ -1493,6 +2586,7 @@ async fn run_agent(
             &body,
             plan.user_tag.as_deref(),
             routing_slot,
+            turn.stream.unwrap_or(false),
         );
         let environment = text_generator.generate(
             plan.agent_id,
@@ -1512,19 +2606,7 @@ async fn run_agent(
 
         match request_result {
             Ok(result) => {
-                report.successful_requests += 1;
-                report.input_tokens = report.input_tokens.saturating_add(result.prompt_tokens);
-                report.output_tokens = report
-                    .output_tokens
-                    .saturating_add(result.completion_tokens);
-                report.estimated_cached_input_tokens = report
-                    .estimated_cached_input_tokens
-                    .saturating_add(estimated_cache_hit(
-                        previous_prompt_tokens,
-                        result.prompt_tokens,
-                    ));
-                previous_prompt_tokens = result.prompt_tokens;
-                report.latencies.push(result.latency);
+                record_success(&mut report, &result, &mut previous_prompt_tokens);
 
                 if !turn.tool_call_latency.is_zero() {
                     tokio::time::sleep(turn.tool_call_latency).await;
@@ -1569,6 +2651,241 @@ async fn run_agent(
     Ok(report)
 }
 
+/// Schema v2 semantics: every request's prompt is assembled from its blocks. Generated block
+/// text is cached per trajectory, and live assistant blocks carry the model's previous reply.
+async fn run_block_agent(
+    plan: AgentPlan,
+    mut cache: BlockCache,
+    routing_slot: usize,
+    admitted_at: Duration,
+    client: Client,
+    config: std::sync::Arc<AgentLoopConfig>,
+    text_generator: SyntheticTextGenerator,
+) -> Result<AgentWorkerReport> {
+    let agent_start = Instant::now();
+    let mut report = AgentWorkerReport::new(
+        plan.agent_id,
+        plan.trajectory_id.clone(),
+        routing_slot,
+        admitted_at,
+    );
+    let mut previous_prompt_tokens = 0u64;
+    let mut last_reply: Option<Value> = None;
+    let mut prefetched: Vec<(String, std::sync::Arc<str>)> = Vec::new();
+
+    for (turn_index, turn) in plan.turns.iter().enumerate() {
+        let invocation = turn_index + 1;
+        let blocks = turn.blocks.as_deref().ok_or_else(|| {
+            anyhow!(
+                "trajectory {:?} invocation {} has no blocks",
+                plan.trajectory_id,
+                invocation
+            )
+        })?;
+        if turn.reset_before {
+            cache.clear();
+            last_reply = None;
+            previous_prompt_tokens = 0;
+        }
+        for (seed, text) in prefetched.drain(..) {
+            cache.entry(seed).or_insert(BlockContent::Generated(text));
+        }
+        let missing = missing_generated_blocks(blocks, &cache);
+        if !missing.is_empty() {
+            for (seed, text) in
+                text_generator
+                    .generate_blocks(missing)
+                    .await
+                    .with_context(|| {
+                        format!(
+                            "failed to generate blocks for trajectory {:?} invocation {}",
+                            plan.trajectory_id, invocation
+                        )
+                    })?
+            {
+                cache.insert(seed, BlockContent::Generated(text));
+            }
+        }
+
+        if config.dry_run {
+            let next_blocks = plan
+                .turns
+                .get(turn_index + 1)
+                .and_then(|next| next.blocks.as_deref())
+                .map(|next| missing_generated_blocks(next, &cache))
+                .unwrap_or_default();
+            prefetched = text_generator.generate_blocks(next_blocks).await?;
+            report.dry_run_records.push(dry_run_record(
+                &plan,
+                turn,
+                routing_slot,
+                admitted_at,
+                invocation,
+            ));
+            continue;
+        }
+
+        report.live_block_fallbacks +=
+            resolve_live_blocks(blocks, &mut cache, &mut last_reply, &text_generator)
+                .await
+                .with_context(|| {
+                    format!(
+                        "failed to resolve live blocks for trajectory {:?} invocation {}",
+                        plan.trajectory_id, invocation
+                    )
+                })?;
+
+        let block_request = build_block_request(blocks, &cache).with_context(|| {
+            format!(
+                "failed to assemble request for trajectory {:?} invocation {}",
+                plan.trajectory_id, invocation
+            )
+        })?;
+        let stream = turn.stream.unwrap_or(false);
+        let body = serialize_request_body_with(
+            &config,
+            &block_request.messages,
+            RequestOptions {
+                output_tokens: turn.output_tokens,
+                max_tokens: turn.max_tokens,
+                stream,
+                tools: (!block_request.tools.is_empty()).then_some(block_request.tools.as_slice()),
+            },
+            plan.user_tag.as_deref(),
+        )?;
+        let request = request_with_retries(
+            &client,
+            &config,
+            &body,
+            plan.user_tag.as_deref(),
+            routing_slot,
+            stream,
+        );
+        let next_blocks = plan
+            .turns
+            .get(turn_index + 1)
+            .and_then(|next| next.blocks.as_deref())
+            .map(|next| missing_generated_blocks(next, &cache))
+            .unwrap_or_default();
+        let prefetch = text_generator.generate_blocks(next_blocks);
+        let (request_result, prefetched_now) = tokio::join!(request, prefetch);
+        prefetched = prefetched_now.with_context(|| {
+            format!(
+                "failed to prefetch blocks for trajectory {:?} invocation {}",
+                plan.trajectory_id,
+                invocation + 1
+            )
+        })?;
+
+        match request_result {
+            Ok(result) => {
+                record_success(&mut report, &result, &mut previous_prompt_tokens);
+                last_reply = Some(normalize_assistant_message(result.assistant_message)?);
+
+                if !turn.tool_call_latency.is_zero() {
+                    tokio::time::sleep(turn.tool_call_latency).await;
+                    report.tool_call_latency = report
+                        .tool_call_latency
+                        .saturating_add(turn.tool_call_latency);
+                }
+            }
+            Err(err) => {
+                report.failed_requests += 1;
+                report.failures.push(AgentFailureRecord {
+                    agent_id: plan.agent_id,
+                    trajectory_id: plan.trajectory_id.clone(),
+                    invocation,
+                    error: err.to_string(),
+                });
+                report.end_to_end_latency = agent_start.elapsed();
+                return Ok(report);
+            }
+        }
+    }
+
+    report.completed = true;
+    report.end_to_end_latency = agent_start.elapsed();
+    Ok(report)
+}
+
+/// Substitute the previous reply into the first unseen live block; any further unseen live
+/// block (or a live block with no previous reply) is generated instead. Returns the fallback count.
+async fn resolve_live_blocks(
+    blocks: &[BlockSpec],
+    cache: &mut BlockCache,
+    last_reply: &mut Option<Value>,
+    text_generator: &SyntheticTextGenerator,
+) -> Result<u64> {
+    let mut fallbacks = 0;
+    for block in blocks.iter().filter(|block| block.is_live()) {
+        if cache.contains_key(&block.seed) {
+            continue;
+        }
+        match last_reply.take() {
+            Some(reply) => {
+                cache.insert(block.seed.clone(), BlockContent::Live(reply));
+            }
+            None => {
+                let text = text_generator.generate_block(block).await?;
+                cache.insert(block.seed.clone(), BlockContent::Generated(text));
+                fallbacks += 1;
+            }
+        }
+    }
+    Ok(fallbacks)
+}
+
+fn record_success(
+    report: &mut AgentWorkerReport,
+    result: &RequestResult,
+    previous_prompt_tokens: &mut u64,
+) {
+    report.successful_requests += 1;
+    report.input_tokens = report.input_tokens.saturating_add(result.prompt_tokens);
+    report.output_tokens = report
+        .output_tokens
+        .saturating_add(result.completion_tokens);
+    report.estimated_cached_input_tokens =
+        report
+            .estimated_cached_input_tokens
+            .saturating_add(estimated_cache_hit(
+                *previous_prompt_tokens,
+                result.prompt_tokens,
+            ));
+    *previous_prompt_tokens = result.prompt_tokens;
+    report.latencies.push(result.latency);
+}
+
+fn dry_run_record(
+    plan: &AgentPlan,
+    turn: &AgentTurnPlan,
+    routing_slot: usize,
+    admitted_at: Duration,
+    invocation: usize,
+) -> DryRunRecord {
+    DryRunRecord {
+        agent_id: plan.agent_id,
+        trajectory_id: plan.trajectory_id.clone(),
+        routing_slot,
+        admitted_at,
+        invocation,
+        input_content_tokens: turn.input_content_tokens,
+        target_prompt_tokens: turn.target_prompt_tokens,
+        output_tokens: turn.output_tokens,
+        environment_tokens: turn.environment_tokens,
+        tool_call_latency_ms: turn.tool_call_latency.as_millis() as usize,
+        reset_before: turn.reset_prompt_tokens.is_some() || turn.reset_before,
+        blocks: turn.blocks.as_deref().map(|blocks| {
+            (
+                blocks.len(),
+                blocks.iter().filter(|block| block.is_live()).count(),
+            )
+        }),
+        stream: turn.stream,
+        max_tokens: turn.max_tokens,
+    }
+}
+
 fn generate_user_tag(enabled: bool, prefix: Option<&str>, agent_id: usize) -> Option<String> {
     enabled.then(|| match prefix {
         Some(prefix) => format!("{prefix}-{agent_id}"),
@@ -1581,6 +2898,8 @@ struct AgentRequestPayload<'a> {
     model: &'a str,
     messages: &'a [Value],
     #[serde(skip_serializing_if = "Option::is_none")]
+    tools: Option<&'a [Value]>,
+    #[serde(skip_serializing_if = "Option::is_none")]
     max_tokens: Option<usize>,
     #[serde(skip_serializing_if = "Option::is_none")]
     min_tokens: Option<usize>,
@@ -1591,23 +2910,42 @@ struct AgentRequestPayload<'a> {
     #[serde(skip_serializing_if = "Option::is_none")]
     ignore_eos: Option<bool>,
     #[serde(skip_serializing_if = "Option::is_none")]
+    stream: Option<bool>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    stream_options: Option<Value>,
+    #[serde(skip_serializing_if = "Option::is_none")]
     user: Option<&'a str>,
 }
 
-fn serialize_request_body(
+/// Per-request shape: the planned output length plus schema v2 overrides.
+#[derive(Clone, Copy, Debug, Default)]
+struct RequestOptions<'a> {
+    output_tokens: usize,
+    /// Output cap override; the planned output length remains the floor (clamped to the cap).
+    max_tokens: Option<usize>,
+    stream: bool,
+    tools: Option<&'a [Value]>,
+}
+
+fn serialize_request_body_with(
     config: &AgentLoopConfig,
     messages: &[Value],
-    output_tokens: usize,
+    options: RequestOptions<'_>,
     user_tag: Option<&str>,
 ) -> Result<Bytes> {
+    let output_cap = options.max_tokens.unwrap_or(options.output_tokens);
+    let output_floor = options.output_tokens.min(output_cap);
     let payload = AgentRequestPayload {
         model: &config.model,
         messages,
-        max_tokens: (!config.sglang).then_some(output_tokens),
-        min_tokens: (!config.sglang).then_some(output_tokens),
-        max_new_tokens: config.sglang.then_some(output_tokens),
-        min_new_tokens: config.sglang.then_some(output_tokens),
+        tools: options.tools,
+        max_tokens: (!config.sglang).then_some(output_cap),
+        min_tokens: (!config.sglang).then_some(output_floor),
+        max_new_tokens: config.sglang.then_some(output_cap),
+        min_new_tokens: config.sglang.then_some(output_floor),
         ignore_eos: config.ignore_eos.then_some(true),
+        stream: options.stream.then_some(true),
+        stream_options: options.stream.then(|| json!({"include_usage": true})),
         user: user_tag,
     };
     serde_json::to_vec(&payload)
@@ -1623,7 +2961,16 @@ fn build_request_body(
     user_tag: Option<&str>,
 ) -> Value {
     serde_json::from_slice(
-        &serialize_request_body(config, messages, output_tokens, user_tag).unwrap(),
+        &serialize_request_body_with(
+            config,
+            messages,
+            RequestOptions {
+                output_tokens,
+                ..RequestOptions::default()
+            },
+            user_tag,
+        )
+        .unwrap(),
     )
     .unwrap()
 }
@@ -1634,12 +2981,13 @@ async fn request_with_retries(
     body: &Bytes,
     user_tag: Option<&str>,
     routing_slot: usize,
+    stream: bool,
 ) -> Result<RequestResult> {
     let start = Instant::now();
     let mut last_error = None;
 
     for attempt in 0..=config.max_retries {
-        match single_attempt(client, config, body, user_tag, routing_slot).await {
+        match single_attempt(client, config, body, user_tag, routing_slot, stream).await {
             Ok(mut result) => {
                 result.latency = start.elapsed();
                 return Ok(result);
@@ -1663,6 +3011,7 @@ async fn single_attempt(
     body: &Bytes,
     user_tag: Option<&str>,
     routing_slot: usize,
+    stream: bool,
 ) -> Result<RequestResult> {
     if config.verbose {
         let parsed: Value = serde_json::from_slice(body)
@@ -1673,10 +3022,10 @@ async fn single_attempt(
     let request = client
         .post(config.endpoint.clone())
         .headers(build_request_headers(config, user_tag, routing_slot)?);
-    let response = request.body(body.clone()).send().await?;
+    let mut response = request.body(body.clone()).send().await?;
     let status = response.status();
-    let bytes = response.bytes().await?;
     if !status.is_success() {
+        let bytes = response.bytes().await?;
         return Err(anyhow!(
             "request failed ({}) {}",
             status,
@@ -1684,13 +3033,44 @@ async fn single_attempt(
         ));
     }
 
-    let payload: Value = serde_json::from_slice(&bytes)?;
-    if config.verbose {
-        println!("[AGENT RESPONSE] {}", sanitize_response(&payload));
-    }
-    let usage = payload
-        .get("usage")
-        .ok_or_else(|| anyhow!("response missing usage field"))?;
+    let (usage, assistant_message) = if stream {
+        let mut lines = SseLineBuffer::default();
+        let mut completion = StreamedCompletion::default();
+        while let Some(chunk) = response.chunk().await? {
+            for payload in lines.push(&chunk) {
+                completion.absorb(&payload)?;
+            }
+        }
+        if let Some(payload) = lines.finish() {
+            completion.absorb(&payload)?;
+        }
+        let (assistant_message, usage) = completion.into_parts()?;
+        if config.verbose {
+            println!(
+                "[AGENT RESPONSE] {}",
+                sanitize_response(&json!({
+                    "choices": [{"message": assistant_message}],
+                    "usage": usage,
+                }))
+            );
+        }
+        (usage, assistant_message)
+    } else {
+        let bytes = response.bytes().await?;
+        let payload: Value = serde_json::from_slice(&bytes)?;
+        if config.verbose {
+            println!("[AGENT RESPONSE] {}", sanitize_response(&payload));
+        }
+        let usage = payload
+            .get("usage")
+            .cloned()
+            .ok_or_else(|| anyhow!("response missing usage field"))?;
+        let assistant_message = payload
+            .pointer("/choices/0/message")
+            .cloned()
+            .ok_or_else(|| anyhow!("response missing choices[0].message"))?;
+        (usage, assistant_message)
+    };
     let prompt_tokens = usage
         .get("prompt_tokens")
         .and_then(Value::as_u64)
@@ -1699,10 +3079,6 @@ async fn single_attempt(
         .get("completion_tokens")
         .and_then(Value::as_u64)
         .unwrap_or(0);
-    let assistant_message = payload
-        .pointer("/choices/0/message")
-        .cloned()
-        .ok_or_else(|| anyhow!("response missing choices[0].message"))?;
 
     Ok(RequestResult {
         prompt_tokens,
@@ -1710,6 +3086,91 @@ async fn single_attempt(
         assistant_message,
         latency: Duration::ZERO,
     })
+}
+
+/// Splits a server-sent-events byte stream into complete `data:` payloads.
+#[derive(Debug, Default)]
+struct SseLineBuffer {
+    pending: Vec<u8>,
+}
+
+impl SseLineBuffer {
+    fn push(&mut self, chunk: &[u8]) -> Vec<String> {
+        self.pending.extend_from_slice(chunk);
+        let mut payloads = Vec::new();
+        while let Some(newline) = self.pending.iter().position(|byte| *byte == b'\n') {
+            let line: Vec<u8> = self.pending.drain(..=newline).collect();
+            if let Some(payload) = sse_data_payload(&line[..line.len() - 1]) {
+                payloads.push(payload);
+            }
+        }
+        payloads
+    }
+
+    fn finish(&mut self) -> Option<String> {
+        let line = std::mem::take(&mut self.pending);
+        sse_data_payload(&line)
+    }
+}
+
+fn sse_data_payload(line: &[u8]) -> Option<String> {
+    let line = String::from_utf8_lossy(line);
+    let line = line.trim_end_matches('\r');
+    let payload = line.strip_prefix("data:")?.trim();
+    (!payload.is_empty()).then(|| payload.to_string())
+}
+
+/// Assistant message and usage accumulated from streamed chat-completion chunks.
+#[derive(Debug, Default)]
+struct StreamedCompletion {
+    content: String,
+    reasoning_content: Option<String>,
+    usage: Option<Value>,
+    chunks: usize,
+}
+
+impl StreamedCompletion {
+    fn absorb(&mut self, payload: &str) -> Result<()> {
+        if payload == "[DONE]" {
+            return Ok(());
+        }
+        let event: Value =
+            serde_json::from_str(payload).context("invalid JSON in streamed response chunk")?;
+        self.chunks += 1;
+        if let Some(usage) = event.get("usage").filter(|usage| !usage.is_null()) {
+            self.usage = Some(usage.clone());
+        }
+        if let Some(delta) = event.pointer("/choices/0/delta") {
+            if let Some(text) = delta.get("content").and_then(Value::as_str) {
+                self.content.push_str(text);
+            }
+            if let Some(text) = delta.get("reasoning_content").and_then(Value::as_str) {
+                self.reasoning_content
+                    .get_or_insert_with(String::new)
+                    .push_str(text);
+            }
+        }
+        Ok(())
+    }
+
+    fn into_parts(self) -> Result<(Value, Value)> {
+        if self.chunks == 0 {
+            return Err(anyhow!("streamed response contained no chunks"));
+        }
+        let usage = self
+            .usage
+            .ok_or_else(|| anyhow!("streamed response missing usage; the backend must honor stream_options.include_usage"))?;
+        let mut message = Map::new();
+        message.insert("role".to_string(), Value::String("assistant".to_string()));
+        message.insert("content".to_string(), Value::String(self.content));
+        if let Some(reasoning_content) = self.reasoning_content {
+            message.insert(
+                "reasoning_content".to_string(),
+                Value::String(reasoning_content),
+            );
+        }
+        Ok((Value::Object(message), usage))
+    }
 }
 
 fn build_request_headers(
@@ -1790,14 +3251,32 @@ fn sanitize_request(body: &Value) -> Value {
     let mut sanitized = body.clone();
     if let Some(messages) = sanitized.get_mut("messages").and_then(Value::as_array_mut) {
         for message in messages {
-            if let Some(content) = message.get_mut("content") {
-                if let Some(text) = content.as_str() {
-                    *content = Value::String(truncate_text(text, 50));
+            truncate_string_field(message, "content");
+            if let Some(tool_calls) = message.get_mut("tool_calls").and_then(Value::as_array_mut) {
+                for tool_call in tool_calls {
+                    if let Some(function) = tool_call.get_mut("function") {
+                        truncate_string_field(function, "arguments");
+                    }
                 }
             }
         }
     }
+    if let Some(tools) = sanitized.get_mut("tools").and_then(Value::as_array_mut) {
+        for tool in tools {
+            if let Some(function) = tool.get_mut("function") {
+                truncate_string_field(function, "description");
+            }
+        }
+    }
     sanitized
+}
+
+fn truncate_string_field(object: &mut Value, key: &str) {
+    if let Some(field) = object.get_mut(key) {
+        if let Some(text) = field.as_str() {
+            *field = Value::String(truncate_text(text, 50));
+        }
+    }
 }
 
 fn sanitize_response(payload: &Value) -> Value {
@@ -2008,8 +3487,9 @@ mod tests {
         )
         .unwrap()
         .with_seed(7);
-        let (plans, root_seed) = build_agent_plans(&config).unwrap();
-        assert!(plans.iter().all(|plan| plan.initial_prompt.is_none()));
+        let (plans, root_seed, schema_version) = build_agent_plans(&config).unwrap();
+        assert_eq!(schema_version, None);
+        assert!(plans.iter().all(|plan| plan.initial_content.is_none()));
         let tokenizer = std::sync::Arc::new(word_level_tokenizer());
         let generator = SyntheticTextGenerator::new(tokenizer.clone(), root_seed).unwrap();
         let admissions = plans.into_iter().enumerate().collect();
@@ -2021,7 +3501,10 @@ mod tests {
         assert_eq!(prepared.len(), 2);
         let prompts: Vec<_> = prepared
             .iter()
-            .map(|(_, plan)| plan.initial_prompt.as_ref().unwrap())
+            .map(|(_, plan)| match plan.initial_content.as_ref().unwrap() {
+                InitialContent::Prompt(prompt) => prompt,
+                InitialContent::Blocks(_) => panic!("synthetic plans use a single prompt"),
+            })
             .collect();
         assert_ne!(prompts[0], prompts[1]);
         assert!(prompts.iter().all(|prompt| tokenizer
@@ -2403,33 +3886,30 @@ mod tests {
 
     #[test]
     fn trajectory_environment_growth_is_derived_from_adjacent_requests() {
-        let current = TrajectoryRequestSpec {
-            prompt_tokens: 100,
-            output_tokens: 20,
-            reset_before: false,
-            delay_after_ms: 0,
-        };
-        let next = TrajectoryRequestSpec {
-            prompt_tokens: 150,
-            output_tokens: 10,
-            reset_before: false,
-            delay_after_ms: 0,
-        };
-        assert_eq!(inferred_environment_tokens(&current, &next, 0).unwrap(), 30);
+        // prompt 100 / output 20 followed by prompt 150: 30 environment tokens without overhead,
+        // 20 once the appended turn carries 10 tokens of template overhead.
         assert_eq!(
-            inferred_environment_tokens(&current, &next, 10).unwrap(),
+            inferred_environment_tokens_from_content(100, 20, 150).unwrap(),
+            30
+        );
+        assert_eq!(
+            inferred_environment_tokens_from_content(100, 20, 140).unwrap(),
             20
         );
+        assert!(inferred_environment_tokens_from_content(100, 20, 110).is_err());
+    }
 
-        let reset = TrajectoryRequestSpec {
-            prompt_tokens: 60,
-            output_tokens: 10,
-            reset_before: true,
-            delay_after_ms: 0,
-        };
+    #[test]
+    fn effective_overheads_follow_globals_unless_overridden() {
+        let input = r#"{"schema_version":2,"trajectory_id":"o","requests":[{"prompt_tokens":100,"output_tokens":20},{"prompt_tokens":150,"output_tokens":10},{"prompt_tokens":200,"output_tokens":10,"overhead_tokens":7},{"prompt_tokens":250,"output_tokens":10},{"prompt_tokens":60,"output_tokens":5,"reset_before":true}]}"#;
+        let specs = parse_trajectory_plan_specs(std::io::Cursor::new(input), "fixture").unwrap();
         assert_eq!(
-            inferred_environment_tokens(&current, &reset, 10).unwrap(),
-            0
+            effective_overheads(&specs[0].requests, 5, 10),
+            vec![5, 15, 7, 17, 5]
+        );
+        assert_eq!(
+            effective_overheads(&specs[0].requests, 0, 0),
+            vec![0, 0, 7, 7, 0]
         );
     }
 
@@ -2454,7 +3934,7 @@ mod tests {
         let plan = &plans[0];
         assert_eq!(plan.trajectory_id, "shape");
         assert_eq!(plan.initial_prompt_tokens, 95);
-        assert!(plan.initial_prompt.is_none());
+        assert!(plan.initial_content.is_none());
         assert_eq!(plan.turns.len(), 3);
         assert_eq!(plan.turns[0].input_content_tokens, 95);
         assert_eq!(plan.turns[0].target_prompt_tokens, 100);
@@ -2495,7 +3975,7 @@ mod tests {
 
     #[test]
     fn trajectory_jsonl_rejects_unknown_schema_and_fields() {
-        let wrong_version = r#"{"schema_version":2,"trajectory_id":"v2","requests":[{"prompt_tokens":10,"output_tokens":1}]}"#;
+        let wrong_version = r#"{"schema_version":3,"trajectory_id":"v3","requests":[{"prompt_tokens":10,"output_tokens":1}]}"#;
         let error = parse_trajectory_plan_specs(std::io::Cursor::new(wrong_version), "fixture")
             .unwrap_err();
         assert!(format!("{error:#}").contains("unsupported schema_version"));
@@ -2573,5 +4053,532 @@ mod tests {
         assert!(RollingAdmission::new(vec![1], 0).is_err());
         let mut admission = RollingAdmission::new(vec![1], 2).unwrap();
         assert_eq!(admission.initial_admissions(), vec![(0, 1)]);
+    }
+
+    fn replay_config() -> AgentLoopConfig {
+        AgentLoopConfig::try_new(
+            "http://localhost:8000/v1/chat/completions",
+            None,
+            "test-model",
+            1,
+            SampleSpec::fixed(8).unwrap(),
+            SampleSpec::fixed(4).unwrap(),
+            SampleSpec::fixed(6).unwrap(),
+            SampleSpec::fixed(2).unwrap(),
+        )
+        .unwrap()
+    }
+
+    const V2_BLOCK_MANIFEST: &str = concat!(
+        r#"{"schema_version":2,"trajectory_id":"first","start_after_ms":0,"requests":["#,
+        r#"{"prompt_tokens":30,"output_tokens":4,"overhead_tokens":6,"delay_after_ms":200,"stream":true,"max_tokens":16,"blocks":[{"seed":"tools","tokens":8,"role":"tool_definition"},{"seed":"sys","tokens":10,"role":"system"},{"seed":"u1","tokens":6,"role":"user"}]},"#,
+        r#"{"prompt_tokens":46,"output_tokens":3,"overhead_tokens":8,"blocks":[{"seed":"tools","tokens":8,"role":"tool_definition"},{"seed":"sys","tokens":10,"role":"system"},{"seed":"u1","tokens":6,"role":"user"},{"seed":"a1","tokens":4,"role":"assistant","live":true},{"seed":"u2","tokens":10,"role":"user"}]}]}"#,
+        "\n",
+        r#"{"schema_version":2,"trajectory_id":"second","start_after_ms":400,"requests":["#,
+        r#"{"prompt_tokens":24,"output_tokens":2,"overhead_tokens":6,"blocks":[{"seed":"tools","tokens":8,"role":"tool_definition"},{"seed":"sys","tokens":10,"role":"system"},{"seed":"u9","tokens":0,"role":"user"}]}]}"#,
+        "\n"
+    );
+
+    #[test]
+    fn v1_manifests_reject_schema_v2_fields() {
+        for (field, request_extra, trajectory_extra) in [
+            ("overhead_tokens", r#","overhead_tokens":3"#, ""),
+            ("stream", r#","stream":true"#, ""),
+            ("max_tokens", r#","max_tokens":8"#, ""),
+            (
+                "blocks",
+                r#","blocks":[{"seed":"s","tokens":10,"role":"user"}]"#,
+                "",
+            ),
+            ("start_after_ms", "", r#","start_after_ms":10"#),
+        ] {
+            let input = format!(
+                r#"{{"schema_version":1,"trajectory_id":"v1"{trajectory_extra},"requests":[{{"prompt_tokens":10,"output_tokens":1{request_extra}}}]}}"#
+            );
+            let error =
+                parse_trajectory_plan_specs(std::io::Cursor::new(input), "fixture").unwrap_err();
+            let message = format!("{error:#}");
+            assert!(
+                message.contains(field) && message.contains("requires schema_version 2"),
+                "{field}: {message}"
+            );
+        }
+    }
+
+    #[test]
+    fn v2_manifest_parses_blocks_and_open_loop_fields() {
+        let specs = parse_trajectory_plan_specs(std::io::Cursor::new(V2_BLOCK_MANIFEST), "fixture")
+            .unwrap();
+        assert_eq!(specs.len(), 2);
+        assert_eq!(specs[1].start_after_ms, Some(400));
+        let first = &specs[0].requests[0];
+        assert_eq!(first.overhead_tokens, Some(6));
+        assert_eq!(first.stream, Some(true));
+        assert_eq!(first.max_tokens, Some(16));
+        let blocks = first.blocks.as_ref().unwrap();
+        assert_eq!(blocks.len(), 3);
+        assert_eq!(blocks[0].role, BlockRole::ToolDefinition);
+        assert!(!blocks[0].live);
+        assert!(specs[0].requests[1].blocks.as_ref().unwrap()[3].is_live());
+        assert_eq!(first.block_content_tokens().unwrap().unwrap(), 24);
+    }
+
+    #[test]
+    fn v2_manifest_rejects_invalid_blocks_and_mixed_shapes() {
+        let unknown_role = r#"{"schema_version":2,"trajectory_id":"r","requests":[{"prompt_tokens":10,"output_tokens":1,"blocks":[{"seed":"s","tokens":10,"role":"narrator"}]}]}"#;
+        let error =
+            parse_trajectory_plan_specs(std::io::Cursor::new(unknown_role), "fixture").unwrap_err();
+        assert!(format!("{error:#}").contains("unknown variant"));
+
+        let live_user = r#"{"schema_version":2,"trajectory_id":"l","requests":[{"prompt_tokens":10,"output_tokens":1,"blocks":[{"seed":"s","tokens":10,"role":"user","live":true}]}]}"#;
+        let error =
+            parse_trajectory_plan_specs(std::io::Cursor::new(live_user), "fixture").unwrap_err();
+        assert!(format!("{error:#}").contains("only assistant blocks can be live"));
+
+        let mixed = r#"{"schema_version":2,"trajectory_id":"m","requests":[{"prompt_tokens":10,"output_tokens":1,"blocks":[{"seed":"s","tokens":10,"role":"user"}]},{"prompt_tokens":20,"output_tokens":1}]}"#;
+        let error =
+            parse_trajectory_plan_specs(std::io::Cursor::new(mixed), "fixture").unwrap_err();
+        assert!(format!("{error:#}").contains("must define blocks"));
+
+        let unknown_block_field = r#"{"schema_version":2,"trajectory_id":"u","requests":[{"prompt_tokens":10,"output_tokens":1,"blocks":[{"seed":"s","tokens":10,"role":"user","hash":"x"}]}]}"#;
+        let error =
+            parse_trajectory_plan_specs(std::io::Cursor::new(unknown_block_field), "fixture")
+                .unwrap_err();
+        assert!(format!("{error:#}").contains("unknown field"));
+
+        // Schema v2 allows reset_before on the first request: the session predates the window.
+        let first_reset = r#"{"schema_version":2,"trajectory_id":"f","requests":[{"prompt_tokens":10,"output_tokens":1,"reset_before":true}]}"#;
+        assert!(parse_trajectory_plan_specs(std::io::Cursor::new(first_reset), "fixture").is_ok());
+        let v1_first_reset = first_reset.replace("\"schema_version\":2", "\"schema_version\":1");
+        assert!(
+            parse_trajectory_plan_specs(std::io::Cursor::new(v1_first_reset), "fixture").is_err()
+        );
+    }
+
+    #[test]
+    fn v2_per_request_overhead_overrides_the_global_flags() {
+        let input = r#"{"schema_version":2,"trajectory_id":"o","requests":[{"prompt_tokens":100,"output_tokens":20},{"prompt_tokens":150,"output_tokens":10,"overhead_tokens":30},{"prompt_tokens":200,"output_tokens":5}]}"#;
+        let specs = parse_trajectory_plan_specs(std::io::Cursor::new(input), "fixture").unwrap();
+        let config = replay_config().with_replay_prompt_overhead(5, 10);
+        let plans = build_replay_agent_plans(&config, specs).unwrap();
+        let turns = &plans[0].turns;
+        // content: 95, 120 (150 - 30), 160 (200 - (30 + 10)); environment = next - current - output
+        assert_eq!(turns[0].input_content_tokens, 95);
+        assert_eq!(turns[0].environment_tokens, 5);
+        assert_eq!(turns[1].input_content_tokens, 120);
+        assert_eq!(turns[1].environment_tokens, 30);
+        assert_eq!(turns[2].input_content_tokens, 160);
+        assert!(plans[0].turns.iter().all(|turn| turn.blocks.is_none()));
+    }
+
+    #[test]
+    fn v2_block_plans_use_block_sums_and_scaled_timings() {
+        let specs = parse_trajectory_plan_specs(std::io::Cursor::new(V2_BLOCK_MANIFEST), "fixture")
+            .unwrap();
+        let config = replay_config().with_time_scale(2.0).unwrap();
+        let plans = build_replay_agent_plans(&config, specs).unwrap();
+
+        let first = &plans[0];
+        assert!(first.uses_blocks());
+        assert_eq!(first.initial_prompt_tokens, 24);
+        assert_eq!(first.turns[0].input_content_tokens, 24);
+        assert_eq!(first.turns[0].target_prompt_tokens, 30);
+        assert_eq!(first.turns[0].environment_tokens, 0);
+        assert_eq!(first.turns[0].tool_call_latency, Duration::from_millis(100));
+        assert_eq!(first.turns[0].stream, Some(true));
+        assert_eq!(first.turns[0].max_tokens, Some(16));
+        assert_eq!(first.turns[1].input_content_tokens, 38);
+        assert_eq!(first.start_after, Duration::ZERO);
+        assert_eq!(plans[1].start_after, Duration::from_millis(200));
+        assert_eq!(scale_millis(250, 1.0), Duration::from_millis(250));
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn block_text_depends_on_the_seed_alone() {
+        let tokenizer = std::sync::Arc::new(byte_level_tokenizer());
+        let first = SyntheticTextGenerator::new(tokenizer.clone(), 1).unwrap();
+        let second = SyntheticTextGenerator::new(tokenizer.clone(), 2).unwrap();
+        let block = BlockSpec {
+            seed: "shared-system-prompt".to_string(),
+            tokens: 40,
+            role: BlockRole::System,
+            live: false,
+        };
+
+        let from_first = first.generate_block(&block).await.unwrap();
+        let from_second = second.generate_block(&block).await.unwrap();
+        assert_eq!(from_first, from_second);
+        assert_eq!(
+            tokenizer.encode(from_first.as_ref(), false).unwrap().len(),
+            40
+        );
+
+        let other = second
+            .generate_block(&BlockSpec {
+                seed: "other".to_string(),
+                ..block.clone()
+            })
+            .await
+            .unwrap();
+        assert_ne!(other, from_first);
+        assert!(first
+            .generate_block(&BlockSpec {
+                tokens: 0,
+                ..block.clone()
+            })
+            .await
+            .unwrap()
+            .is_empty());
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn tool_blocks_serialize_to_the_requested_token_count() {
+        let tokenizer = std::sync::Arc::new(byte_level_tokenizer());
+        let generator = SyntheticTextGenerator::new(tokenizer.clone(), 7).unwrap();
+        let definition = BlockSpec {
+            seed: "tool-a".to_string(),
+            tokens: 200,
+            role: BlockRole::ToolDefinition,
+            live: false,
+        };
+        let description = generator.generate_block(&definition).await.unwrap();
+        assert!(description
+            .chars()
+            .all(|c| c != '"' && c != '\\' && !c.is_control()));
+        let serialized = serde_json::to_string(&synthetic_tool_definition(
+            &synthetic_tool_name(&definition.seed),
+            &description,
+        ))
+        .unwrap();
+        assert_eq!(tokenizer.encode(serialized, false).unwrap().len(), 200);
+
+        // Targets below the JSON scaffolding cannot be met; the closest form is used instead.
+        let tiny = generator
+            .generate_block(&BlockSpec {
+                tokens: 3,
+                ..definition.clone()
+            })
+            .await
+            .unwrap();
+        assert!(!tiny.is_empty());
+
+        let call = BlockSpec {
+            seed: "call-a".to_string(),
+            tokens: 32,
+            role: BlockRole::ToolCall,
+            live: false,
+        };
+        let input = generator.generate_block(&call).await.unwrap();
+        let arguments = synthetic_tool_call_arguments(&input);
+        assert_eq!(
+            tokenizer.encode(arguments.as_str(), false).unwrap().len(),
+            32
+        );
+        assert_eq!(
+            serde_json::from_str::<Value>(&arguments).unwrap()["input"],
+            input.as_ref()
+        );
+    }
+
+    #[test]
+    fn block_request_assembles_tools_messages_and_tool_call_ids() {
+        let blocks: Vec<BlockSpec> = serde_json::from_str(
+            r#"[
+                {"seed":"t","tokens":1,"role":"tool_definition"},
+                {"seed":"s","tokens":1,"role":"system"},
+                {"seed":"u","tokens":1,"role":"user"},
+                {"seed":"a","tokens":1,"role":"assistant","live":true},
+                {"seed":"c","tokens":1,"role":"tool_call"},
+                {"seed":"r","tokens":1,"role":"tool"},
+                {"seed":"c2","tokens":1,"role":"tool_call"},
+                {"seed":"r2","tokens":1,"role":"tool"},
+                {"seed":"a2","tokens":1,"role":"assistant"}
+            ]"#,
+        )
+        .unwrap();
+        let mut cache = BlockCache::new();
+        for seed in ["t", "s", "u", "c", "r", "c2", "r2", "a2"] {
+            cache.insert(
+                seed.to_string(),
+                BlockContent::Generated(std::sync::Arc::from(format!("text-{seed}"))),
+            );
+        }
+        cache.insert(
+            "a".to_string(),
+            BlockContent::Live(json!({"role": "assistant", "content": "live reply"})),
+        );
+
+        let request = build_block_request(&blocks, &cache).unwrap();
+        assert_eq!(request.tools.len(), 1);
+        assert_eq!(request.tools[0]["function"]["description"], "text-t");
+        assert_eq!(
+            request.tools[0]["function"]["name"],
+            synthetic_tool_name("t")
+        );
+        let roles: Vec<&str> = request
+            .messages
+            .iter()
+            .map(|message| message["role"].as_str().unwrap())
+            .collect();
+        assert_eq!(
+            roles,
+            vec![
+                "system",
+                "user",
+                "assistant",
+                "tool",
+                "assistant",
+                "tool",
+                "assistant"
+            ]
+        );
+        // The live reply carries the first synthetic tool call; its result references that id.
+        assert_eq!(request.messages[2]["content"], "live reply");
+        let call_id = request.messages[2]["tool_calls"][0]["id"].as_str().unwrap();
+        assert_eq!(call_id, synthetic_block_tool_call_id("c"));
+        assert_eq!(request.messages[3]["tool_call_id"], call_id);
+        assert_eq!(request.messages[3]["content"], "text-r");
+        // A tool call without a preceding assistant message gets its own envelope.
+        assert!(request.messages[4]["content"].is_null());
+        assert_eq!(
+            request.messages[5]["tool_call_id"],
+            synthetic_block_tool_call_id("c2")
+        );
+        assert_eq!(
+            serde_json::from_str::<Value>(
+                request.messages[4]["tool_calls"][0]["function"]["arguments"]
+                    .as_str()
+                    .unwrap()
+            )
+            .unwrap()["input"],
+            "text-c2"
+        );
+        assert_eq!(request.messages[6]["content"], "text-a2");
+
+        let missing = build_block_request(&blocks[..1], &BlockCache::new()).unwrap_err();
+        assert!(missing.to_string().contains("no prepared content"));
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn live_blocks_substitute_the_previous_reply_or_fall_back() {
+        let tokenizer = std::sync::Arc::new(word_level_tokenizer());
+        let generator = SyntheticTextGenerator::new(tokenizer.clone(), 3).unwrap();
+        let blocks: Vec<BlockSpec> = serde_json::from_str(
+            r#"[
+                {"seed":"u","tokens":4,"role":"user"},
+                {"seed":"a1","tokens":4,"role":"assistant","live":true},
+                {"seed":"a2","tokens":4,"role":"assistant","live":true}
+            ]"#,
+        )
+        .unwrap();
+        let mut cache = BlockCache::new();
+        let mut last_reply = Some(json!({"role": "assistant", "content": "reply"}));
+
+        let fallbacks = resolve_live_blocks(&blocks, &mut cache, &mut last_reply, &generator)
+            .await
+            .unwrap();
+        assert_eq!(fallbacks, 1);
+        assert!(last_reply.is_none());
+        assert!(matches!(cache.get("a1"), Some(BlockContent::Live(_))));
+        match cache.get("a2") {
+            Some(BlockContent::Generated(text)) => {
+                assert_eq!(tokenizer.encode(text.as_ref(), false).unwrap().len(), 4)
+            }
+            other => panic!("expected generated fallback, got {other:?}"),
+        }
+
+        // Seeds already in the cache are reused without consuming a new reply.
+        last_reply = Some(json!({"role": "assistant", "content": "second reply"}));
+        let fallbacks = resolve_live_blocks(&blocks, &mut cache, &mut last_reply, &generator)
+            .await
+            .unwrap();
+        assert_eq!(fallbacks, 0);
+        assert!(last_reply.is_some());
+        // Live blocks never need generation; only the uncached user block is outstanding.
+        let outstanding = |cache: &BlockCache| {
+            missing_generated_blocks(&blocks, cache)
+                .iter()
+                .map(|block| block.seed.clone())
+                .collect::<Vec<_>>()
+        };
+        assert_eq!(outstanding(&cache), vec!["u"]);
+        assert_eq!(outstanding(&BlockCache::new()), vec!["u"]);
+    }
+
+    #[test]
+    fn request_body_applies_stream_max_tokens_and_tools() {
+        let config = replay_config();
+        let messages = vec![json!({"role": "user", "content": "start"})];
+        let tools = vec![synthetic_tool_definition("fn_a", "desc")];
+        let body: Value = serde_json::from_slice(
+            &serialize_request_body_with(
+                &config,
+                &messages,
+                RequestOptions {
+                    output_tokens: 8,
+                    max_tokens: Some(32),
+                    stream: true,
+                    tools: Some(&tools),
+                },
+                None,
+            )
+            .unwrap(),
+        )
+        .unwrap();
+        assert_eq!(body["max_tokens"], 32);
+        assert_eq!(body["min_tokens"], 8);
+        assert_eq!(body["stream"], true);
+        assert_eq!(body["stream_options"]["include_usage"], true);
+        assert_eq!(body["tools"][0]["function"]["name"], "fn_a");
+
+        let sglang: Value = serde_json::from_slice(
+            &serialize_request_body_with(
+                &replay_config().with_sglang(true),
+                &messages,
+                RequestOptions {
+                    output_tokens: 8,
+                    max_tokens: Some(4),
+                    stream: false,
+                    tools: None,
+                },
+                None,
+            )
+            .unwrap(),
+        )
+        .unwrap();
+        assert_eq!(sglang["max_new_tokens"], 4);
+        assert_eq!(sglang["min_new_tokens"], 4);
+        assert!(sglang.get("stream").is_none());
+        assert!(sglang.get("tools").is_none());
+        assert!(sglang.get("max_tokens").is_none());
+    }
+
+    #[test]
+    fn streamed_chunks_assemble_an_assistant_message_with_usage() {
+        let mut lines = SseLineBuffer::default();
+        let mut completion = StreamedCompletion::default();
+        let stream = concat!(
+            "data: {\"choices\":[{\"delta\":{\"role\":\"assistant\",\"reasoning_content\":\"think\"}}]}\r\n\r\n",
+            "data: {\"choices\":[{\"delta\":{\"content\":\"Hel\"}}]}\n",
+            ": keep-alive\n",
+            "data: {\"choices\":[{\"delta\":{\"content\":\"lo\"}}]}\ndata: {\"choices\":[],",
+        );
+        for payload in lines.push(stream.as_bytes()) {
+            completion.absorb(&payload).unwrap();
+        }
+        for payload in
+            lines.push(b"\"usage\":{\"prompt_tokens\":12,\"completion_tokens\":2}}\n\ndata: [DONE]")
+        {
+            completion.absorb(&payload).unwrap();
+        }
+        if let Some(payload) = lines.finish() {
+            completion.absorb(&payload).unwrap();
+        }
+        let (message, usage) = completion.into_parts().unwrap();
+        assert_eq!(message["role"], "assistant");
+        assert_eq!(message["content"], "Hello");
+        assert_eq!(message["reasoning_content"], "think");
+        assert_eq!(usage["prompt_tokens"], 12);
+
+        let missing_usage = StreamedCompletion {
+            chunks: 1,
+            ..StreamedCompletion::default()
+        };
+        assert!(missing_usage.into_parts().is_err());
+        assert!(StreamedCompletion::default().into_parts().is_err());
+    }
+
+    #[test]
+    fn slot_pool_reuses_the_lowest_free_slot() {
+        let mut pool = SlotPool::default();
+        assert_eq!((pool.acquire(), pool.acquire(), pool.acquire()), (0, 1, 2));
+        pool.release(1);
+        pool.release(0);
+        assert_eq!(pool.acquire(), 0);
+        assert_eq!(pool.acquire(), 1);
+        assert_eq!(pool.acquire(), 3);
+        assert_eq!(pool.peak(), 4);
+    }
+
+    #[tokio::test]
+    async fn admission_cap_delays_and_counts_late_admissions() {
+        let cap = std::sync::Arc::new(tokio::sync::Semaphore::new(1));
+        let (_permit, late) = admit_under_cap(Some(&cap)).await.unwrap();
+        assert!(!late);
+        assert!(admit_under_cap(None).await.unwrap().0.is_none());
+
+        let waiting = tokio::spawn({
+            let cap = cap.clone();
+            async move { admit_under_cap(Some(&cap)).await.unwrap().1 }
+        });
+        tokio::time::sleep(Duration::from_millis(50)).await;
+        assert!(!waiting.is_finished());
+        drop(_permit);
+        assert!(waiting.await.unwrap());
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn open_loop_replay_admits_trajectories_at_their_scaled_offsets() {
+        let directory =
+            std::env::temp_dir().join(format!("batchbench-open-loop-{}", Uuid::new_v4()));
+        std::fs::create_dir_all(&directory).unwrap();
+        let tokenizer_path = directory.join("tokenizer.json");
+        word_level_tokenizer().save(&tokenizer_path, false).unwrap();
+        let manifest_path = directory.join("plans.jsonl");
+        std::fs::write(&manifest_path, V2_BLOCK_MANIFEST).unwrap();
+
+        let config = replay_config()
+            .with_tokenizer_model(tokenizer_path.display().to_string())
+            .with_agent_plans_jsonl(&manifest_path)
+            .with_admission(AdmissionMode::OpenLoop)
+            .with_time_scale(2.0)
+            .unwrap()
+            .with_dry_run(true);
+        let report = run_agent_benchmark(config).await.unwrap();
+        std::fs::remove_dir_all(&directory).unwrap();
+
+        assert_eq!(report.trajectory_schema_version, Some(2));
+        assert_eq!(report.completed_agents, 2);
+        assert_eq!(report.planned_tool_invocations, 3);
+        assert_eq!(report.late_admissions, 0);
+        assert_eq!(report.live_block_fallbacks, 0);
+        let second = report
+            .agent_lifecycles
+            .iter()
+            .find(|record| record.trajectory_id == "second")
+            .unwrap();
+        assert_eq!(second.scheduled_at, Duration::from_millis(200));
+        assert!(second.admitted_at >= Duration::from_millis(200));
+        assert!(report.max_admission_lag >= second.admitted_at - second.scheduled_at);
+        assert!(report.total_duration >= Duration::from_millis(200));
+        assert!(report.max_active_agents >= 1);
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn closed_loop_dry_run_accepts_v2_block_manifests() {
+        let directory =
+            std::env::temp_dir().join(format!("batchbench-closed-loop-{}", Uuid::new_v4()));
+        std::fs::create_dir_all(&directory).unwrap();
+        let tokenizer_path = directory.join("tokenizer.json");
+        word_level_tokenizer().save(&tokenizer_path, false).unwrap();
+        let manifest_path = directory.join("plans.jsonl");
+        std::fs::write(&manifest_path, V2_BLOCK_MANIFEST).unwrap();
+
+        let config = replay_config()
+            .with_tokenizer_model(tokenizer_path.display().to_string())
+            .with_agent_plans_jsonl(&manifest_path)
+            .with_max_active_agents(1)
+            .unwrap()
+            .with_dry_run(true);
+        let report = run_agent_benchmark(config).await.unwrap();
+        std::fs::remove_dir_all(&directory).unwrap();
+
+        assert_eq!(report.completed_agents, 2);
+        assert_eq!(report.max_active_agents, 1);
+        assert_eq!(report.late_admissions, 0);
+        assert!(report
+            .agent_lifecycles
+            .iter()
+            .all(|record| record.scheduled_at == Duration::ZERO));
     }
 }

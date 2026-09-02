@@ -200,9 +200,101 @@ flight. Token generation uses a bounded worker pool, and its per-agent/per-turn 
 streams are independent of asynchronous scheduling. Request JSON is serialized from
 the live conversation without first cloning the complete message tree.
 
-`--agent-events-jsonl` writes each trajectory's queue/admission time, reusable
-routing slot, optional DP rank, finish time, runtime, and completion status. The
-summary separately reports the final admission time and final drain duration.
+`--agent-events-jsonl` writes each trajectory's scheduled and actual admission time,
+queue wait, reusable routing slot, optional DP rank, finish time, runtime, and
+completion status. The summary separately reports the final admission time and final
+drain duration.
+
+### Schema version 2: content blocks and open-loop admission
+
+Schema version 1 manifests keep working unchanged. Version 2 adds per-request
+content structure, per-request overrides, and a start offset per trajectory. Lines
+of both versions may be mixed in one file.
+
+```json
+{"schema_version":2,"trajectory_id":"session-7f3a-0","start_after_ms":1250,"requests":[
+  {"prompt_tokens":1340,"output_tokens":96,"overhead_tokens":41,"stream":true,"max_tokens":512,"delay_after_ms":830,
+   "blocks":[{"seed":"9c1d…","tokens":611,"role":"tool_definition"},{"seed":"2b77…","tokens":420,"role":"system"},{"seed":"e04a…","tokens":268,"role":"user"}]},
+  {"prompt_tokens":1612,"output_tokens":40,"overhead_tokens":52,"stream":true,"max_tokens":512,
+   "blocks":[{"seed":"9c1d…","tokens":611,"role":"tool_definition"},{"seed":"2b77…","tokens":420,"role":"system"},{"seed":"e04a…","tokens":268,"role":"user"},
+             {"seed":"51f0…","tokens":96,"role":"assistant","live":true},{"seed":"c9aa…","tokens":80,"role":"tool_call"},{"seed":"77d2…","tokens":55,"role":"tool"}]}]}
+```
+
+(Shown wrapped for readability; each trajectory is one JSONL line. See
+`examples/trajectory-replay/plans-v2.jsonl` for two trajectories that share their
+tool-definition and system blocks.)
+
+`blocks` describes the prompt as ordered content blocks. `role` is one of
+`tool_definition`, `system`, `user`, `assistant`, `tool`, and `tool_call`.
+Tool definitions become entries in the request's `tools` array (synthetic function
+schemas whose serialized JSON re-encodes to `tokens`); `system`, `user`, `assistant`,
+and `tool` blocks become messages of that role; a `tool_call` block becomes a
+synthetic `tool_calls` entry on the preceding assistant message (or on a new
+assistant message when none precedes it), and the next `tool` block references its
+id. Block text is generated from the seed alone, at exactly `tokens` tokens, so
+equal seeds produce identical bytes in every trajectory, request, and run. Shared
+prefixes across sessions (the same system prompt, the same tool set) therefore
+replay as identical bytes and exercise cross-session prefix caching. Within a
+trajectory, a seed that was already sent reuses the text already sent.
+
+A block with `"live": true` and role `assistant` is the model's own previous reply in
+this conversation: BatchBench substitutes the assistant message returned by the
+previous request instead of generating text. When there is no previous reply (the
+first request of a trajectory, a second live block in the same request, or a
+request after a reset), the block is generated from its seed and counted in the
+report as a live block fallback.
+
+When `blocks` is present the environment-growth inference of version 1 is not used:
+each request's blocks define its prompt, so there is no negative-growth case.
+`reset_before` still starts a fresh conversation (the per-trajectory block cache is
+dropped) and, in version 2, is accepted on the first request to mark a session
+whose earlier turns predate the exported window. `sum(blocks.tokens)` is the
+content target and `prompt_tokens` remains the reporting target; they should agree
+with `prompt_tokens == sum(blocks.tokens) + overhead_tokens`. A mismatch is logged
+once per trajectory and the blocks are replayed as written.
+
+`overhead_tokens` overrides `--replay-initial-overhead-tokens` /
+`--replay-turn-overhead-tokens` for that request: it is the number of chat-template
+and tool-envelope tokens the backend adds on top of the content, so the content
+target is `prompt_tokens - overhead_tokens`. Requests without it fall back to the
+global flags (initial overhead for a first or reset request, plus the turn overhead
+for each appended turn).
+
+`stream` sends `"stream": true` with `stream_options.include_usage` and consumes the
+server-sent events into the assistant message. `max_tokens` sets the output cap the
+same way the run-level output-token fields do (honouring `--sglang`); the planned
+`output_tokens` remains the floor, clamped to the cap.
+
+`start_after_ms` is the trajectory's start offset from benchmark start. It is used by
+`--admission open-loop`, which admits every trajectory at its offset regardless of
+free slots; `--max-active-agents` then becomes a hard cap that delays admission
+when reached, and each delayed trajectory is counted as a late admission. The
+default `--admission closed-loop` is the existing behaviour (manifest-order
+admission into `--max-active-agents` slots), where offsets are ignored.
+`--time-scale <factor>` divides every `start_after_ms` and `delay_after_ms` value,
+so `--time-scale 4` replays a recorded hour in fifteen minutes. Under open-loop
+admission the first requests of the earliest trajectories are prepared before the
+clock starts, and later trajectories are prepared ahead of their offsets through a
+bounded lookahead; the report's maximum admission lag shows how far any admission
+slipped behind its schedule for any reason (cap or preparation).
+
+```bash
+batchbench-agent \
+  --model Qwen/Qwen3-8B \
+  --host http://localhost:8000 \
+  --agent-plans-jsonl examples/trajectory-replay/plans-v2.jsonl \
+  --admission open-loop \
+  --time-scale 2 \
+  --max-active-agents 64 \
+  --agent-events-jsonl agent-events.jsonl \
+  --dry-run
+```
+
+The summary, `--results-csv`, and `--agent-events-jsonl` gain `live_block_fallbacks`,
+`late_admissions`, `max_admission_lag_ms`, `admission_mode`, `time_scale`, and the
+per-trajectory `scheduled_at_seconds`. Under open-loop admission the reported
+maximum active agents is the peak concurrency actually observed. Unknown fields are
+rejected in both schema versions, and version 1 lines reject the version 2 fields.
 
 Trajectory replay reproduces the joint request-count and nominal token-shape plan,
 not the original text. Prompt targets include workload-specific framing, while

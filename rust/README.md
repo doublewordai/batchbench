@@ -144,6 +144,10 @@ For empirical token-shape replay, pass `--agent-plans-jsonl <path>` instead of t
 synthetic shape flags. Each JSONL record contains one trajectory's ordered
 `prompt_tokens`/`output_tokens` requests. Add `--max-active-agents <n>` to queue all
 plans while keeping at most `n` trajectories active; a queued plan immediately
-replaces whichever active trajectory finishes. See the root README and
-`examples/trajectory-replay/plans.jsonl` for the versioned schema and reset
-semantics.
+replaces whichever active trajectory finishes. Schema version 2 manifests add
+per-request content `blocks` (seeded so shared prefixes replay as identical bytes,
+with live assistant replies substituted), per-request `overhead_tokens`, `stream`,
+and `max_tokens`, and a `start_after_ms` offset used by `--admission open-loop`
+together with `--time-scale`. See the root README and
+`examples/trajectory-replay/plans.jsonl` / `plans-v2.jsonl` for the versioned
+schema and reset semantics.

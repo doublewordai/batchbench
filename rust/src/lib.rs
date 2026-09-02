@@ -10,8 +10,8 @@ mod runner;
 mod tokenizer_loader;
 
 pub use agent::{
-    run_agent_benchmark, AgentBenchmarkReport, AgentFailureRecord, AgentLifecycleRecord,
-    AgentLoopConfig, SampleSpec,
+    run_agent_benchmark, AdmissionMode, AgentBenchmarkReport, AgentFailureRecord,
+    AgentLifecycleRecord, AgentLoopConfig, SampleSpec,
 };
 pub use agent_cli::{run_from_argv as run_agent_from_argv, run_from_env as run_agent_from_env};
 pub use cli::{run_from_argv, run_from_env};
