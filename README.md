@@ -38,6 +38,9 @@ report = batchbench.run_benchmark({
     "endpoint": "https://example.com/v1/chat/completions",
     "user_count": 1,
     "mode": batchbench.finite_mode(requests_per_user=1),
+    "request_body": batchbench.request_entry(
+        {"model": "gpt-4o-mini", "messages": [{"role": "user", "content": "ping"}]},
+        line_idx=0, input_tokens=1),
     "requests": [batchbench.request_entry(
         {"model": "gpt-4o-mini", "messages": [{"role": "user", "content": "ping"}], "max_tokens": 4},
         line_idx=0, input_tokens=1)],
@@ -119,10 +122,11 @@ The input tables it expects, and how sessions are reconstructed, are described i
 
 ## Report
 
-Each run prints total prompt and completion tokens from the responses' `usage`,
-estimated cached prompt tokens under perfect prefix caching, request latency p50/p90/p99,
-and for agent runs the end-to-end session latency. `--results-csv` persists the same
-figures; `--agent-events-jsonl` records per-trajectory admission and completion times.
+Each run prints total prompt and completion tokens from the responses' `usage` and
+request latency p50/p90/p99. Agent runs add the estimated cached prompt tokens under
+perfect prefix caching and the end-to-end session latency. `--results-csv` persists
+the same figures; `--agent-events-jsonl` records per-trajectory admission and
+completion times.
 
 `batchbench-harness` drives runs on remote GPU hosts; see [HARNESS.md](HARNESS.md).
 
