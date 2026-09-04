@@ -1,8 +1,10 @@
-"""Export batchbench trajectory manifests (schema version 2) from ClickHouse prompt-chain records.
+"""Export batchbench trajectory manifests (schema version 2) from prompt-chain records.
 
-One ``clay.prompt_chains`` row describes one chat-completions request as a chain of keyed
-content hashes, one per prompt block, joined with ``clay.http_analytics`` for its token counts
-and request scalars. This module turns a time window of those rows into trajectories that
+A prompt-chain record describes one chat-completions request as a chain of content hashes, one
+per prompt block (tool definition, system prompt, message, tool call), with a role and a token
+count per block. Because the hashes are cumulative, requests that share a prefix share a chain
+prefix, and a session can be rebuilt from the chains alone. This module turns a time window of
+such records, joined with per-request usage rows, into trajectories that
 ``batchbench-agent --agent-plans-jsonl`` can replay:
 
 * Within a principal, request B continues request A when A is the latest earlier request
@@ -15,8 +17,9 @@ and request scalars. This module turns a time window of those rows into trajecto
 * ``start_after_ms`` and ``delay_after_ms`` reproduce the recorded arrival pattern, divided by
   ``--time-scale``.
 
-The ClickHouse client is confined to :func:`fetch_rows`; everything else works on plain row
-dictionaries so it can be tested with fixtures.
+The expected input schema is documented in ``docs/export-plans.md``. The ClickHouse client is
+confined to :func:`fetch_rows`; everything else works on plain row dictionaries so it can be
+tested with fixtures.
 """
 
 from __future__ import annotations
@@ -33,8 +36,6 @@ from typing import Any, Iterable, Mapping, Optional, Sequence
 
 SCHEMA_VERSION = 2
 DEFAULT_LINK_WINDOW = timedelta(hours=24)
-DEFAULT_CHAINS_TABLE = "clay.prompt_chains_current"
-DEFAULT_ANALYTICS_TABLE = "clay.http_analytics"
 DEFAULT_ANALYTICS_TS_COLUMN = "timestamp"
 BLOCK_ROLES = ("tool_definition", "system", "user", "assistant", "tool", "tool_call")
 
@@ -768,9 +769,9 @@ def build_parser() -> argparse.ArgumentParser:
     source.add_argument("--clickhouse-url", default=os.environ.get("CLICKHOUSE_URL"), help="ClickHouse HTTP(S) URL (env CLICKHOUSE_URL)")
     source.add_argument("--clickhouse-user", default=os.environ.get("CLICKHOUSE_USER"), help="ClickHouse user (env CLICKHOUSE_USER)")
     source.add_argument("--clickhouse-password", default=os.environ.get("CLICKHOUSE_PASSWORD"), help="ClickHouse password (env CLICKHOUSE_PASSWORD)")
-    source.add_argument("--chains-table", default=DEFAULT_CHAINS_TABLE, help=f"prompt-chain table or view (default {DEFAULT_CHAINS_TABLE})")
+    source.add_argument("--chains-table", help="prompt-chain table or view (see docs/export-plans.md for the expected columns)")
     source.add_argument("--chains-final", action="store_true", help="read the chains table with FINAL (when reading the ReplacingMergeTree base table instead of its deduplicating view)")
-    source.add_argument("--analytics-table", default=DEFAULT_ANALYTICS_TABLE, help=f"request analytics table (default {DEFAULT_ANALYTICS_TABLE})")
+    source.add_argument("--analytics-table", help="per-request usage table joined on (instance_id, correlation_id)")
     source.add_argument("--analytics-ts-column", default=DEFAULT_ANALYTICS_TS_COLUMN, help=f"timestamp column used to bound the analytics side of the join (default {DEFAULT_ANALYTICS_TS_COLUMN})")
     source.add_argument("--rows-jsonl", help="read previously fetched rows from this JSONL file instead of ClickHouse")
     source.add_argument("--dump-rows-jsonl", help="also write the fetched rows to this JSONL file")
@@ -817,6 +818,8 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
         else:
             if not args.clickhouse_url:
                 raise ExportError("--clickhouse-url (or CLICKHOUSE_URL) is required without --rows-jsonl")
+            if not args.chains_table or not args.analytics_table:
+                raise ExportError("--chains-table and --analytics-table are required without --rows-jsonl")
             sql, parameters = build_query(
                 args.chains_table,
                 args.analytics_table,
