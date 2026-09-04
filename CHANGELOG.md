@@ -1,5 +1,13 @@
 # Changelog
 
+## [0.7.0](https://github.com/doublewordai/batchbench/compare/v0.6.2...v0.7.0) (2026-09-04)
+
+
+### Features
+
+* **agent:** trajectory manifest schema v2 with content blocks and open-loop admission ([#33](https://github.com/doublewordai/batchbench/issues/33)) ([19b5189](https://github.com/doublewordai/batchbench/commit/19b5189ad272eeafb6bec2a3c7e6f9961918ed03))
+* **export:** export schema v2 manifests from ClickHouse prompt chains ([#36](https://github.com/doublewordai/batchbench/issues/36)) ([89cc7b0](https://github.com/doublewordai/batchbench/commit/89cc7b082e4d577fc8ed9efe7465df58d996581e))
+
 ## [0.6.2](https://github.com/doublewordai/batchbench/compare/v0.6.1...v0.6.2) (2026-08-28)
 
 
