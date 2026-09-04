@@ -48,8 +48,8 @@ def row(
     principal=PRINCIPAL,
     stream=None,
     max_tokens=None,
-    served_by="dynamo",
-    model="glm-5.2",
+    served_by="upstream-a",
+    model="vendor/model-a",
 ):
     _counter[0] += 1
     if tokens is None:
@@ -311,16 +311,16 @@ class ValidatorTest(unittest.TestCase):
 
 class QueryTest(unittest.TestCase):
     def test_query_applies_filters_as_parameters(self):
-        sql, parameters = build_query("clay.prompt_chains", "clay.http_analytics", PRINCIPAL, "glm-5.2", "dynamo", chains_final=True)
-        self.assertIn("FROM clay.prompt_chains FINAL", sql)
+        sql, parameters = build_query("chains", "analytics", PRINCIPAL, "vendor/model-a", "upstream-a", chains_final=True)
+        self.assertIn("FROM chains FINAL", sql)
         self.assertIn("principal_id = {principal_id:UUID}", sql)
         self.assertIn("model = {model:String}", sql)
         self.assertIn("h.served_by = {served_by:String}", sql)
         # Both join sides are bounded by the window before joining.
         self.assertIn("timestamp >= {lookback_start:DateTime64(3)} - INTERVAL 1 DAY", sql)
-        self.assertEqual(parameters, {"principal_id": PRINCIPAL, "model": "glm-5.2", "served_by": "dynamo"})
-        sql, parameters = build_query(export_plans.DEFAULT_CHAINS_TABLE, "clay.http_analytics", None, None, None, analytics_ts_column="ts")
-        self.assertIn("FROM clay.prompt_chains_current\n", sql)
+        self.assertEqual(parameters, {"principal_id": PRINCIPAL, "model": "vendor/model-a", "served_by": "upstream-a"})
+        sql, parameters = build_query("chains_current", "analytics", None, None, None, analytics_ts_column="ts")
+        self.assertIn("FROM chains_current\n", sql)
         self.assertNotIn("FINAL", sql)
         self.assertNotIn("WHERE h.", sql)
         self.assertIn("ts >= {lookback_start:DateTime64(3)} - INTERVAL 1 DAY", sql)
@@ -374,7 +374,7 @@ class CliTest(unittest.TestCase):
             "--rows-jsonl", str(rows_path),
             "--start", WINDOW_START.isoformat(),
             "--end", WINDOW_END.isoformat(),
-            "--served-by", "dynamo",
+            "--served-by", "upstream-a",
             "--time-scale", "2",
             "--output", str(output),
         ])
