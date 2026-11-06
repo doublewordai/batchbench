@@ -192,8 +192,9 @@ Besides the usual counts, the summary line reports, for traces: `files`,
 
 ### Fidelity lost against prompt chains
 
-- **No roles.** Every block is `user` except the live reply: system prompts, tool
-  results and tool calls are not told apart.
+- **No roles.** Every block is `user` except the previous requests' replies, which are
+  `assistant` (live, repeated, or generated): system prompts, tool results and tool
+  calls are not told apart.
 - **No tools array.** Tool definitions are part of the hashed prompt, so they replay as
   user text and the replayed request sends no `tools`.
 - **Template overhead is merged and double counted.** Trace token counts include the
