@@ -523,6 +523,13 @@ def _piece_block(seed: str, full: int, left: int) -> dict[str, Any]:
     return _user(seed if left == full else f"{seed}:rest{left}", left)
 
 
+def _repeated(block: Mapping[str, Any]) -> dict[str, Any]:
+    """A block sent before, repeated: only the newest reply in a request is ``live``. Within a
+    trajectory the agent replays a seed it has sent with the same bytes, a live reply included."""
+
+    return {key: value for key, value in block.items() if key != "live"}
+
+
 def _user(seed: str, tokens: int) -> dict[str, Any]:
     return {"seed": seed, "tokens": int(tokens), "role": "user"}
 
@@ -543,9 +550,10 @@ def trace_request_blocks(
     """Blocks for one request; ``previous`` is the request it extends, if any.
 
     An extension repeats ``previous_blocks``, the blocks emitted for the previous request (so
-    earlier replies and tails keep their seeds and roles). The tokens after them are the previous
-    reply, as a ``live`` block of the previous output, and then new user content. The previous
-    tail is already in ``previous_blocks``, so it is carved off the extension first.
+    earlier replies and tails keep their seeds and roles, but are no longer ``live``). The tokens
+    after them are the previous reply, as a ``live`` block of the previous output, and then new
+    user content. The previous tail is already in ``previous_blocks``, so it is carved off the
+    extension first.
 
     Any other request starts from the longest prefix it shares with a request already sent in the
     trajectory, rendered with the blocks sent then (``renderings``), so a branch replays the same
@@ -561,7 +569,7 @@ def trace_request_blocks(
         for end, seed, _ in reversed(segments):
             rendering = renderings.get(seed)
             if rendering is not None:
-                blocks = [dict(block) for block in rendering[0][: rendering[1]]]
+                blocks = [_repeated(block) for block in rendering[0][: rendering[1]]]
                 shared = end
                 break
         blocks += [_user(seed, tokens) for end, seed, tokens in segments if end > shared]
@@ -570,7 +578,7 @@ def trace_request_blocks(
         return blocks
 
     shared = len(previous.chain)
-    blocks = [dict(block) for block in previous_blocks]
+    blocks = [_repeated(block) for block in previous_blocks]
     extension = [(seed, tokens, tokens) for end, seed, tokens in segments if end > shared]
     extension += [(seed, tokens, tokens) for seed, tokens in tail]
     extension = _carve(extension, previous.tail_tokens)

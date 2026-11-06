@@ -194,10 +194,20 @@ class BlockTest(unittest.TestCase):
         plans = plans_for(rows, trace_stats=trace_stats)
         self.assertEqual(validate_plans(plans), [])
         turn1, turn2, turn3 = plans[0]["requests"]
+
+        def sent(blocks):
+            return [{key: value for key, value in block.items() if key != "live"} for block in blocks]
+
         # Turn three keeps turn two's reply and tails instead of re-cutting its prefix.
-        self.assertEqual(turn3["blocks"][: len(turn2["blocks"])], turn2["blocks"])
-        self.assertEqual(turn2["blocks"][: len(turn1["blocks"])], turn1["blocks"])
-        self.assertEqual([block.get("live", False) for block in turn3["blocks"]].count(True), 2)
+        self.assertEqual(turn3["blocks"][: len(turn2["blocks"])], sent(turn2["blocks"]))
+        self.assertEqual(turn2["blocks"][: len(turn1["blocks"])], sent(turn1["blocks"]))
+        # Only the newest reply is live; turn one's reply repeats under the seed turn two sent
+        # it with, which the agent replays with the same bytes.
+        for request in (turn2, turn3):
+            self.assertEqual([block.get("live", False) for block in request["blocks"]].count(True), 1)
+        first_reply = next(block for block in turn2["blocks"] if block.get("live"))
+        repeated = turn3["blocks"][turn2["blocks"].index(first_reply)]
+        self.assertEqual(repeated, {key: value for key, value in first_reply.items() if key != "live"})
         self.assertTrue(turn3["blocks"][len(turn2["blocks"])]["live"])
         for request in (turn1, turn2, turn3):
             self.assertEqual(sum(block["tokens"] for block in request["blocks"]), request["prompt_tokens"])
@@ -222,9 +232,10 @@ class BlockTest(unittest.TestCase):
             total += block["tokens"]
         self.assertEqual(total, b_end)
         self.assertTrue(any(block.get("live") for block in prefix))
-        # The branch shares those 128 hashed tokens, so it reuses the same seeds (the agent
-        # replays a seed it has sent, live reply included, with the same bytes).
-        self.assertEqual(turn3["blocks"][: len(prefix)], prefix)
+        # The branch shares those 128 hashed tokens, so it reuses the same seeds; the repeated
+        # reply is no longer live.
+        self.assertEqual(turn3["blocks"][: len(prefix)], [{k: v for k, v in block.items() if k != "live"} for block in prefix])
+        self.assertFalse(any(block.get("live") for block in turn3["blocks"]))
         self.assertEqual(turn3["blocks"][len(prefix)]["seed"], seeds(["a", "b", "d"])[-1])
         self.assertEqual(sum(block["tokens"] for block in turn3["blocks"]), turn3["prompt_tokens"])
 
@@ -468,7 +479,12 @@ class SourceTest(unittest.TestCase):
         binary = find_agent_binary()
         if binary is None:
             self.skipTest("batchbench-agent binary not built")
-        self.write("traces/a.jsonl.gz", self.session_rows())
+        three_turns = [
+            trace(T0 + timedelta(seconds=1), ["t1", "t2"], session_id="sess-3"),
+            trace(T0 + timedelta(seconds=6), ["t1", "t2", "t3"], session_id="sess-3"),
+            trace(T0 + timedelta(seconds=11), ["t1", "t2", "t3", "t4", "t5"], session_id="sess-3"),
+        ]
+        self.write("traces/a.jsonl.gz", self.session_rows() + three_turns)
         code, _ = self.run_cli()
         self.assertEqual(code, 0)
         tokenizer = self.directory / "tokenizer.json"
@@ -480,9 +496,12 @@ class SourceTest(unittest.TestCase):
             capture_output=True, text=True, timeout=120,
         )
         self.assertEqual(result.returncode, 0, result.stderr + result.stdout)
-        self.assertIn("Agents: 2 completed / 2 total", result.stdout)
-        # Each session's second turn replays the first turn's real reply.
-        self.assertEqual(result.stdout.count("live_blocks=1"), 2)
+        self.assertIn("Agents: 3 completed / 3 total", result.stdout)
+        # Every later turn has exactly one live block, and none falls back to generated text:
+        # the three-turn session's third turn repeats the first reply as an already-sent seed.
+        self.assertEqual(result.stdout.count("live_blocks=1"), 4)
+        self.assertNotIn("live_blocks=2", result.stdout)
+        self.assertNotIn("Live block fallbacks", result.stdout)
 
 
 class AnalyticsQueryTest(unittest.TestCase):
