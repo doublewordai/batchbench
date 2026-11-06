@@ -17,7 +17,8 @@ such records, joined with per-request usage rows, into trajectories that
 * ``start_after_ms`` and ``delay_after_ms`` reproduce the recorded arrival pattern, divided by
   ``--time-scale``.
 
-The expected input schema is documented in ``docs/export-plans.md``. The ClickHouse client is
+:mod:`batchbench.dynamo_traces` builds the same manifests from Dynamo request traces. The expected
+input schemas are documented in ``docs/export-plans.md``. The ClickHouse client is
 confined to :func:`fetch_rows`; everything else works on plain row dictionaries so it can be
 tested with fixtures.
 """
@@ -89,6 +90,12 @@ class ChainRecord:
     @property
     def leaf(self) -> Optional[str]:
         return self.chain[-1] if self.chain else None
+
+    @property
+    def link_key(self) -> Any:
+        """Requests link only to earlier requests with the same key."""
+
+        return self.principal_id
 
     @property
     def end_ts(self) -> datetime:
@@ -247,19 +254,19 @@ def link_parents(
     """
 
     parents: dict[int, Optional[int]] = {}
-    by_principal: dict[str, list[ChainRecord]] = {}
+    by_principal: dict[Any, list[ChainRecord]] = {}
     for record in records:
-        by_principal.setdefault(record.principal_id, []).append(record)
+        by_principal.setdefault(record.link_key, []).append(record)
 
     for principal_records in by_principal.values():
         principal_records.sort(key=_record_order)
-        latest_by_leaf: dict[str, ChainRecord] = {}
+        latest_by_leaf: dict[Any, ChainRecord] = {}
+        leaves: set[Any] = set()
         for record in principal_records:
             parent: Optional[ChainRecord] = None
-            for hash_ in record.chain[:-1]:
-                candidate = latest_by_leaf.get(hash_)
-                if candidate is None:
-                    continue
+            # A set intersection keeps this linear in C for long block-level chains.
+            for hash_ in leaves.intersection(record.chain[:-1]):
+                candidate = latest_by_leaf[hash_]
                 if record.ts - candidate.ts > link_window:
                     continue
                 if parent is None or _record_order(candidate) > _record_order(parent):
@@ -267,6 +274,7 @@ def link_parents(
             parents[record.index] = None if parent is None else parent.index
             if record.leaf is not None:
                 latest_by_leaf[record.leaf] = record
+                leaves.add(record.leaf)
     return parents
 
 
@@ -763,7 +771,7 @@ def fetch_rows(
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
         prog="batchbench export-plans",
-        description="Export a batchbench schema v2 trajectory manifest from ClickHouse prompt-chain records.",
+        description="Export a batchbench schema v2 trajectory manifest from ClickHouse prompt-chain records or Dynamo request traces.",
     )
     source = parser.add_argument_group("source")
     source.add_argument("--clickhouse-url", default=os.environ.get("CLICKHOUSE_URL"), help="ClickHouse HTTP(S) URL (env CLICKHOUSE_URL)")
@@ -774,13 +782,18 @@ def build_parser() -> argparse.ArgumentParser:
     source.add_argument("--analytics-table", help="per-request usage table joined on (instance_id, correlation_id)")
     source.add_argument("--analytics-ts-column", default=DEFAULT_ANALYTICS_TS_COLUMN, help=f"timestamp column used to bound the analytics side of the join (default {DEFAULT_ANALYTICS_TS_COLUMN})")
     source.add_argument("--rows-jsonl", help="read previously fetched rows from this JSONL file instead of ClickHouse")
-    source.add_argument("--dump-rows-jsonl", help="also write the fetched rows to this JSONL file")
+    source.add_argument("--dump-rows-jsonl", help="also write the fetched rows (analytics rows with --dynamo-traces) to this JSONL file")
+
+    traces = parser.add_argument_group("dynamo request traces")
+    traces.add_argument("--dynamo-traces", action="append", metavar="PATH", help="read Dynamo request_end traces (*.jsonl.gz or *.jsonl) from this directory, file, or glob instead of prompt chains; repeatable")
+    traces.add_argument("--analytics-id-column", default="x_request_id", help="analytics column holding the gateway's x-request-id (default x_request_id)")
+    traces.add_argument("--analytics-rows-jsonl", help="join traces against analytics rows from this JSONL file instead of ClickHouse")
 
     window = parser.add_argument_group("window and filters")
     window.add_argument("--start", required=True, help="window start (RFC 3339)")
     window.add_argument("--end", required=True, help="window end (RFC 3339, exclusive)")
     window.add_argument("--principal-id", help="restrict to one principal")
-    window.add_argument("--model", help="restrict to one model alias")
+    window.add_argument("--model", help="restrict to one model alias (with --dynamo-traces: the Dynamo model name)")
     window.add_argument("--served-by", help="restrict to requests served by this upstream")
     window.add_argument("--link-window-hours", type=float, default=DEFAULT_LINK_WINDOW.total_seconds() / 3600.0, help="how far back a continuation may look for its parent (default 24)")
 
@@ -813,45 +826,16 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
             raise ExportError("--link-window-hours must be non-negative")
         link_window = timedelta(hours=args.link_window_hours)
 
-        if args.rows_jsonl:
-            rows = read_rows_jsonl(args.rows_jsonl)
-        else:
-            if not args.clickhouse_url:
-                raise ExportError("--clickhouse-url (or CLICKHOUSE_URL) is required without --rows-jsonl")
-            if not args.chains_table or not args.analytics_table:
-                raise ExportError("--chains-table and --analytics-table are required without --rows-jsonl")
-            sql, parameters = build_query(
-                args.chains_table,
-                args.analytics_table,
-                args.principal_id,
-                args.model,
-                args.served_by,
-                chains_final=args.chains_final,
-                analytics_ts_column=args.analytics_ts_column,
-            )
-            parameters["lookback_start"] = (window_start - link_window).replace(tzinfo=None)
-            parameters["window_end"] = window_end.replace(tzinfo=None)
-            rows = fetch_rows(args.clickhouse_url, args.clickhouse_user, args.clickhouse_password, sql, parameters)
-            if args.dump_rows_jsonl:
-                with open(args.dump_rows_jsonl, "w", encoding="utf-8") as handle:
-                    for row in rows:
-                        handle.write(json.dumps(row, default=_json_default) + "\n")
-
         stats = ExportStats()
-        records = records_from_rows(rows)
-        if args.rows_jsonl:
-            records = [
-                record
-                for record in records
-                if (not args.principal_id or record.principal_id == args.principal_id)
-                and (not args.model or record.model == args.model)
-                and (not args.served_by or record.served_by == args.served_by)
-            ]
-        plans = build_plans(records, window_start, window_end, args.time_scale, link_window, stats)
+        extra_stats: dict[str, Any] = {}
+        if args.dynamo_traces:
+            plans, extra_stats = _export_dynamo_traces(args, window_start, window_end, link_window, stats)
+        else:
+            plans = _export_chains(args, window_start, window_end, link_window, stats)
         plans = sample_plans(plans, args.sample, args.seed, args.stratify_by_session_length)
         stats.sampled = len(plans)
+        summary = ", ".join(f"{key}={value}" for key, value in {**stats.as_dict(), **extra_stats}.items())
         if not plans:
-            summary = ", ".join(f"{key}={value}" for key, value in stats.as_dict().items())
             raise ExportError(f"no trajectories to export ({summary})")
         problems = validate_plans(plans)
         if problems:
@@ -862,9 +846,106 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
         print(f"error: {error}", file=sys.stderr)
         return 1
 
-    summary = ", ".join(f"{key}={value}" for key, value in stats.as_dict().items())
     print(f"wrote {written} trajectories to {args.output} ({summary})", file=sys.stderr)
     return 0
+
+
+def _dump_rows(rows: Iterable[Mapping[str, Any]], path: str) -> None:
+    with open(path, "w", encoding="utf-8") as handle:
+        for row in rows:
+            handle.write(json.dumps(row, default=_json_default) + "\n")
+
+
+def _export_dynamo_traces(
+    args: argparse.Namespace,
+    window_start: datetime,
+    window_end: datetime,
+    link_window: timedelta,
+    stats: ExportStats,
+) -> tuple[list[dict[str, Any]], dict[str, Any]]:
+    from . import dynamo_traces
+
+    if args.rows_jsonl or args.chains_table:
+        raise ExportError("--dynamo-traces replaces --rows-jsonl and --chains-table")
+    if args.served_by:
+        raise ExportError("--served-by is not available with --dynamo-traces")
+    if args.analytics_rows_jsonl and args.analytics_table:
+        raise ExportError("use --analytics-rows-jsonl or --analytics-table, not both")
+    trace_stats = dynamo_traces.TraceStats()
+    records = dynamo_traces.load_trace_records(
+        args.dynamo_traces, window_start, window_end, link_window, args.model, trace_stats
+    )
+    records = dynamo_traces.drop_duplicate_attempts(records, trace_stats)
+    analytics_rows: Optional[list[dict[str, Any]]] = None
+    if args.analytics_rows_jsonl:
+        analytics_rows = read_rows_jsonl(args.analytics_rows_jsonl)
+    elif args.analytics_table:
+        if not args.clickhouse_url:
+            raise ExportError("--analytics-table needs --clickhouse-url (or CLICKHOUSE_URL)")
+        bounds = dynamo_traces.analytics_window(records)
+        analytics_rows = []
+        if bounds is not None:
+            sql = dynamo_traces.build_analytics_query(
+                args.analytics_table, args.analytics_id_column, args.analytics_ts_column
+            )
+            parameters = {"start": bounds[0].replace(tzinfo=None), "end": bounds[1].replace(tzinfo=None)}
+            wanted = {record.x_request_id for record in records if record.x_request_id}
+            analytics_rows = dynamo_traces.fetch_analytics_rows(
+                args.clickhouse_url, args.clickhouse_user, args.clickhouse_password, sql, parameters, wanted
+            )
+        if args.dump_rows_jsonl:
+            _dump_rows(analytics_rows, args.dump_rows_jsonl)
+    if analytics_rows is not None:
+        dynamo_traces.apply_analytics(records, analytics_rows, trace_stats)
+    if args.principal_id:
+        records = [record for record in records if record.principal_id == args.principal_id]
+    plans = dynamo_traces.build_trace_plans(
+        records, window_start, window_end, args.time_scale, link_window, stats, trace_stats
+    )
+    return plans, trace_stats.as_dict()
+
+
+def _export_chains(
+    args: argparse.Namespace,
+    window_start: datetime,
+    window_end: datetime,
+    link_window: timedelta,
+    stats: ExportStats,
+) -> list[dict[str, Any]]:
+    if args.analytics_rows_jsonl:
+        raise ExportError("--analytics-rows-jsonl needs --dynamo-traces")
+    if args.rows_jsonl:
+        rows = read_rows_jsonl(args.rows_jsonl)
+    else:
+        if not args.clickhouse_url:
+            raise ExportError("--clickhouse-url (or CLICKHOUSE_URL) is required without --rows-jsonl")
+        if not args.chains_table or not args.analytics_table:
+            raise ExportError("--chains-table and --analytics-table are required without --rows-jsonl")
+        sql, parameters = build_query(
+            args.chains_table,
+            args.analytics_table,
+            args.principal_id,
+            args.model,
+            args.served_by,
+            chains_final=args.chains_final,
+            analytics_ts_column=args.analytics_ts_column,
+        )
+        parameters["lookback_start"] = (window_start - link_window).replace(tzinfo=None)
+        parameters["window_end"] = window_end.replace(tzinfo=None)
+        rows = fetch_rows(args.clickhouse_url, args.clickhouse_user, args.clickhouse_password, sql, parameters)
+        if args.dump_rows_jsonl:
+            _dump_rows(rows, args.dump_rows_jsonl)
+
+    records = records_from_rows(rows)
+    if args.rows_jsonl:
+        records = [
+            record
+            for record in records
+            if (not args.principal_id or record.principal_id == args.principal_id)
+            and (not args.model or record.model == args.model)
+            and (not args.served_by or record.served_by == args.served_by)
+        ]
+    return build_plans(records, window_start, window_end, args.time_scale, link_window, stats)
 
 
 if __name__ == "__main__":
