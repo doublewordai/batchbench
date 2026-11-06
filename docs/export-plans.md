@@ -134,11 +134,13 @@ own, so `sum(blocks.tokens) = prompt_tokens` and `overhead_tokens` is 0. A final
 rather than overhead keeps the replayed prompt the recorded length, which matters for
 block sizes in the thousands.
 
-A request that extends the previous request of its trajectory repeats that request's
-blocks, including its tail block, and the tokens that follow start with a `live`
-assistant block of the previous request's `output_tokens`, then the rest as `user`
-blocks. When the extension holds fewer tokens than the previous output, the live block
-is clamped to fit and counted as `live_clamped`. Each trajectory carries
+A request that extends the previous request of its trajectory repeats the blocks
+emitted for that request (its replies and tail keep their seeds and roles), and the
+tokens that follow start with a `live` assistant block of the previous request's
+`output_tokens`, then the rest as `user` blocks. A live block replays the whole real
+reply, so when the extension holds fewer tokens than the previous output, the reply is
+generated at the size that fits instead, with no live block, and counted as
+`live_clamped`. Each trajectory carries
 `metadata` with the model name, block size and, when joined, the alias and principal.
 
 ### Joining analytics on `x_request_id`
@@ -193,7 +195,8 @@ Besides the usual counts, the summary line reports, for traces: `files`,
   can be linked to an unrelated longer request that shares its full blocks.
 - **Reply length is approximate.** The live block is the previous `output_tokens`;
   when a backend drops reasoning from the history, the reply in the next prompt is
-  shorter than that, and the new user content is undercounted by the difference.
+  shorter than that, and the new user content is undercounted by the difference. When
+  the reply does not fit at all, it is generated rather than replayed live.
 - **No `stream` or `max_tokens`.** Traces do not record them, so they are omitted.
 - **Timing starts at Dynamo.** `request_received_ms` is when the frontend received the
   request, after any gateway queueing.

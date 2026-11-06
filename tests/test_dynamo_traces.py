@@ -172,17 +172,37 @@ class BlockTest(unittest.TestCase):
         self.assertEqual(cuts[(MODEL, 64)], {a, b, c})
         self.assertEqual(cuts[(OTHER_MODEL, 64)], {b})
 
-    def test_a_reply_longer_than_the_extension_is_clamped(self):
+    def test_later_turns_repeat_the_blocks_sent_before(self):
+        rows = [
+            trace(T0, ["s1", "u1"], tail=10, session_id="sess-1"),
+            trace(T0 + timedelta(seconds=5), ["s1", "u1", "x1", "x2"], tail=20, session_id="sess-1"),
+            trace(T0 + timedelta(seconds=9), ["s1", "u1", "x1", "x2", "y1", "y2"], tail=3, session_id="sess-1"),
+        ]
+        trace_stats = TraceStats()
+        plans = plans_for(rows, trace_stats=trace_stats)
+        self.assertEqual(validate_plans(plans), [])
+        turn1, turn2, turn3 = plans[0]["requests"]
+        # Turn three keeps turn two's reply and tails instead of re-cutting its prefix.
+        self.assertEqual(turn3["blocks"][: len(turn2["blocks"])], turn2["blocks"])
+        self.assertEqual(turn2["blocks"][: len(turn1["blocks"])], turn1["blocks"])
+        self.assertEqual([block.get("live", False) for block in turn3["blocks"]].count(True), 2)
+        self.assertTrue(turn3["blocks"][len(turn2["blocks"])]["live"])
+        for request in (turn1, turn2, turn3):
+            self.assertEqual(sum(block["tokens"] for block in request["blocks"]), request["prompt_tokens"])
+        self.assertEqual(trace_stats.live_blocks, 2)
+
+    def test_a_reply_longer_than_the_extension_is_generated_not_live(self):
         first = trace(T0, ["s1"], tail=30, output_tokens=500, session_id="sess-1")
         second = trace(T0 + timedelta(seconds=5), ["s1", "u2"], tail=7, session_id="sess-1")
         trace_stats = TraceStats()
         plans = plans_for([first, second], trace_stats=trace_stats)
         blocks = plans[0]["requests"][1]["blocks"]
-        # 64 + 7 extension tokens: 30 are the previous tail, the remaining 41 the clamped reply.
+        # 64 + 7 extension tokens: 30 are the previous tail, and the 500-token reply would not fit
+        # in the other 41, so they are generated rather than replaying the real reply.
         self.assertEqual([(block["tokens"], block["role"], block.get("live", False)) for block in blocks], [
-            (64, "user", False), (30, "user", False), (41, "assistant", True),
+            (64, "user", False), (30, "user", False), (41, "assistant", False),
         ])
-        self.assertEqual(trace_stats.live_clamped, 1)
+        self.assertEqual((trace_stats.live_clamped, trace_stats.live_blocks), (1, 0))
         self.assertEqual(validate_plans(plans), [])
 
 

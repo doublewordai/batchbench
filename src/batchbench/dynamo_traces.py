@@ -12,8 +12,8 @@ than message granularity, so sessions are rebuilt with the same strict-prefix ru
   size, or where another chain ends. Each segment becomes one ``user`` block whose seed is the
   segment's last hash, so prompts that share a prefix replay with identical bytes.
 * The tokens past the last full block become a final ``user`` block of their own.
-* In a request that extends the previous one, the first ``output_tokens`` tokens after the
-  previous prompt (and its tail) become the ``live`` assistant block.
+* A request that extends the previous one repeats that request's blocks, and the first
+  ``output_tokens`` tokens after them become the ``live`` assistant block.
 
 An optional analytics join on ``x_request_id`` fills the principal and the model alias. The
 expected input is documented in ``docs/export-plans.md``.
@@ -514,14 +514,16 @@ def _user(seed: str, tokens: int) -> dict[str, Any]:
 def trace_request_blocks(
     record: TraceRecord,
     previous: Optional[TraceRecord],
+    previous_blocks: Sequence[Mapping[str, Any]],
     cuts: set[int],
     stats: TraceStats,
 ) -> list[dict[str, Any]]:
     """Blocks for one request; ``previous`` is the request it extends, if any.
 
-    In an extension the tokens after the previous prompt's full blocks are, in order, the
-    previous prompt's tail (same seed as there), the previous reply (``live``, as many tokens as
-    the previous output, clamped to what the extension holds), and new user content.
+    An extension repeats ``previous_blocks``, the blocks emitted for the previous request (so
+    earlier replies and tails keep their seeds and roles). The tokens after them are the previous
+    reply, as a ``live`` block of the previous output, and then new user content. The previous
+    tail is already in ``previous_blocks``, so it is carved off the extension first.
     """
 
     segments = record_segments(record, cuts)
@@ -530,19 +532,21 @@ def trace_request_blocks(
         return [_user(seed, tokens) for _, seed, tokens in segments] + [_user(seed, tokens) for seed, tokens in tail]
 
     shared = len(previous.chain)
-    blocks = [_user(seed, tokens) for end, seed, tokens in segments if end <= shared]
+    blocks = [dict(block) for block in previous_blocks]
     extension = [(seed, tokens, tokens) for end, seed, tokens in segments if end > shared]
     extension += [(seed, tokens, tokens) for seed, tokens in tail]
-    if previous.tail_tokens > 0:
-        blocks.append(_user(tail_seed(previous), previous.tail_tokens))
-        extension = _carve(extension, previous.tail_tokens)
+    extension = _carve(extension, previous.tail_tokens)
     reply = int(previous.completion_tokens or 0)
-    live = min(reply, sum(left for _, _, left in extension))
-    if live < reply:
+    available = sum(left for _, _, left in extension)
+    if reply > available:
+        # The live block replays the whole real reply, which would not fit: generate it instead.
         stats.live_clamped += 1
-    if live > 0:
-        blocks.append({"seed": f"{_request_anchor(previous)}:reply{live}", "tokens": live, "role": "assistant", "live": True})
-        extension = _carve(extension, live)
+        if available > 0:
+            blocks.append({"seed": f"{_request_anchor(previous)}:reply{available}", "tokens": available, "role": "assistant"})
+        extension = []
+    elif reply > 0:
+        blocks.append({"seed": f"{_request_anchor(previous)}:reply{reply}", "tokens": reply, "role": "assistant", "live": True})
+        extension = _carve(extension, reply)
         stats.live_blocks += 1
     blocks.extend(_piece_block(*piece) for piece in extension)
     return blocks
@@ -572,12 +576,15 @@ def trace_trajectory_plan(
     first_offset_ms = (requests[0].ts - window_start).total_seconds() * 1000.0
     plan_requests = []
     previous: Optional[TraceRecord] = None
+    previous_blocks: list[dict[str, Any]] = []
     for position, record in enumerate(requests):
         if position == 0:
             reset_before = trajectory.began_before_window
         else:
             reset_before = not extends(previous.chain, record.chain)  # type: ignore[union-attr]
-        blocks = trace_request_blocks(record, None if reset_before else previous, group_cuts, stats)
+        blocks = trace_request_blocks(
+            record, None if reset_before else previous, previous_blocks, group_cuts, stats
+        )
         prompt_tokens = int(record.prompt_tokens or 0)
         request: dict[str, Any] = {
             "prompt_tokens": prompt_tokens,
@@ -592,6 +599,7 @@ def trace_trajectory_plan(
         request["blocks"] = blocks
         plan_requests.append(request)
         previous = record
+        previous_blocks = blocks
 
     metadata: dict[str, Any] = {"source": "dynamo-request-trace", "model": root.model, "block_size": root.block_size}
     if root.alias:
