@@ -18,9 +18,9 @@ such records, joined with per-request usage rows, into trajectories that
   ``--time-scale``.
 
 :mod:`batchbench.dynamo_traces` builds the same manifests from Dynamo request traces. The expected
-input schemas are documented in ``docs/export-plans.md``. The ClickHouse client is
-confined to :func:`fetch_rows`; everything else works on plain row dictionaries so it can be
-tested with fixtures.
+input schemas are documented in ``docs/export-plans.md``. ClickHouse is read only by
+:func:`fetch_rows` here and ``fetch_analytics_rows`` there; everything else works on plain row
+dictionaries so it can be tested with fixtures.
 """
 
 from __future__ import annotations
@@ -248,17 +248,18 @@ def link_parents(
 ) -> dict[int, Optional[int]]:
     """Map each record index to the index of the request it continues, or ``None`` for a root.
 
-    Within a principal, the parent of B is the latest earlier request (within ``link_window``)
+    Within a link key (the principal, for chain records), the parent of B is the latest earlier
+    request (within ``link_window``)
     whose full chain is a strict prefix of B's chain. Because chain hashes are cumulative, A's
     chain is a prefix of B's exactly when A's leaf hash appears in B's chain before B's leaf.
     """
 
     parents: dict[int, Optional[int]] = {}
-    by_principal: dict[Any, list[ChainRecord]] = {}
+    by_link_key: dict[Any, list[ChainRecord]] = {}
     for record in records:
-        by_principal.setdefault(record.link_key, []).append(record)
+        by_link_key.setdefault(record.link_key, []).append(record)
 
-    for principal_records in by_principal.values():
+    for principal_records in by_link_key.values():
         principal_records.sort(key=_record_order)
         latest_by_leaf: dict[Any, ChainRecord] = {}
         leaves: set[Any] = set()
@@ -869,6 +870,8 @@ def _export_dynamo_traces(
         raise ExportError("--dynamo-traces replaces --rows-jsonl and --chains-table")
     if args.served_by:
         raise ExportError("--served-by is not available with --dynamo-traces")
+    if args.principal_id and not (args.analytics_table or args.analytics_rows_jsonl):
+        raise ExportError("--principal-id with --dynamo-traces needs an analytics join, the only source of principals")
     if args.analytics_rows_jsonl and args.analytics_table:
         raise ExportError("use --analytics-rows-jsonl or --analytics-table, not both")
     trace_stats = dynamo_traces.TraceStats()

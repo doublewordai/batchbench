@@ -116,8 +116,8 @@ There are `ceil(input_length / trace_block_size)` hashes. When the length is not
 multiple of the block size, the last hash covers the partial last block; it changes as
 soon as a later turn fills that block, so it is split off and never used for linking or
 cutting, only to seed the tail block. Rows that hash only the full blocks are read the
-same way. A row with more hashes than that, or whose full blocks hold more tokens than
-the prompt, is counted as `malformed_hashes`.
+same way. A row with more hashes than `ceil(input_length / trace_block_size)`, or whose full
+blocks hold more tokens than the prompt, is counted as `malformed_hashes`.
 
 Trace files are named by upload time, and a file can hold rows received long before it
 was written, so every file is read and rows are windowed by `request_received_ms`:
@@ -148,7 +148,10 @@ tokens that follow start with a `live` assistant block of the previous request's
 `output_tokens`, then the rest as `user` blocks. A live block replays the whole real
 reply, so when the extension holds fewer tokens than the previous output, the reply is
 generated at the size that fits instead, with no live block, and counted as
-`live_clamped`. Each trajectory carries
+`live_clamped`. Any other request in a trajectory (a branch, which carries
+`reset_before`) starts with the blocks already sent for the longest prefix it shares
+with an earlier request of the trajectory, so a branch replays the same bytes as the
+turn it branches from, earlier live replies included. Each trajectory carries
 `metadata` with the model name, block size and, when joined, the alias and principal.
 
 ### Joining analytics on `x_request_id`
@@ -160,7 +163,8 @@ are joined to a gateway analytics table on `--analytics-id-column` (default
 `timestamp`) to the time span of the rows with an id, widened by 15 minutes on each
 side. The id is compared as a string, case-insensitively. A matched row's `user_id`
 (else its `api_key_id`) becomes the principal, which links sessions and is what
-`--principal-id` filters on, and its `model` becomes the trajectory's `alias`.
+`--principal-id` filters on, and its `model` becomes the trajectory's `alias`. Principals come only from the join, so
+`--principal-id` needs one.
 Unmatched rows keep no principal and link by agent session id alone, if they have one.
 `--dump-rows-jsonl` saves the analytics rows and `--analytics-rows-jsonl` joins against
 such a file instead of ClickHouse:

@@ -166,8 +166,12 @@ def record_from_trace(
     # partial hash changes as soon as a later turn fills that block, so it never links or cuts.
     hashed_tokens = input_length if _is_count(input_length) else request.get("input_tokens")
     partial_hash = None
-    if _is_count(hashed_tokens) and hashed_tokens % block_size and len(chain) == hashed_tokens // block_size + 1:
-        partial_hash = chain.pop()
+    if _is_count(hashed_tokens):
+        if len(chain) > -(-hashed_tokens // block_size):
+            stats.malformed_hashes += 1
+            return None
+        if hashed_tokens % block_size and len(chain) == hashed_tokens // block_size + 1:
+            partial_hash = chain.pop()
     full_tokens = block_size * len(chain)
     prompt_tokens = request.get("input_tokens")
     if not _is_count(prompt_tokens) or prompt_tokens < full_tokens:
@@ -267,7 +271,8 @@ def load_trace_records(
         (window_start - link_window).timestamp() * 1000.0,
         window_end.timestamp() * 1000.0,
     )
-    model_needle = None if model is None else json.dumps(model, ensure_ascii=False)
+    # A cheap substring test before parsing. Only for ASCII names: a writer may escape others.
+    model_needle = json.dumps(model) if model is not None and model.isascii() else None
     records: list[TraceRecord] = []
     for path in trace_files(paths):
         for line in _trace_lines(path, stats):
@@ -474,7 +479,7 @@ def record_segments(record: TraceRecord, cuts: set[int]) -> list[tuple[int, str,
     """``(end position, seed, tokens)`` for each segment of the record's full blocks."""
 
     chain = record.chain
-    positions = sorted(chain.index(hash_) for hash_ in cuts.intersection(chain))  # type: ignore[attr-defined]
+    positions = [position for position, hash_ in enumerate(chain) if hash_ in cuts]
     segments = []
     start = 0
     for position in positions:
@@ -522,12 +527,18 @@ def _user(seed: str, tokens: int) -> dict[str, Any]:
     return {"seed": seed, "tokens": int(tokens), "role": "user"}
 
 
+# Per trajectory: for a segment seed, the blocks already sent that render the prompt exactly up
+# to the end of that segment, as (blocks, count).
+Renderings = dict[str, tuple[list[dict[str, Any]], int]]
+
+
 def trace_request_blocks(
     record: TraceRecord,
     previous: Optional[TraceRecord],
     previous_blocks: Sequence[Mapping[str, Any]],
     cuts: set[int],
     stats: TraceStats,
+    renderings: Optional[Renderings] = None,
 ) -> list[dict[str, Any]]:
     """Blocks for one request; ``previous`` is the request it extends, if any.
 
@@ -535,12 +546,28 @@ def trace_request_blocks(
     earlier replies and tails keep their seeds and roles). The tokens after them are the previous
     reply, as a ``live`` block of the previous output, and then new user content. The previous
     tail is already in ``previous_blocks``, so it is carved off the extension first.
+
+    Any other request starts from the longest prefix it shares with a request already sent in the
+    trajectory, rendered with the blocks sent then (``renderings``), so a branch replays the same
+    bytes as the turn it branches from. ``renderings`` is updated with this request's blocks.
     """
 
     segments = record_segments(record, cuts)
     tail = [(tail_seed(record), record.tail_tokens)] if record.tail_tokens > 0 else []
+    renderings = renderings if renderings is not None else {}
     if previous is None:
-        return [_user(seed, tokens) for _, seed, tokens in segments] + [_user(seed, tokens) for seed, tokens in tail]
+        blocks: list[dict[str, Any]] = []
+        shared = 0
+        for end, seed, _ in reversed(segments):
+            rendering = renderings.get(seed)
+            if rendering is not None:
+                blocks = [dict(block) for block in rendering[0][: rendering[1]]]
+                shared = end
+                break
+        blocks += [_user(seed, tokens) for end, seed, tokens in segments if end > shared]
+        blocks += [_user(seed, tokens) for seed, tokens in tail]
+        _record_renderings(record, segments, blocks, renderings)
+        return blocks
 
     shared = len(previous.chain)
     blocks = [dict(block) for block in previous_blocks]
@@ -560,7 +587,25 @@ def trace_request_blocks(
         extension = _carve(extension, reply)
         stats.live_blocks += 1
     blocks.extend(_piece_block(*piece) for piece in extension)
+    _record_renderings(record, segments, blocks, renderings)
     return blocks
+
+
+def _record_renderings(
+    record: TraceRecord,
+    segments: Sequence[tuple[int, str, int]],
+    blocks: list[dict[str, Any]],
+    renderings: Renderings,
+) -> None:
+    """Remember, for each segment end that falls on a block boundary, the blocks up to it."""
+
+    ends = {record.block_size * end: seed for end, seed, _ in segments}
+    total = 0
+    for count, block in enumerate(blocks, start=1):
+        total += block["tokens"]
+        seed = ends.get(total)
+        if seed is not None:
+            renderings.setdefault(seed, (blocks, count))
 
 
 # ---------------------------------------------------------------------------
@@ -588,13 +633,14 @@ def trace_trajectory_plan(
     plan_requests = []
     previous: Optional[TraceRecord] = None
     previous_blocks: list[dict[str, Any]] = []
+    renderings: Renderings = {}
     for position, record in enumerate(requests):
         if position == 0:
             reset_before = trajectory.began_before_window
         else:
             reset_before = not extends(previous.chain, record.chain)  # type: ignore[union-attr]
         blocks = trace_request_blocks(
-            record, None if reset_before else previous, previous_blocks, group_cuts, stats
+            record, None if reset_before else previous, previous_blocks, group_cuts, stats, renderings
         )
         prompt_tokens = int(record.prompt_tokens or 0)
         request: dict[str, Any] = {

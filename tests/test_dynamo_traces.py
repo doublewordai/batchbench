@@ -203,6 +203,31 @@ class BlockTest(unittest.TestCase):
             self.assertEqual(sum(block["tokens"] for block in request["blocks"]), request["prompt_tokens"])
         self.assertEqual(trace_stats.live_blocks, 2)
 
+    def test_a_branch_replays_the_blocks_already_sent_for_its_shared_prefix(self):
+        first = trace(T0, ["a"], tail=10, session_id="sess-1")
+        extension = trace(T0 + timedelta(seconds=5), ["a", "b", "c"], tail=4, session_id="sess-1")
+        branch = trace(T0 + timedelta(seconds=9), ["a", "b", "d"], tail=6, session_id="sess-1")
+        plans = plans_for([first, extension, branch])
+        self.assertEqual(validate_plans(plans), [])
+        self.assertEqual(len(plans), 1)
+        _, turn2, turn3 = plans[0]["requests"]
+        self.assertTrue(turn3["reset_before"])
+        # Turn two renders blocks a and b as a, the first tail, the live reply and the rest of b.
+        b_end = 2 * 64
+        prefix, total = [], 0
+        for block in turn2["blocks"]:
+            if total == b_end:
+                break
+            prefix.append(block)
+            total += block["tokens"]
+        self.assertEqual(total, b_end)
+        self.assertTrue(any(block.get("live") for block in prefix))
+        # The branch shares those 128 hashed tokens, so it reuses the same seeds (the agent
+        # replays a seed it has sent, live reply included, with the same bytes).
+        self.assertEqual(turn3["blocks"][: len(prefix)], prefix)
+        self.assertEqual(turn3["blocks"][len(prefix)]["seed"], seeds(["a", "b", "d"])[-1])
+        self.assertEqual(sum(block["tokens"] for block in turn3["blocks"]), turn3["prompt_tokens"])
+
     def test_a_reply_longer_than_the_extension_is_generated_not_live(self):
         first = trace(T0, ["s1"], tail=30, output_tokens=500, session_id="sess-1")
         second = trace(T0 + timedelta(seconds=5), ["s1", "u2"], tail=7, session_id="sess-1")
@@ -243,9 +268,14 @@ class HashShapeTest(unittest.TestCase):
         too_many["request"]["replay"]["input_sequence_hashes"].append(5)
         exact_with_extra = trace(T0, ["a", "b"], tail=0)
         exact_with_extra["request"]["replay"]["input_sequence_hashes"].append(5)
+        # A large input_tokens does not excuse more hashes than input_length has blocks.
+        inflated = trace(T0, ["a", "b"], tail=10)
+        inflated["request"]["replay"]["input_sequence_hashes"].append(5)
+        inflated["request"]["input_tokens"] = 10_000
         self.assertIsNone(record_from_trace(too_many, stats))
         self.assertIsNone(record_from_trace(exact_with_extra, stats))
-        self.assertEqual(stats.malformed_hashes, 2)
+        self.assertIsNone(record_from_trace(inflated, stats))
+        self.assertEqual(stats.malformed_hashes, 3)
 
     def test_a_turn_extending_a_partial_last_block_links_and_seeds_its_tail(self):
         first = trace(T0, ["s1", "u1"], tail=40)
@@ -369,6 +399,15 @@ class SourceTest(unittest.TestCase):
         self.assertFalse(any(block.get("live") for block in first["blocks"]))
         self.assertEqual(plans[0]["start_after_ms"], 5 * 60_000)
 
+    def test_non_ascii_model_names_match_escaped_or_not(self):
+        name = "example-org/modèle-a"
+        escaped = json.dumps(trace(T0, ["s1"], model=name))  # ensure_ascii escapes the name
+        plain = json.dumps(trace(T0 + timedelta(seconds=1), ["s2"], model=name), ensure_ascii=False)
+        path = self.directory / "mixed.jsonl"
+        path.write_text(escaped + "\n" + plain + "\n", encoding="utf-8")
+        records = load_trace_records([str(path)], WINDOW_START, WINDOW_END, model=name)
+        self.assertEqual(len(records), 2)
+
     def test_glob_and_missing_paths(self):
         self.write("a.jsonl", [trace(T0, ["s1"])], gz=False)
         records = load_trace_records([str(self.directory / "*.jsonl")], WINDOW_START, WINDOW_END)
@@ -422,6 +461,8 @@ class SourceTest(unittest.TestCase):
         self.assertEqual(code, 1)
         code, _ = self.run_cli("--analytics-table", "requests")
         self.assertEqual(code, 1)  # no ClickHouse URL
+        code, _ = self.run_cli("--principal-id", USER_A)
+        self.assertEqual(code, 1)  # principals come only from the join
 
     def test_exported_manifest_dry_runs_in_batchbench_agent(self):
         binary = find_agent_binary()
