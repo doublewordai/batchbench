@@ -70,6 +70,7 @@ class TraceRecord(ChainRecord):
     x_request_id: Optional[str] = None
     session_id: Optional[str] = None
     alias: Optional[str] = None
+    partial_hash: Optional[int] = None
 
     @property
     def link_key(self) -> Any:
@@ -161,6 +162,12 @@ def record_from_trace(
     except (TypeError, OverflowError):
         stats.malformed_hashes += 1
         return None
+    # Dynamo hashes every full block and then, when tokens remain, the partial last block. The
+    # partial hash changes as soon as a later turn fills that block, so it never links or cuts.
+    hashed_tokens = input_length if _is_count(input_length) else request.get("input_tokens")
+    partial_hash = None
+    if _is_count(hashed_tokens) and hashed_tokens % block_size and len(chain) == hashed_tokens // block_size + 1:
+        partial_hash = chain.pop()
     full_tokens = block_size * len(chain)
     prompt_tokens = request.get("input_tokens")
     if not _is_count(prompt_tokens) or prompt_tokens < full_tokens:
@@ -192,6 +199,7 @@ def record_from_trace(
         finish_reason=None if finish_reason is None else str(finish_reason),
         block_size=int(block_size),
         tail_tokens=int(prompt_tokens) - full_tokens,
+        partial_hash=partial_hash,
         request_id=str(request.get("request_id") or ""),
         x_request_id=normalize_request_id(request.get("x_request_id")),
         session_id=None if session_id in (None, "") else str(session_id),
@@ -484,8 +492,11 @@ def _request_anchor(record: TraceRecord) -> str:
 
 
 def tail_seed(record: TraceRecord) -> str:
-    """The tokens past the last full block are this request's own; the seed says so."""
+    """The tokens past the last full block: seeded by Dynamo's partial-block hash when the row
+    has one (identical prompts share it), otherwise by the request itself."""
 
+    if record.partial_hash is not None:
+        return f"{hash_seed(record.partial_hash)}:tail{record.tail_tokens}"
     return f"{_request_anchor(record)}:tail{record.tail_tokens}"
 
 

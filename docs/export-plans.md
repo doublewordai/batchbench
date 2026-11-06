@@ -106,10 +106,18 @@ Fields read from each row:
 | `request.input_tokens` | `prompt_tokens` (`replay.input_length` when absent or short of the hashed blocks) |
 | `request.output_tokens` | `output_tokens`; rows without a positive count are dropped |
 | `request.replay.trace_block_size` | Tokens per hashed block; varies by deployment |
-| `request.replay.input_sequence_hashes` | Cumulative hash of each full block of the prompt |
+| `request.replay.input_length` | Hashed prompt length |
+| `request.replay.input_sequence_hashes` | Cumulative hash of each full block of the prompt, then of the partial last block when one remains |
 | `request.x_request_id` | The caller's `x-request-id` header, when it sent one |
 | `agent_context.session_id` | Agent session, when present |
 | `request.finish_reason_metadata.finish_reason` | Picks among retried attempts |
+
+There are `ceil(input_length / trace_block_size)` hashes. When the length is not a
+multiple of the block size, the last hash covers the partial last block; it changes as
+soon as a later turn fills that block, so it is split off and never used for linking or
+cutting, only to seed the tail block. Rows that hash only the full blocks are read the
+same way. A row with more hashes than that, or whose full blocks hold more tokens than
+the prompt, is counted as `malformed_hashes`.
 
 Trace files are named by upload time, and a file can hold rows received long before it
 was written, so every file is read and rows are windowed by `request_received_ms`:
@@ -129,8 +137,8 @@ ends or where two such chains continue differently. Each piece becomes one `user
 whose seed is the piece's last hash and whose size is the block size times its hash
 count, so a prefix shared by many requests (a system prompt, a common document) replays
 with identical bytes everywhere. The tokens past the last full block
-(`input_tokens - block_size * hashes`) become a final `user` block with a seed of its
-own, so `sum(blocks.tokens) = prompt_tokens` and `overhead_tokens` is 0. A final block
+(`input_tokens - block_size * full blocks`) become a final `user` block, seeded by the
+partial-block hash (so identical prompts share it) or, without one, by the request, so `sum(blocks.tokens) = prompt_tokens` and `overhead_tokens` is 0. A final block
 rather than overhead keeps the replayed prompt the recorded length, which matters for
 block sizes in the thousands.
 
@@ -188,7 +196,7 @@ Besides the usual counts, the summary line reports, for traces: `files`,
   straddles message boundaries, and the live reply starts where the previous prompt's
   tokens end rather than at a message boundary.
 - **Large blocks hide divergence.** Two prompts that differ only inside their last
-  partial block have the same hashes. A turn that adds less than one block keeps its
+  partial block have the same full-block hashes. A turn that adds less than one block keeps its
   chain unchanged, so it is not a strict extension and starts a new trajectory; with
   block sizes in the thousands, many sessions fall apart into single requests. Without
   a principal or session id, a short request whose distinctive content sits in its tail

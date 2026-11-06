@@ -51,6 +51,12 @@ def chain_of(labels, block_size=64):
     return hashes
 
 
+def partial_of(labels, tail_label, block_size=64):
+    """The hash Dynamo appends for a partial last block: the full chain plus the tail's tokens."""
+
+    return chain_of(list(labels) + [f"partial:{tail_label}"], block_size)[-1]
+
+
 _request_counter = [0]
 
 
@@ -66,22 +72,28 @@ def trace(
     session_id=None,
     hashes=None,
     finish_reason="stop",
+    partial=True,
 ):
+    """A request_end row shaped like production: with ``partial`` (the default) and a non-empty
+    tail, the hashes end with one for the partial last block, so there are ceil(length / block
+    size) of them."""
+
     _request_counter[0] += 1
-    hashes = chain_of(labels, block_size) if hashes is None else hashes
+    full = chain_of(labels, block_size) if hashes is None else list(hashes)
+    hashes = full + ([partial_of(labels, tail, block_size) if labels else 1] if partial and tail else [])
     request = {
         "request_id": f"req-{_request_counter[0]:04d}",
         "model": model,
         "request_received_ms": int(received.timestamp() * 1000),
         "total_time_ms": total_time_ms,
         "ttft_ms": 50.0,
-        "input_tokens": block_size * len(hashes) + tail,
+        "input_tokens": block_size * len(full) + tail,
         "output_tokens": output_tokens,
         "cached_tokens": 0,
         "worker": {"decode_worker_id": 1},
         "replay": {
             "trace_block_size": block_size,
-            "input_length": block_size * len(hashes) + tail,
+            "input_length": block_size * len(full) + tail,
             "input_sequence_hashes": hashes,
         },
     }
@@ -204,6 +216,58 @@ class BlockTest(unittest.TestCase):
         ])
         self.assertEqual((trace_stats.live_clamped, trace_stats.live_blocks), (1, 0))
         self.assertEqual(validate_plans(plans), [])
+
+
+class HashShapeTest(unittest.TestCase):
+    def test_partial_last_block_hash_is_split_off(self):
+        stats = TraceStats()
+        ceil_row = trace(T0, ["a", "b"], tail=10)
+        self.assertEqual(len(ceil_row["request"]["replay"]["input_sequence_hashes"]), 3)
+        record = record_from_trace(ceil_row, stats)
+        self.assertEqual(list(record.chain), chain_of(["a", "b"]))
+        self.assertEqual((record.tail_tokens, record.partial_hash), (10, partial_of(["a", "b"], 10)))
+
+        exact = trace(T0, ["a", "b"], tail=0)
+        self.assertEqual(len(exact["request"]["replay"]["input_sequence_hashes"]), 2)
+        record = record_from_trace(exact, stats)
+        self.assertEqual((len(record.chain), record.tail_tokens, record.partial_hash), (2, 0, None))
+
+        # Rows without the partial hash (floor) still load, with the tail unhashed.
+        floor_row = trace(T0, ["a", "b"], tail=10, partial=False)
+        record = record_from_trace(floor_row, stats)
+        self.assertEqual((len(record.chain), record.tail_tokens, record.partial_hash), (2, 10, None))
+        self.assertEqual(stats.malformed_hashes, 0)
+
+        # More hashes than ceil(length / block size), or a partial hash on an exact multiple.
+        too_many = trace(T0, ["a", "b"], tail=10)
+        too_many["request"]["replay"]["input_sequence_hashes"].append(5)
+        exact_with_extra = trace(T0, ["a", "b"], tail=0)
+        exact_with_extra["request"]["replay"]["input_sequence_hashes"].append(5)
+        self.assertIsNone(record_from_trace(too_many, stats))
+        self.assertIsNone(record_from_trace(exact_with_extra, stats))
+        self.assertEqual(stats.malformed_hashes, 2)
+
+    def test_a_turn_extending_a_partial_last_block_links_and_seeds_its_tail(self):
+        first = trace(T0, ["s1", "u1"], tail=40)
+        # Turn two fills turn one's partial block, so its third hash differs from turn one's
+        # partial hash: only full blocks may be required to match.
+        second = trace(T0 + timedelta(seconds=5), ["s1", "u1", "u1-filled", "x1"], tail=12)
+        self.assertNotIn(
+            first["request"]["replay"]["input_sequence_hashes"][-1],
+            second["request"]["replay"]["input_sequence_hashes"],
+        )
+        trace_stats = TraceStats()
+        plans = plans_for([first, second], trace_stats=trace_stats)
+        self.assertEqual(validate_plans(plans), [])
+        self.assertEqual(len(plans), 1)
+        turn1, turn2 = plans[0]["requests"]
+        tail_block = turn1["blocks"][-1]
+        self.assertEqual(tail_block, {"seed": f"{hash_seed(partial_of(['s1', 'u1'], 40))}:tail40", "tokens": 40, "role": "user"})
+        self.assertNotIn("reset_before", turn2)
+        self.assertEqual(turn2["blocks"][: len(turn1["blocks"])], turn1["blocks"])
+        self.assertTrue(turn2["blocks"][len(turn1["blocks"])]["live"])
+        self.assertEqual(sum(block["tokens"] for block in turn2["blocks"]), turn2["prompt_tokens"])
+        self.assertEqual(trace_stats.live_blocks, 1)
 
 
 class LinkingTest(unittest.TestCase):
