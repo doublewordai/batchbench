@@ -205,10 +205,16 @@ Besides the usual counts, the summary line reports, for traces: `files`,
   block sizes in the thousands, many sessions fall apart into single requests. Without
   a principal or session id, a short request whose distinctive content sits in its tail
   can be linked to an unrelated longer request that shares its full blocks.
-- **Reply length is approximate.** The live block is the previous `output_tokens`;
-  when a backend drops reasoning from the history, the reply in the next prompt is
-  shorter than that, and the new user content is undercounted by the difference. When
-  the reply does not fit at all, it is generated rather than replayed live.
+- **Reply length is overstated for reasoning models.** The reply is sized from the
+  previous `output_tokens`, which for a reasoning model include the reasoning tokens.
+  Clients usually do not send reasoning back, so the copy of the reply in the next
+  prompt is shorter than that. The trace has no reasoning token count to subtract, so
+  the reply block is oversized and eats into the new user or tool content that follows.
+  When the reply does not fit in the extension at all, it is generated at the size that
+  fits rather than replayed live. `live_clamped` in the summary counts those cases: for
+  a reasoning model expect most extensions to be clamped (for example, most of the
+  extensions of a hypothetical `example-org/reasoner-a`), which means the live replies
+  are not replayed and each turn's new content is undercounted.
 - **No `stream` or `max_tokens`.** Traces do not record them, so they are omitted.
 - **Timing starts at Dynamo.** `request_received_ms` is when the frontend received the
   request, after any gateway queueing.
