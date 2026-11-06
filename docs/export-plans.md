@@ -211,10 +211,9 @@ Besides the usual counts, the summary line reports, for traces: `files`,
   prompt is shorter than that. The trace has no reasoning token count to subtract, so
   the reply block is oversized and eats into the new user or tool content that follows.
   When the reply does not fit in the extension at all, it is generated at the size that
-  fits rather than replayed live. `live_clamped` in the summary counts those cases: for
-  a reasoning model expect most extensions to be clamped (for example, most of the
-  extensions of a hypothetical `example-org/reasoner-a`), which means the live replies
-  are not replayed and each turn's new content is undercounted.
+  fits rather than replayed live. `live_clamped` in the summary counts those cases. When it is
+  a large share of `live_clamped + live_blocks`, as is typical for a reasoning model,
+  most replies are not replayed live and each turn's new content is undercounted.
 - **No `stream` or `max_tokens`.** Traces do not record them, so they are omitted.
 - **Timing starts at Dynamo.** `request_received_ms` is when the frontend received the
   request, after any gateway queueing.
