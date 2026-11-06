@@ -147,15 +147,16 @@ emitted for that request (its replies and tail keep their seeds and roles), and 
 tokens that follow start with a `live` assistant block of the previous request's
 `output_tokens`, then the rest as `user` blocks. A live block replays the whole real
 reply, so when the extension holds fewer tokens than the previous output, the reply is
-generated at the size that fits instead, with no live block, and counted as
-`live_clamped`. Only the newest reply in a request is `live`: earlier replies
+generated at the size that fits instead (split where segments end), with no live
+block, and counted as `live_clamped`. Only the newest reply in a request is `live`: earlier replies
 repeat as plain assistant blocks under the seeds they were sent with, and the agent
 replays a seed it has already sent in the trajectory with the same bytes, a real reply
 included. Any other request in a trajectory (a branch, which carries `reset_before`)
 starts with the blocks already sent for the longest prefix it shares with an earlier
 request of the trajectory. A reset clears the agent's cache, so the branch's generated
 blocks come out the same from their seeds, but its copies of earlier replies are
-generated rather than the model's real text. Each trajectory carries
+generated rather than the model's real text. A live reply cannot be split, so a
+branch that diverges inside one reuses the blocks only up to the reply's start. Each trajectory carries
 `metadata` with the model name, block size and, when joined, the alias and principal.
 
 ### Joining analytics on `x_request_id`

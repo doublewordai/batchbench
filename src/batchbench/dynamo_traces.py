@@ -585,10 +585,12 @@ def trace_request_blocks(
     reply = int(previous.completion_tokens or 0)
     available = sum(left for _, _, left in extension)
     if reply > available:
-        # The live block replays the whole real reply, which would not fit: generate it instead.
+        # The live block replays the whole real reply, which would not fit: generate it instead,
+        # one block per remaining piece so segment ends stay block boundaries for later branches.
         stats.live_clamped += 1
-        if available > 0:
-            blocks.append({"seed": f"{_request_anchor(previous)}:reply{available}", "tokens": available, "role": "assistant"})
+        for seed, full, left in extension:
+            piece = seed if left == full else f"{seed}:rest{left}"
+            blocks.append({"seed": f"{piece}:reply", "tokens": left, "role": "assistant"})
         extension = []
     elif reply > 0:
         blocks.append({"seed": f"{_request_anchor(previous)}:reply{reply}", "tokens": reply, "role": "assistant", "live": True})

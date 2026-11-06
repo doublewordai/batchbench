@@ -239,6 +239,21 @@ class BlockTest(unittest.TestCase):
         self.assertEqual(turn3["blocks"][len(prefix)]["seed"], seeds(["a", "b", "d"])[-1])
         self.assertEqual(sum(block["tokens"] for block in turn3["blocks"]), turn3["prompt_tokens"])
 
+    def test_a_branch_keeps_a_generated_reply_that_spans_its_cut(self):
+        first = trace(T0, ["a"], tail=10, output_tokens=500, session_id="sess-1")
+        extension = trace(T0 + timedelta(seconds=5), ["a", "b", "c"], tail=4, session_id="sess-1")
+        branch = trace(T0 + timedelta(seconds=9), ["a", "b", "d"], tail=6, session_id="sess-1")
+        plans = plans_for([first, extension, branch])
+        self.assertEqual(validate_plans(plans), [])
+        _, turn2, turn3 = plans[0]["requests"]
+        # The 500-token reply does not fit in the 54 + 64 + 4 tokens after the first tail, so it
+        # is generated, split where block b ends; the branch repeats it up to that cut.
+        self.assertEqual([(block["tokens"], block["role"]) for block in turn2["blocks"]], [
+            (64, "user"), (10, "user"), (54, "assistant"), (64, "assistant"), (4, "assistant"),
+        ])
+        self.assertEqual(turn3["blocks"][:3], turn2["blocks"][:3])
+        self.assertEqual(turn3["blocks"][3]["seed"], seeds(["a", "b", "d"])[-1])
+
     def test_a_reply_longer_than_the_extension_is_generated_not_live(self):
         first = trace(T0, ["s1"], tail=30, output_tokens=500, session_id="sess-1")
         second = trace(T0 + timedelta(seconds=5), ["s1", "u2"], tail=7, session_id="sess-1")
@@ -246,9 +261,9 @@ class BlockTest(unittest.TestCase):
         plans = plans_for([first, second], trace_stats=trace_stats)
         blocks = plans[0]["requests"][1]["blocks"]
         # 64 + 7 extension tokens: 30 are the previous tail, and the 500-token reply would not fit
-        # in the other 41, so they are generated rather than replaying the real reply.
+        # in the other 41, so they are generated (split where block u2 ends) rather than live.
         self.assertEqual([(block["tokens"], block["role"], block.get("live", False)) for block in blocks], [
-            (64, "user", False), (30, "user", False), (41, "assistant", False),
+            (64, "user", False), (30, "user", False), (34, "assistant", False), (7, "assistant", False),
         ])
         self.assertEqual((trace_stats.live_clamped, trace_stats.live_blocks), (1, 0))
         self.assertEqual(validate_plans(plans), [])
