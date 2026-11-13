@@ -403,6 +403,12 @@ class LinkingTest(unittest.TestCase):
             {"request_id": second["request"]["request_id"], "x_request_id": None, "received_ms": second["request"]["request_received_ms"]},
         ])
 
+    def test_metadata_names_a_missing_request_id_null(self):
+        row = trace(T0, ["s1", "u1"])
+        del row["request"]["request_id"]
+        plans = plans_for([row])
+        self.assertEqual(plans[0]["metadata"]["requests"][0]["request_id"], None)
+
 
 class SourceTest(unittest.TestCase):
     def setUp(self):
