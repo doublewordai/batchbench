@@ -142,6 +142,8 @@ pub struct AgentLoopConfig {
     pub replay_turn_overhead_tokens: usize,
     pub admission: AdmissionMode,
     pub time_scale: f64,
+    /// Keep one `AgentRequestRecord` per request in the report.
+    pub record_requests: bool,
 }
 
 /// How replayed trajectories enter the benchmark.
@@ -221,6 +223,7 @@ impl AgentLoopConfig {
             replay_turn_overhead_tokens: 0,
             admission: AdmissionMode::ClosedLoop,
             time_scale: 1.0,
+            record_requests: false,
         })
     }
 
@@ -330,6 +333,11 @@ impl AgentLoopConfig {
         }
         self.time_scale = time_scale;
         Ok(self)
+    }
+
+    pub fn with_request_records(mut self, record_requests: bool) -> Self {
+        self.record_requests = record_requests;
+        self
     }
 
     pub fn add_header(mut self, name: HeaderName, value: HeaderValue) -> Self {
@@ -442,6 +450,30 @@ pub struct AgentLifecycleRecord {
     pub completed: bool,
 }
 
+/// Client-side timing of one request, retries included.
+#[derive(Clone, Debug)]
+pub struct AgentRequestRecord {
+    pub agent_id: usize,
+    pub trajectory_id: String,
+    pub invocation: usize,
+    /// When the first attempt started, on the benchmark clock.
+    pub sent_at: Duration,
+    /// From `sent_at` to the first streamed chunk carrying output, in the successful attempt.
+    pub first_token: Option<Duration>,
+    /// From `sent_at` to the last streamed chunk carrying output, in the successful attempt.
+    pub last_token: Option<Duration>,
+    /// From `sent_at` until the request succeeded or its last attempt failed.
+    pub latency: Duration,
+    pub prompt_tokens: Option<u64>,
+    pub completion_tokens: Option<u64>,
+    /// `usage.prompt_tokens_details.cached_tokens`, when the backend reports it.
+    pub cached_tokens: Option<u64>,
+    pub attempts: usize,
+    /// Status of the last attempt's response; `None` when no response arrived.
+    pub http_status: Option<u16>,
+    pub error: Option<String>,
+}
+
 #[derive(Clone, Debug)]
 pub struct AgentBenchmarkReport {
     pub total_agents: usize,
@@ -469,6 +501,9 @@ pub struct AgentBenchmarkReport {
     pub agent_end_to_end_latency_p99: Option<Duration>,
     pub failures: Vec<AgentFailureRecord>,
     pub agent_lifecycles: Vec<AgentLifecycleRecord>,
+    /// One record per request, ordered by agent and invocation; empty unless
+    /// `record_requests` is set.
+    pub request_records: Vec<AgentRequestRecord>,
     /// Schema v2 live assistant blocks that had no previous reply to substitute.
     pub live_block_fallbacks: u64,
     /// Open-loop admissions delayed because `max_active_agents` was reached.
@@ -496,6 +531,7 @@ struct AgentWorkerReport {
     tool_call_latency: Duration,
     latencies: Vec<Duration>,
     failures: Vec<AgentFailureRecord>,
+    request_records: Vec<AgentRequestRecord>,
     dry_run_records: Vec<DryRunRecord>,
     live_block_fallbacks: u64,
 }
@@ -523,6 +559,7 @@ impl AgentWorkerReport {
             tool_call_latency: Duration::ZERO,
             latencies: Vec::new(),
             failures: Vec::new(),
+            request_records: Vec::new(),
             dry_run_records: Vec::new(),
             live_block_fallbacks: 0,
         }
@@ -657,8 +694,24 @@ impl BlockSpec {
 struct RequestResult {
     prompt_tokens: u64,
     completion_tokens: u64,
+    cached_tokens: Option<u64>,
     assistant_message: Value,
+    /// Streamed responses: arrival of the first and last chunks carrying output.
+    first_token_at: Option<Instant>,
+    last_token_at: Option<Instant>,
+}
+
+/// One request, retries included.
+#[derive(Debug)]
+struct RequestOutcome {
+    /// When the first attempt started.
+    sent_at: Instant,
+    /// From `sent_at` until the request succeeded or its last attempt failed.
     latency: Duration,
+    attempts: usize,
+    /// Status of the last attempt's response, if one arrived.
+    http_status: Option<u16>,
+    result: Result<RequestResult>,
 }
 
 #[derive(Debug)]
@@ -814,6 +867,7 @@ struct ReportAccumulator {
     latencies: Vec<Duration>,
     agent_end_to_end_latencies: Vec<Duration>,
     failures: Vec<AgentFailureRecord>,
+    request_records: Vec<AgentRequestRecord>,
     dry_run_records: Vec<DryRunRecord>,
     agent_lifecycles: Vec<AgentLifecycleRecord>,
     live_block_fallbacks: u64,
@@ -861,6 +915,7 @@ impl ReportAccumulator {
             .saturating_add(worker.live_block_fallbacks);
         self.latencies.extend(worker.latencies);
         self.failures.extend(worker.failures);
+        self.request_records.extend(worker.request_records);
         self.dry_run_records.extend(worker.dry_run_records);
     }
 
@@ -877,6 +932,8 @@ impl ReportAccumulator {
         self.agent_end_to_end_latencies.sort();
         self.failures
             .sort_by_key(|failure| (failure.agent_id, failure.invocation));
+        self.request_records
+            .sort_by_key(|record| (record.agent_id, record.invocation));
         self.agent_lifecycles.sort_by_key(|record| record.agent_id);
         let total_requests = self
             .successful_requests
@@ -909,6 +966,7 @@ impl ReportAccumulator {
             agent_end_to_end_latency_p99: percentile(&self.agent_end_to_end_latencies, 0.99),
             failures: self.failures,
             agent_lifecycles: self.agent_lifecycles,
+            request_records: self.request_records,
             live_block_fallbacks: self.live_block_fallbacks,
             late_admissions: outcome.late_admissions,
             max_admission_lag: outcome.max_admission_lag,
@@ -941,6 +999,7 @@ async fn run_closed_loop(
             &mut join_set,
             plan,
             routing_slot,
+            start,
             Duration::ZERO,
             client,
             config,
@@ -1008,6 +1067,7 @@ async fn run_closed_loop(
                         &mut join_set,
                         plan,
                         routing_slot,
+                        start,
                         admitted_at,
                         client,
                         config,
@@ -1213,6 +1273,7 @@ fn spawn_open_loop_agent(
         let result = run_agent(
             plan,
             routing_slot,
+            shared.start.into_std(),
             admitted_at,
             client,
             config,
@@ -1355,10 +1416,12 @@ fn take_prepared_in_fifo_order<T>(
     Ok(ready)
 }
 
+#[allow(clippy::too_many_arguments)]
 fn spawn_agent(
     join_set: &mut JoinSet<Result<AgentWorkerReport>>,
     plan: AgentPlan,
     routing_slot: usize,
+    run_start: Instant,
     admitted_at: Duration,
     client: &Client,
     config: &std::sync::Arc<AgentLoopConfig>,
@@ -1371,6 +1434,7 @@ fn spawn_agent(
         run_agent(
             plan,
             routing_slot,
+            run_start,
             admitted_at,
             client,
             config,
@@ -2533,6 +2597,7 @@ async fn generate_next_reset_prompt(
 async fn run_agent(
     mut plan: AgentPlan,
     routing_slot: usize,
+    run_start: Instant,
     admitted_at: Duration,
     client: Client,
     config: std::sync::Arc<AgentLoopConfig>,
@@ -2550,6 +2615,7 @@ async fn run_agent(
                 plan,
                 initial_prompt,
                 routing_slot,
+                run_start,
                 admitted_at,
                 client,
                 config,
@@ -2562,6 +2628,7 @@ async fn run_agent(
                 plan,
                 cache,
                 routing_slot,
+                run_start,
                 admitted_at,
                 client,
                 config,
@@ -2578,10 +2645,12 @@ async fn run_agent(
 
 /// Schema v1 semantics: a growing conversation where each turn appends the model reply and a
 /// synthetic environment response sized from the manifest.
+#[allow(clippy::too_many_arguments)]
 async fn run_growth_agent(
     plan: AgentPlan,
     initial_prompt: String,
     routing_slot: usize,
+    run_start: Instant,
     admitted_at: Duration,
     client: Client,
     config: std::sync::Arc<AgentLoopConfig>,
@@ -2673,7 +2742,7 @@ async fn run_growth_agent(
             turn.environment_tokens,
         );
         let next_reset = generate_next_reset_prompt(&text_generator, &plan, turn_index);
-        let (request_result, environment_content, next_reset_prompt) =
+        let (outcome, environment_content, next_reset_prompt) =
             tokio::join!(request, environment, next_reset);
         prefetched_reset_prompt = next_reset_prompt?;
         let environment_content = environment_content.with_context(|| {
@@ -2682,10 +2751,20 @@ async fn run_growth_agent(
                 plan.trajectory_id, invocation
             )
         })?;
+        if config.record_requests {
+            report
+                .request_records
+                .push(request_record(&plan, invocation, run_start, &outcome));
+        }
 
-        match request_result {
+        match outcome.result {
             Ok(result) => {
-                record_success(&mut report, &result, &mut previous_prompt_tokens);
+                record_success(
+                    &mut report,
+                    &result,
+                    outcome.latency,
+                    &mut previous_prompt_tokens,
+                );
 
                 if !turn.tool_call_latency.is_zero() {
                     tokio::time::sleep(turn.tool_call_latency).await;
@@ -2732,10 +2811,12 @@ async fn run_growth_agent(
 
 /// Schema v2 semantics: every request's prompt is assembled from its blocks. Generated block
 /// text is cached per trajectory, and live assistant blocks carry the model's previous reply.
+#[allow(clippy::too_many_arguments)]
 async fn run_block_agent(
     plan: AgentPlan,
     mut cache: BlockCache,
     routing_slot: usize,
+    run_start: Instant,
     admitted_at: Duration,
     client: Client,
     config: std::sync::Arc<AgentLoopConfig>,
@@ -2839,7 +2920,7 @@ async fn run_block_agent(
         );
         let prefetch =
             text_generator.generate_blocks(next_turn_prefetch(&plan, turn_index, &cache));
-        let (request_result, prefetched_now) = tokio::join!(request, prefetch);
+        let (outcome, prefetched_now) = tokio::join!(request, prefetch);
         prefetched = prefetched_now.with_context(|| {
             format!(
                 "failed to prefetch blocks for trajectory {:?} invocation {}",
@@ -2847,10 +2928,20 @@ async fn run_block_agent(
                 invocation + 1
             )
         })?;
+        if config.record_requests {
+            report
+                .request_records
+                .push(request_record(&plan, invocation, run_start, &outcome));
+        }
 
-        match request_result {
+        match outcome.result {
             Ok(result) => {
-                record_success(&mut report, &result, &mut previous_prompt_tokens);
+                record_success(
+                    &mut report,
+                    &result,
+                    outcome.latency,
+                    &mut previous_prompt_tokens,
+                );
                 last_reply = Some(normalize_assistant_message(result.assistant_message)?);
 
                 if !turn.tool_call_latency.is_zero() {
@@ -2926,6 +3017,7 @@ async fn resolve_live_blocks(
 fn record_success(
     report: &mut AgentWorkerReport,
     result: &RequestResult,
+    latency: Duration,
     previous_prompt_tokens: &mut u64,
 ) {
     report.successful_requests += 1;
@@ -2941,7 +3033,40 @@ fn record_success(
                 result.prompt_tokens,
             ));
     *previous_prompt_tokens = result.prompt_tokens;
-    report.latencies.push(result.latency);
+    report.latencies.push(latency);
+}
+
+fn request_record(
+    plan: &AgentPlan,
+    invocation: usize,
+    run_start: Instant,
+    outcome: &RequestOutcome,
+) -> AgentRequestRecord {
+    let since_sent = |at: Instant| at.saturating_duration_since(outcome.sent_at);
+    let result = outcome.result.as_ref().ok();
+    AgentRequestRecord {
+        agent_id: plan.agent_id,
+        trajectory_id: plan.trajectory_id.clone(),
+        invocation,
+        sent_at: outcome.sent_at.saturating_duration_since(run_start),
+        first_token: result
+            .and_then(|result| result.first_token_at)
+            .map(since_sent),
+        last_token: result
+            .and_then(|result| result.last_token_at)
+            .map(since_sent),
+        latency: outcome.latency,
+        prompt_tokens: result.map(|result| result.prompt_tokens),
+        completion_tokens: result.map(|result| result.completion_tokens),
+        cached_tokens: result.and_then(|result| result.cached_tokens),
+        attempts: outcome.attempts,
+        http_status: outcome.http_status,
+        error: outcome
+            .result
+            .as_ref()
+            .err()
+            .map(|error| format!("{error:#}")),
+    }
 }
 
 fn dry_run_record(
@@ -3070,29 +3195,28 @@ async fn request_with_retries(
     user_tag: Option<&str>,
     routing_slot: usize,
     stream: bool,
-) -> Result<RequestResult> {
-    let start = Instant::now();
-    let mut last_error = None;
-
-    for attempt in 0..=config.max_retries {
-        match single_attempt(client, config, body, user_tag, routing_slot, stream).await {
-            Ok(mut result) => {
-                result.latency = start.elapsed();
-                return Ok(result);
-            }
-            Err(err) => {
-                last_error = Some(err);
-                if attempt < config.max_retries {
-                    let multiplier = 1u32.checked_shl(attempt.min(31) as u32).unwrap_or(u32::MAX);
-                    tokio::time::sleep(config.retry_delay.saturating_mul(multiplier)).await;
-                }
-            }
+) -> RequestOutcome {
+    let sent_at = Instant::now();
+    let mut attempt = 0;
+    loop {
+        let (http_status, result) =
+            single_attempt(client, config, body, user_tag, routing_slot, stream).await;
+        if result.is_ok() || attempt == config.max_retries {
+            return RequestOutcome {
+                sent_at,
+                latency: sent_at.elapsed(),
+                attempts: attempt + 1,
+                http_status,
+                result,
+            };
         }
+        let multiplier = 1u32.checked_shl(attempt.min(31) as u32).unwrap_or(u32::MAX);
+        tokio::time::sleep(config.retry_delay.saturating_mul(multiplier)).await;
+        attempt += 1;
     }
-
-    Err(last_error.unwrap_or_else(|| anyhow!("request failed without an error")))
 }
 
+/// One attempt: the response status, once a response arrived, and the parsed result.
 async fn single_attempt(
     client: &Client,
     config: &AgentLoopConfig,
@@ -3100,7 +3224,22 @@ async fn single_attempt(
     user_tag: Option<&str>,
     routing_slot: usize,
     stream: bool,
-) -> Result<RequestResult> {
+) -> (Option<u16>, Result<RequestResult>) {
+    let response = match send_request(client, config, body, user_tag, routing_slot).await {
+        Ok(response) => response,
+        Err(error) => return (None, Err(error)),
+    };
+    let status = response.status().as_u16();
+    (Some(status), read_response(response, config, stream).await)
+}
+
+async fn send_request(
+    client: &Client,
+    config: &AgentLoopConfig,
+    body: &Bytes,
+    user_tag: Option<&str>,
+    routing_slot: usize,
+) -> Result<reqwest::Response> {
     if config.verbose {
         let parsed: Value = serde_json::from_slice(body)
             .context("failed to parse serialized request for verbose logging")?;
@@ -3110,7 +3249,14 @@ async fn single_attempt(
     let request = client
         .post(config.endpoint.clone())
         .headers(build_request_headers(config, user_tag, routing_slot)?);
-    let mut response = request.body(body.clone()).send().await?;
+    Ok(request.body(body.clone()).send().await?)
+}
+
+async fn read_response(
+    mut response: reqwest::Response,
+    config: &AgentLoopConfig,
+    stream: bool,
+) -> Result<RequestResult> {
     let status = response.status();
     if !status.is_success() {
         let bytes = response.bytes().await?;
@@ -3121,17 +3267,20 @@ async fn single_attempt(
         ));
     }
 
-    let (usage, assistant_message) = if stream {
+    let (usage, assistant_message, first_token_at, last_token_at) = if stream {
         let mut lines = SseLineBuffer::default();
         let mut completion = StreamedCompletion::default();
+        let mut received_at = Instant::now();
         while let Some(chunk) = response.chunk().await? {
+            received_at = Instant::now();
             for payload in lines.push(&chunk) {
-                completion.absorb(&payload)?;
+                completion.absorb(&payload, received_at)?;
             }
         }
         if let Some(payload) = lines.finish() {
-            completion.absorb(&payload)?;
+            completion.absorb(&payload, received_at)?;
         }
+        let (first_token_at, last_token_at) = (completion.first_token_at, completion.last_token_at);
         let (assistant_message, usage) = completion.into_parts()?;
         if config.verbose {
             println!(
@@ -3142,7 +3291,7 @@ async fn single_attempt(
                 }))
             );
         }
-        (usage, assistant_message)
+        (usage, assistant_message, first_token_at, last_token_at)
     } else {
         let bytes = response.bytes().await?;
         let payload: Value = serde_json::from_slice(&bytes)?;
@@ -3157,7 +3306,7 @@ async fn single_attempt(
             .pointer("/choices/0/message")
             .cloned()
             .ok_or_else(|| anyhow!("response missing choices[0].message"))?;
-        (usage, assistant_message)
+        (usage, assistant_message, None, None)
     };
     let prompt_tokens = usage
         .get("prompt_tokens")
@@ -3171,8 +3320,12 @@ async fn single_attempt(
     Ok(RequestResult {
         prompt_tokens,
         completion_tokens,
+        cached_tokens: usage
+            .pointer("/prompt_tokens_details/cached_tokens")
+            .and_then(Value::as_u64),
         assistant_message,
-        latency: Duration::ZERO,
+        first_token_at,
+        last_token_at,
     })
 }
 
@@ -3215,10 +3368,13 @@ struct StreamedCompletion {
     reasoning_content: Option<String>,
     usage: Option<Value>,
     chunks: usize,
+    /// Arrival of the first and last chunks whose delta carries output.
+    first_token_at: Option<Instant>,
+    last_token_at: Option<Instant>,
 }
 
 impl StreamedCompletion {
-    fn absorb(&mut self, payload: &str) -> Result<()> {
+    fn absorb(&mut self, payload: &str, received_at: Instant) -> Result<()> {
         if payload == "[DONE]" {
             return Ok(());
         }
@@ -3229,6 +3385,10 @@ impl StreamedCompletion {
             self.usage = Some(usage.clone());
         }
         if let Some(delta) = event.pointer("/choices/0/delta") {
+            if delta_carries_output(delta) {
+                self.first_token_at.get_or_insert(received_at);
+                self.last_token_at = Some(received_at);
+            }
             if let Some(text) = delta.get("content").and_then(Value::as_str) {
                 self.content.push_str(text);
             }
@@ -3259,6 +3419,21 @@ impl StreamedCompletion {
         }
         Ok((Value::Object(message), usage))
     }
+}
+
+/// Whether a streamed delta carries generated output: content, reasoning, or tool calls.
+fn delta_carries_output(delta: &Value) -> bool {
+    let has_text = |key: &str| {
+        delta
+            .get(key)
+            .and_then(Value::as_str)
+            .is_some_and(|text| !text.is_empty())
+    };
+    let has_tool_calls = delta
+        .get("tool_calls")
+        .and_then(Value::as_array)
+        .is_some_and(|calls| !calls.is_empty());
+    has_text("content") || has_text("reasoning_content") || has_tool_calls
 }
 
 fn build_request_headers(
@@ -4606,16 +4781,17 @@ mod tests {
             ": keep-alive\n",
             "data: {\"choices\":[{\"delta\":{\"content\":\"lo\"}}]}\ndata: {\"choices\":[],",
         );
+        let now = Instant::now();
         for payload in lines.push(stream.as_bytes()) {
-            completion.absorb(&payload).unwrap();
+            completion.absorb(&payload, now).unwrap();
         }
         for payload in
             lines.push(b"\"usage\":{\"prompt_tokens\":12,\"completion_tokens\":2}}\n\ndata: [DONE]")
         {
-            completion.absorb(&payload).unwrap();
+            completion.absorb(&payload, now).unwrap();
         }
         if let Some(payload) = lines.finish() {
-            completion.absorb(&payload).unwrap();
+            completion.absorb(&payload, now).unwrap();
         }
         let (message, usage) = completion.into_parts().unwrap();
         assert_eq!(message["role"], "assistant");
@@ -4629,6 +4805,207 @@ mod tests {
         };
         assert!(missing_usage.into_parts().is_err());
         assert!(StreamedCompletion::default().into_parts().is_err());
+    }
+
+    #[test]
+    fn token_times_come_from_chunks_that_carry_output() {
+        let start = Instant::now();
+        let at = |millis| start + Duration::from_millis(millis);
+        let events = [
+            (
+                1,
+                r#"{"choices":[{"delta":{"role":"assistant","content":""}}]}"#,
+            ),
+            (
+                2,
+                r#"{"choices":[{"delta":{"reasoning_content":"think"}}]}"#,
+            ),
+            (3, r#"{"choices":[{"delta":{"content":"Hi"}}]}"#),
+            (
+                4,
+                r#"{"choices":[{"delta":{"tool_calls":[{"index":0,"function":{"arguments":"{}"}}]}}]}"#,
+            ),
+            (
+                5,
+                r#"{"choices":[{"delta":{"tool_calls":[]},"finish_reason":"stop"}]}"#,
+            ),
+            (
+                6,
+                r#"{"choices":[],"usage":{"prompt_tokens":3,"completion_tokens":3}}"#,
+            ),
+            (7, "[DONE]"),
+        ];
+        let mut completion = StreamedCompletion::default();
+        for (millis, payload) in events {
+            completion.absorb(payload, at(millis)).unwrap();
+        }
+        assert_eq!(completion.first_token_at, Some(at(2)));
+        assert_eq!(completion.last_token_at, Some(at(4)));
+
+        let mut reasoning_only = StreamedCompletion::default();
+        reasoning_only
+            .absorb(
+                r#"{"choices":[{"delta":{"reasoning_content":"a"}}]}"#,
+                at(1),
+            )
+            .unwrap();
+        reasoning_only
+            .absorb(
+                r#"{"choices":[{"delta":{"reasoning_content":"b"}}]}"#,
+                at(2),
+            )
+            .unwrap();
+        assert_eq!(
+            (reasoning_only.first_token_at, reasoning_only.last_token_at),
+            (Some(at(1)), Some(at(2)))
+        );
+
+        let mut usage_only = StreamedCompletion::default();
+        usage_only
+            .absorb(
+                r#"{"choices":[],"usage":{"prompt_tokens":3,"completion_tokens":0}}"#,
+                at(1),
+            )
+            .unwrap();
+        assert_eq!(usage_only.first_token_at, None);
+        assert_eq!(usage_only.last_token_at, None);
+    }
+
+    /// Serves one scripted HTTP response per connection, then stops.
+    fn scripted_server(responses: Vec<String>) -> (String, std::thread::JoinHandle<()>) {
+        use std::io::{Read, Write};
+
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let url = format!(
+            "http://{}/v1/chat/completions",
+            listener.local_addr().unwrap()
+        );
+        let server = std::thread::spawn(move || {
+            for response in responses {
+                let (mut connection, _) = listener.accept().unwrap();
+                let mut request = Vec::new();
+                let mut buffer = [0u8; 4096];
+                loop {
+                    let read = connection.read(&mut buffer).unwrap();
+                    request.extend_from_slice(&buffer[..read]);
+                    let text = String::from_utf8_lossy(&request).to_ascii_lowercase();
+                    if let Some(header_end) = text.find("\r\n\r\n") {
+                        let body_length = text[..header_end]
+                            .lines()
+                            .find_map(|line| line.strip_prefix("content-length:"))
+                            .map_or(0, |value| value.trim().parse::<usize>().unwrap());
+                        if request.len() >= header_end + 4 + body_length {
+                            break;
+                        }
+                    }
+                }
+                connection.write_all(response.as_bytes()).unwrap();
+            }
+        });
+        (url, server)
+    }
+
+    fn http_response(status: &str, content_type: &str, body: &str) -> String {
+        format!(
+            "HTTP/1.1 {status}\r\ncontent-type: {content_type}\r\ncontent-length: {}\r\nconnection: close\r\n\r\n{body}",
+            body.len()
+        )
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn request_records_cover_retries_streams_and_the_failed_request() {
+        let streamed = |usage: &str| {
+            [
+                r#"{"choices":[{"delta":{"role":"assistant"}}]}"#.to_string(),
+                r#"{"choices":[{"delta":{"reasoning_content":"hm"}}]}"#.to_string(),
+                r#"{"choices":[{"delta":{"content":"ok"}}]}"#.to_string(),
+                format!(r#"{{"choices":[],"usage":{usage}}}"#),
+                "[DONE]".to_string(),
+            ]
+            .iter()
+            .map(|event| format!("data: {event}\n\n"))
+            .collect::<String>()
+        };
+        let (url, server) = scripted_server(vec![
+            http_response("503 Service Unavailable", "text/plain", "busy"),
+            http_response(
+                "200 OK",
+                "text/event-stream",
+                &streamed(
+                    r#"{"prompt_tokens":8,"completion_tokens":2,"prompt_tokens_details":{"cached_tokens":5}}"#,
+                ),
+            ),
+            http_response(
+                "200 OK",
+                "text/event-stream",
+                &streamed(r#"{"prompt_tokens":16,"completion_tokens":2}"#),
+            ),
+            http_response("500 Internal Server Error", "text/plain", "down"),
+            http_response("500 Internal Server Error", "text/plain", "down"),
+        ]);
+        let directory =
+            std::env::temp_dir().join(format!("batchbench-request-records-{}", Uuid::new_v4()));
+        std::fs::create_dir_all(&directory).unwrap();
+        let tokenizer_path = directory.join("tokenizer.json");
+        word_level_tokenizer().save(&tokenizer_path, false).unwrap();
+        let manifest_path = directory.join("plans.jsonl");
+        std::fs::write(
+            &manifest_path,
+            concat!(
+                r#"{"schema_version":2,"trajectory_id":"t","requests":["#,
+                r#"{"prompt_tokens":8,"output_tokens":2,"stream":true},"#,
+                r#"{"prompt_tokens":16,"output_tokens":2,"stream":true},"#,
+                r#"{"prompt_tokens":24,"output_tokens":2,"stream":true},"#,
+                r#"{"prompt_tokens":32,"output_tokens":2,"stream":true}]}"#,
+                "\n"
+            ),
+        )
+        .unwrap();
+        let config = AgentLoopConfig::try_new(
+            url,
+            None,
+            "test-model",
+            1,
+            SampleSpec::fixed(8).unwrap(),
+            SampleSpec::fixed(2).unwrap(),
+            SampleSpec::fixed(6).unwrap(),
+            SampleSpec::fixed(1).unwrap(),
+        )
+        .unwrap()
+        .with_tokenizer_model(tokenizer_path.display().to_string())
+        .with_agent_plans_jsonl(&manifest_path)
+        .with_retry(1, Duration::from_millis(1))
+        .with_request_records(true);
+
+        let report = run_agent_benchmark(config).await.unwrap();
+        server.join().unwrap();
+        std::fs::remove_dir_all(&directory).unwrap();
+
+        assert_eq!(report.completed_agents, 0);
+        assert_eq!(report.failures.len(), 1);
+        let records = &report.request_records;
+        assert_eq!(records.len(), 3);
+
+        let retried = &records[0];
+        assert_eq!((retried.invocation, retried.attempts), (1, 2));
+        assert_eq!(retried.http_status, Some(200));
+        assert_eq!(retried.error, None);
+        assert_eq!(retried.prompt_tokens, Some(8));
+        assert_eq!(retried.completion_tokens, Some(2));
+        assert_eq!(retried.cached_tokens, Some(5));
+        let first_token = retried.first_token.unwrap();
+        assert!(first_token <= retried.last_token.unwrap());
+        assert!(retried.last_token.unwrap() <= retried.latency);
+
+        assert_eq!((records[1].invocation, records[1].attempts), (2, 1));
+        assert_eq!(records[1].cached_tokens, None);
+        assert!(records[1].sent_at >= retried.sent_at + retried.latency);
+
+        let failed = &records[2];
+        assert_eq!((failed.invocation, failed.attempts), (3, 2));
+        assert_eq!(failed.http_status, Some(500));
+        assert!(failed.error.as_deref().unwrap().contains("500"));
+        assert_eq!((failed.prompt_tokens, failed.first_token), (None, None));
     }
 
     #[test]
