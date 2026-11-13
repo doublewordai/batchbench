@@ -108,6 +108,7 @@ Fields read from each row:
 | `request.replay.trace_block_size` | Tokens per hashed block; varies by deployment |
 | `request.replay.input_length` | Hashed prompt length |
 | `request.replay.input_sequence_hashes` | Cumulative hash of each full block of the prompt, then of the partial last block when one remains |
+| `request.request_id` | Dynamo's request id, kept in trajectory `metadata` |
 | `request.x_request_id` | The caller's `x-request-id` header, when it sent one |
 | `agent_context.session_id` | Agent session, when present |
 | `request.finish_reason_metadata.finish_reason` | Picks among retried attempts |
@@ -158,6 +159,10 @@ blocks come out the same from their seeds, but its copies of earlier replies are
 generated rather than the model's real text. A live reply cannot be split, so a
 branch that diverges inside one reuses the blocks only up to the reply's start. Each trajectory carries
 `metadata` with the model name, block size and, when joined, the alias and principal.
+Its `requests` list names the source row of each request, in request order:
+`request_id`, `x_request_id` (lower-cased as for the join; null when the row has none)
+and `received_ms` (the row's `request_received_ms`), so replay results can be joined
+back to the trace rows.
 
 ### Joining analytics on `x_request_id`
 

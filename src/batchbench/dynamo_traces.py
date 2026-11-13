@@ -673,6 +673,14 @@ def trace_trajectory_plan(
         metadata["alias"] = root.alias
     if root.principal_id:
         metadata["principal"] = root.principal_id
+    metadata["requests"] = [
+        {
+            "request_id": record.request_id,
+            "x_request_id": record.x_request_id,
+            "received_ms": round(record.ts.timestamp() * 1000),
+        }
+        for record in requests
+    ]
     return {
         "schema_version": SCHEMA_VERSION,
         "trajectory_id": trajectory_id,

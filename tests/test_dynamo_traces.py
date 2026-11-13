@@ -170,7 +170,15 @@ class BlockTest(unittest.TestCase):
 
         # The other branch shares the system segment's seed, so its bytes replay identically.
         self.assertEqual([block["seed"] for block in other["requests"][0]["blocks"]], [s2, v1])
-        self.assertEqual(session["metadata"], {"source": "dynamo-request-trace", "model": MODEL, "block_size": 64})
+        self.assertEqual(session["metadata"], {
+            "source": "dynamo-request-trace",
+            "model": MODEL,
+            "block_size": 64,
+            "requests": [
+                {"request_id": row["request"]["request_id"], "x_request_id": None, "received_ms": row["request"]["request_received_ms"]}
+                for row in (first, second)
+            ],
+        })
 
     def test_cuts_are_per_model_and_block_size(self):
         records = records_for([
@@ -379,6 +387,21 @@ class LinkingTest(unittest.TestCase):
         kept = next(record for record in records if record.x_request_id)
         self.assertEqual((kept.completion_tokens, kept.x_request_id), (33, request_id))
         self.assertEqual([record.index for record in records], [0, 1])
+
+    def test_metadata_names_the_source_row_of_every_request(self):
+        request_id = "00000000-0000-7000-8000-0000000000D1"
+        failed = trace(T0, ["s1", "u1"], output_tokens=0, finish_reason=None, x_request_id=request_id, session_id="sess-1")
+        first = trace(T0 + timedelta(seconds=1), ["s1", "u1"], x_request_id=request_id, session_id="sess-1")
+        second = trace(T0 + timedelta(seconds=5), ["s1", "u1", "x1"], session_id="sess-1")
+        plans = plans_for([failed, first, second])
+        self.assertEqual(validate_plans(plans), [])
+        self.assertEqual(len(plans), 1)
+        sources = plans[0]["metadata"]["requests"]
+        self.assertEqual(len(sources), len(plans[0]["requests"]))
+        self.assertEqual(sources, [
+            {"request_id": first["request"]["request_id"], "x_request_id": request_id.lower(), "received_ms": first["request"]["request_received_ms"]},
+            {"request_id": second["request"]["request_id"], "x_request_id": None, "received_ms": second["request"]["request_received_ms"]},
+        ])
 
 
 class SourceTest(unittest.TestCase):
