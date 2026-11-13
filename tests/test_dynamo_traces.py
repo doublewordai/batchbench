@@ -21,6 +21,7 @@ from batchbench.dynamo_traces import (
     build_trace_plans,
     drop_duplicate_attempts,
     hash_seed,
+    keeps_session,
     load_trace_records,
     normalize_request_id,
     record_from_trace,
@@ -540,6 +541,59 @@ class SourceTest(unittest.TestCase):
         self.assertEqual(result.stdout.count("live_blocks=1"), 4)
         self.assertNotIn("live_blocks=2", result.stdout)
         self.assertNotIn("Live block fallbacks", result.stdout)
+
+
+class SessionSampleTest(unittest.TestCase):
+    def setUp(self):
+        self.directory = Path(tempfile.mkdtemp(prefix="batchbench-sample-"))
+        rows = []
+        for index in range(200):
+            start = T0 + timedelta(seconds=index)
+            rows.append(trace(start, [f"s{index}", "u1"], session_id=f"sess-{index}"))
+            rows.append(trace(start + timedelta(seconds=1), [f"s{index}", "u1", "u2"], session_id=f"sess-{index}"))
+        # Two attempts of one request without a session id share its x-request-id.
+        rows.append(trace(T0, ["lone"], x_request_id="00000000-0000-4000-8000-0000000000aa"))
+        rows.append(trace(T0 + timedelta(seconds=2), ["lone"], x_request_id="00000000-0000-4000-8000-0000000000AA"))
+        path = self.directory / "traces.jsonl"
+        path.write_text("".join(json.dumps(row) + "\n" for row in rows), encoding="utf-8")
+        self.path = str(path)
+
+    def tearDown(self):
+        shutil.rmtree(self.directory, ignore_errors=True)
+
+    def load(self, fraction, seed=7):
+        stats = TraceStats()
+        records = load_trace_records([self.path], WINDOW_START, WINDOW_END, sample_sessions=fraction, seed=seed, stats=stats)
+        return records, stats
+
+    def test_a_session_is_kept_or_dropped_whole(self):
+        records, stats = self.load(0.5)
+        by_session = {}
+        for record in records:
+            by_session.setdefault(record.session_id, []).append(record)
+        sessions = [key for key in by_session if key]
+        self.assertTrue(0 < len(sessions) < 200)
+        self.assertTrue(all(len(by_session[key]) == 2 for key in sessions))
+        self.assertEqual(stats.sampled_out + stats.loaded, 402)
+
+    def test_smaller_fractions_keep_subsets_for_one_seed(self):
+        kept = {fraction: {record.request_id for record in self.load(fraction)[0]} for fraction in (0.1, 0.3, 0.6, 1.0)}
+        self.assertLessEqual(kept[0.1], kept[0.3])
+        self.assertLessEqual(kept[0.3], kept[0.6])
+        self.assertEqual(len(kept[1.0]), 402)
+        self.assertNotEqual(kept[0.3], {record.request_id for record in self.load(0.3, seed=8)[0]})
+
+    def test_attempts_without_a_session_go_together(self):
+        key = "x-request:00000000-0000-4000-8000-0000000000aa"
+        records, _ = self.load(0.5)
+        lone = [record for record in records if record.session_id is None]
+        self.assertEqual(len(lone), 2 if keeps_session(key, 0.5, 7) else 0)
+
+    def test_cli_checks_the_fraction(self):
+        common = ["--start", "2026-09-01T12:00:00Z", "--end", "2026-09-01T13:00:00Z", "--output", str(self.directory / "plans.jsonl")]
+        self.assertEqual(export_plans.main(["--rows-jsonl", self.path, "--sample-sessions", "0.5", *common]), 1)
+        self.assertEqual(export_plans.main(["--dynamo-traces", self.path, "--sample-sessions", "0", *common]), 1)
+        self.assertEqual(export_plans.main(["--dynamo-traces", self.path, "--sample-sessions", "0.5", *common]), 0)
 
 
 class AnalyticsQueryTest(unittest.TestCase):
