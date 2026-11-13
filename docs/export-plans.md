@@ -171,8 +171,8 @@ generated rather than the model's real text. A live reply cannot be split, so a
 branch that diverges inside one reuses the blocks only up to the reply's start. Each trajectory carries
 `metadata` with the model name, block size and, when joined, the alias and principal.
 Its `requests` list names the source row of each request, in request order:
-`request_id`, `x_request_id` (lower-cased as for the join; null when the row has none)
-and `received_ms` (the row's `request_received_ms`), so replay results can be joined
+`request_id`, `x_request_id` (lower-cased as for the join), each null when the row has
+none, and `received_ms` (the row's `request_received_ms`), so replay results can be joined
 back to the trace rows.
 
 ### Joining analytics on `x_request_id`

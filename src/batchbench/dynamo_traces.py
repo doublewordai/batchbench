@@ -720,7 +720,7 @@ def trace_trajectory_plan(
         metadata["principal"] = root.principal_id
     metadata["requests"] = [
         {
-            "request_id": record.request_id,
+            "request_id": record.request_id or None,
             "x_request_id": record.x_request_id,
             "received_ms": round(record.ts.timestamp() * 1000),
         }
