@@ -128,6 +128,28 @@ perfect prefix caching and the end-to-end session latency. `--results-csv` persi
 the same figures; `--agent-events-jsonl` records per-trajectory admission and
 completion times.
 
+`--request-events-jsonl` writes one line per agent request, success or failure, when
+the run ends. Times are milliseconds measured by the client:
+
+| Field | Meaning |
+|---|---|
+| `trajectory_id`, `agent_id` | The trajectory the request belongs to. |
+| `invocation` | The request's 1-based position in its trajectory. |
+| `sent_at_ms` | Start of the first attempt, from the start of the run (the clock `--agent-events-jsonl` uses). |
+| `ttft_ms` | From `sent_at_ms` to the first streamed chunk whose delta carries `content`, `reasoning_content` or `tool_calls`. Null for non-streamed requests and when no such chunk arrived. |
+| `last_token_ms` | From `sent_at_ms` to the last such chunk. |
+| `e2e_ms` | From `sent_at_ms` until the request succeeded or its last attempt failed. |
+| `tpot_ms` | `(last_token_ms - ttft_ms) / (completion_tokens - 1)`; null below two completion tokens. |
+| `prompt_tokens`, `completion_tokens` | From the response's `usage`; null on failure. |
+| `cached_tokens` | `usage.prompt_tokens_details.cached_tokens`, or null when the backend omits it. |
+| `attempts` | Attempts made, retries included. |
+| `status`, `error` | `"ok"` with a null error, or `"error"` with the last attempt's error. |
+| `http_status` | Status of the last attempt's response; null when none arrived. |
+
+For a retried request, `ttft_ms` and `last_token_ms` come from the attempt that
+succeeded and are measured from the first attempt's start. A trajectory stops at its
+first failed request, so its failure is its last line.
+
 `batchbench-harness` drives runs on remote GPU hosts; see [HARNESS.md](HARNESS.md).
 
 ## Building from source

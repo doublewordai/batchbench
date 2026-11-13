@@ -10,7 +10,8 @@ use serde::Serialize;
 use sha2::{Digest, Sha256};
 
 use crate::{
-    run_agent_benchmark, AdmissionMode, AgentBenchmarkReport, AgentLoopConfig, SampleSpec,
+    run_agent_benchmark, AdmissionMode, AgentBenchmarkReport, AgentLoopConfig, AgentRequestRecord,
+    SampleSpec,
 };
 
 const DEFAULT_MODEL: &str = "Qwen/Qwen3-VL-235B-A22B-Instruct-FP8";
@@ -241,6 +242,10 @@ struct Args {
     /// Optional path to write one JSONL lifecycle event per agent
     #[arg(long, value_name = "PATH")]
     agent_events_jsonl: Option<PathBuf>,
+
+    /// Optional path to write one JSONL timing record per request
+    #[arg(long, value_name = "PATH")]
+    request_events_jsonl: Option<PathBuf>,
 }
 
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, ValueEnum)]
@@ -316,6 +321,7 @@ struct CsvResult {
     replay_initial_overhead_tokens: Option<usize>,
     replay_turn_overhead_tokens: Option<usize>,
     agent_events_jsonl: Option<String>,
+    request_events_jsonl: Option<String>,
     tool_call_latency_ms: Option<usize>,
     tool_call_latency_lognorm_mu: Option<f64>,
     tool_call_latency_lognorm_median_ms: Option<f64>,
@@ -335,6 +341,67 @@ struct AgentLifecycleJson<'a> {
     finished_at_seconds: f64,
     runtime_seconds: f64,
     completed: bool,
+}
+
+#[derive(Debug, Serialize)]
+struct RequestEventJson<'a> {
+    trajectory_id: &'a str,
+    agent_id: usize,
+    invocation: usize,
+    sent_at_ms: f64,
+    ttft_ms: Option<f64>,
+    last_token_ms: Option<f64>,
+    e2e_ms: f64,
+    tpot_ms: Option<f64>,
+    prompt_tokens: Option<u64>,
+    completion_tokens: Option<u64>,
+    cached_tokens: Option<u64>,
+    attempts: usize,
+    status: &'static str,
+    error: Option<&'a str>,
+    http_status: Option<u16>,
+}
+
+impl<'a> RequestEventJson<'a> {
+    fn new(record: &'a AgentRequestRecord) -> Self {
+        let ttft_ms = record.first_token.map(duration_ms);
+        let last_token_ms = record.last_token.map(duration_ms);
+        Self {
+            trajectory_id: &record.trajectory_id,
+            agent_id: record.agent_id,
+            invocation: record.invocation,
+            sent_at_ms: duration_ms(record.sent_at),
+            ttft_ms,
+            last_token_ms,
+            e2e_ms: duration_ms(record.latency),
+            tpot_ms: time_per_output_token_ms(ttft_ms, last_token_ms, record.completion_tokens),
+            prompt_tokens: record.prompt_tokens,
+            completion_tokens: record.completion_tokens,
+            cached_tokens: record.cached_tokens,
+            attempts: record.attempts,
+            status: if record.error.is_none() {
+                "ok"
+            } else {
+                "error"
+            },
+            error: record.error.as_deref(),
+            http_status: record.http_status,
+        }
+    }
+}
+
+/// Mean gap between output tokens after the first one.
+fn time_per_output_token_ms(
+    ttft_ms: Option<f64>,
+    last_token_ms: Option<f64>,
+    completion_tokens: Option<u64>,
+) -> Option<f64> {
+    match (ttft_ms, last_token_ms, completion_tokens) {
+        (Some(first), Some(last), Some(tokens)) if tokens >= 2 => {
+            Some((last - first) / (tokens - 1) as f64)
+        }
+        _ => None,
+    }
 }
 
 enum ParsedArgs {
@@ -573,7 +640,8 @@ async fn run(args: Args) -> Result<()> {
     .with_ignore_eos(args.ignore_eos)
     .with_user_tagging(!args.disable_user_tagging)
     .with_verbose(args.verbose)
-    .with_dry_run(args.dry_run);
+    .with_dry_run(args.dry_run)
+    .with_request_records(args.request_events_jsonl.is_some());
     if let Some(path) = args.agent_plans_jsonl.as_deref() {
         config = config.with_agent_plans_jsonl(path);
         config = config.with_replay_prompt_overhead(
@@ -608,6 +676,10 @@ async fn run(args: Args) -> Result<()> {
     if let Some(events_path) = args.agent_events_jsonl.as_deref() {
         write_agent_events_jsonl(events_path, &report, args.dp_rank_perfect_routing_num)?;
         println!("Wrote agent lifecycle events to {}", events_path.display());
+    }
+    if let Some(events_path) = args.request_events_jsonl.as_deref() {
+        write_request_events_jsonl(events_path, &report.request_records)?;
+        println!("Wrote request events to {}", events_path.display());
     }
 
     if let Some(csv_path) = args.results_csv.as_deref() {
@@ -666,6 +738,10 @@ async fn run(args: Args) -> Result<()> {
             replay_turn_overhead_tokens: args.replay_turn_overhead_tokens,
             agent_events_jsonl: args
                 .agent_events_jsonl
+                .as_ref()
+                .map(|path| path.display().to_string()),
+            request_events_jsonl: args
+                .request_events_jsonl
                 .as_ref()
                 .map(|path| path.display().to_string()),
             tool_call_latency_ms: args.tool_call_latency_ms,
@@ -930,7 +1006,11 @@ fn print_summary(report: &AgentBenchmarkReport) {
 }
 
 fn milliseconds(duration: Option<Duration>) -> Option<f64> {
-    duration.map(|value| value.as_secs_f64() * 1000.0)
+    duration.map(duration_ms)
+}
+
+fn duration_ms(duration: Duration) -> f64 {
+    duration.as_secs_f64() * 1000.0
 }
 
 fn format_latency(duration: Option<Duration>) -> String {
@@ -980,6 +1060,34 @@ fn write_agent_events_jsonl(
     report: &AgentBenchmarkReport,
     dp_rank_count: Option<usize>,
 ) -> Result<()> {
+    write_jsonl(
+        path,
+        report.agent_lifecycles.iter().map(|record| {
+            let runtime = record.finished_at.saturating_sub(record.admitted_at);
+            AgentLifecycleJson {
+                agent_id: record.agent_id,
+                trajectory_id: &record.trajectory_id,
+                routing_slot: record.routing_slot,
+                dp_rank: dp_rank_count.map(|ranks| record.routing_slot % ranks),
+                scheduled_at_seconds: record.scheduled_at.as_secs_f64(),
+                admitted_at_seconds: record.admitted_at.as_secs_f64(),
+                queue_wait_seconds: record
+                    .admitted_at
+                    .saturating_sub(record.scheduled_at)
+                    .as_secs_f64(),
+                finished_at_seconds: record.finished_at.as_secs_f64(),
+                runtime_seconds: runtime.as_secs_f64(),
+                completed: record.completed,
+            }
+        }),
+    )
+}
+
+fn write_request_events_jsonl(path: &Path, records: &[AgentRequestRecord]) -> Result<()> {
+    write_jsonl(path, records.iter().map(RequestEventJson::new))
+}
+
+fn write_jsonl<T: Serialize>(path: &Path, events: impl IntoIterator<Item = T>) -> Result<()> {
     if let Some(parent) = path.parent() {
         if !parent.as_os_str().is_empty() {
             fs::create_dir_all(parent)
@@ -989,23 +1097,7 @@ fn write_agent_events_jsonl(
     let file =
         fs::File::create(path).with_context(|| format!("failed to create {}", path.display()))?;
     let mut writer = BufWriter::new(file);
-    for record in &report.agent_lifecycles {
-        let runtime = record.finished_at.saturating_sub(record.admitted_at);
-        let event = AgentLifecycleJson {
-            agent_id: record.agent_id,
-            trajectory_id: &record.trajectory_id,
-            routing_slot: record.routing_slot,
-            dp_rank: dp_rank_count.map(|ranks| record.routing_slot % ranks),
-            scheduled_at_seconds: record.scheduled_at.as_secs_f64(),
-            admitted_at_seconds: record.admitted_at.as_secs_f64(),
-            queue_wait_seconds: record
-                .admitted_at
-                .saturating_sub(record.scheduled_at)
-                .as_secs_f64(),
-            finished_at_seconds: record.finished_at.as_secs_f64(),
-            runtime_seconds: runtime.as_secs_f64(),
-            completed: record.completed,
-        };
+    for event in events {
         serde_json::to_writer(&mut writer, &event)
             .with_context(|| format!("failed to serialize {}", path.display()))?;
         writer
@@ -1243,5 +1335,87 @@ mod tests {
             Args::try_parse_from(["batchbench-agent", "--replay-turn-overhead-tokens", "104"])
                 .unwrap_err();
         assert!(error.to_string().contains("--agent-plans-jsonl"));
+    }
+
+    #[test]
+    fn time_per_output_token_spans_the_tokens_after_the_first() {
+        assert_eq!(
+            time_per_output_token_ms(Some(250.0), Some(1250.0), Some(5)),
+            Some(250.0)
+        );
+        assert_eq!(
+            time_per_output_token_ms(Some(250.0), Some(250.0), Some(1)),
+            None
+        );
+        assert_eq!(time_per_output_token_ms(None, None, Some(5)), None);
+        assert_eq!(
+            time_per_output_token_ms(Some(250.0), Some(1250.0), None),
+            None
+        );
+    }
+
+    #[test]
+    fn request_events_jsonl_writes_one_record_per_request() {
+        let ok = AgentRequestRecord {
+            agent_id: 3,
+            trajectory_id: "session-a".to_string(),
+            invocation: 1,
+            sent_at: Duration::from_millis(1500),
+            first_token: Some(Duration::from_millis(250)),
+            last_token: Some(Duration::from_millis(1250)),
+            latency: Duration::from_millis(1500),
+            prompt_tokens: Some(100),
+            completion_tokens: Some(5),
+            cached_tokens: Some(64),
+            attempts: 2,
+            http_status: Some(200),
+            error: None,
+        };
+        let failed = AgentRequestRecord {
+            invocation: 2,
+            sent_at: Duration::from_millis(4000),
+            first_token: None,
+            last_token: None,
+            latency: Duration::from_millis(750),
+            prompt_tokens: None,
+            completion_tokens: None,
+            cached_tokens: None,
+            attempts: 3,
+            http_status: Some(503),
+            error: Some("request failed (503 Service Unavailable) busy".to_string()),
+            ..ok.clone()
+        };
+        let path = std::env::temp_dir()
+            .join(format!("batchbench-requests-{}", uuid::Uuid::new_v4()))
+            .join("requests.jsonl");
+
+        write_request_events_jsonl(&path, &[ok, failed]).unwrap();
+        let written = fs::read_to_string(&path).unwrap();
+        fs::remove_dir_all(path.parent().unwrap()).unwrap();
+
+        let lines: Vec<serde_json::Value> = written
+            .lines()
+            .map(|line| serde_json::from_str(line).unwrap())
+            .collect();
+        assert_eq!(
+            lines,
+            [
+                serde_json::json!({
+                    "trajectory_id": "session-a", "agent_id": 3, "invocation": 1,
+                    "sent_at_ms": 1500.0, "ttft_ms": 250.0, "last_token_ms": 1250.0,
+                    "e2e_ms": 1500.0, "tpot_ms": 250.0,
+                    "prompt_tokens": 100, "completion_tokens": 5, "cached_tokens": 64,
+                    "attempts": 2, "status": "ok", "error": null, "http_status": 200,
+                }),
+                serde_json::json!({
+                    "trajectory_id": "session-a", "agent_id": 3, "invocation": 2,
+                    "sent_at_ms": 4000.0, "ttft_ms": null, "last_token_ms": null,
+                    "e2e_ms": 750.0, "tpot_ms": null,
+                    "prompt_tokens": null, "completion_tokens": null, "cached_tokens": null,
+                    "attempts": 3, "status": "error",
+                    "error": "request failed (503 Service Unavailable) busy", "http_status": 503,
+                }),
+            ]
+        );
     }
 }
