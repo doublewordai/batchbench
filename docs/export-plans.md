@@ -270,5 +270,6 @@ model that arrived in the window is counted by set, replayed or not, and each se
 GPUs gets its requests, output tokens and within-bound requests per second per GPU.
 
 Replay times are the client's and production's are the frontend's, so the replay's
-include the client's round trip to its server.
+include the client's round trip to its server. The client measures first-token time and
+time per output token only on streamed requests, so export the manifest with `--stream`.
 

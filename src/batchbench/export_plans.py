@@ -803,6 +803,7 @@ def build_parser() -> argparse.ArgumentParser:
     shaping.add_argument("--seed", type=int, default=0, help="seed for deterministic sampling")
     shaping.add_argument("--stratify-by-session-length", action="store_true", help="sample within power-of-two session-length buckets")
     shaping.add_argument("--time-scale", type=float, default=1.0, help="divide start offsets and delays by this factor")
+    shaping.add_argument("--stream", action="store_true", help="mark every request stream: true, so a replay measures first-token time and time per output token (the records don't say whether the original was streamed)")
 
     parser.add_argument("--output", required=True, help="manifest JSONL path")
     return parser
@@ -835,6 +836,10 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
             plans = _export_chains(args, window_start, window_end, link_window, stats)
         plans = sample_plans(plans, args.sample, args.seed, args.stratify_by_session_length)
         stats.sampled = len(plans)
+        if args.stream:
+            for plan in plans:
+                for request in plan["requests"]:
+                    request["stream"] = True
         summary = ", ".join(f"{key}={value}" for key, value in {**stats.as_dict(), **extra_stats}.items())
         if not plans:
             raise ExportError(f"no trajectories to export ({summary})")
