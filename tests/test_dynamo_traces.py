@@ -22,6 +22,7 @@ from batchbench.dynamo_traces import (
     drop_duplicate_attempts,
     hash_seed,
     keeps_session,
+    session_sample_key,
     load_trace_records,
     normalize_request_id,
     record_from_trace,
@@ -571,6 +572,22 @@ class SessionSampleTest(unittest.TestCase):
         stats = TraceStats()
         records = load_trace_records([self.path], WINDOW_START, WINDOW_END, sample_sessions=fraction, seed=seed, stats=stats)
         return records, stats
+
+    def load_rows(self, rows, fraction, seed=7):
+        path = self.directory / "rows.jsonl"
+        path.write_text("".join(json.dumps(row) + "\n" for row in rows), encoding="utf-8")
+        return load_trace_records([str(path)], WINDOW_START, WINDOW_END, sample_sessions=fraction, seed=seed, stats=TraceStats())
+
+    def test_a_row_without_any_id_is_drawn_on_its_own(self):
+        row = trace(T0, ["anon", "u1"])
+        del row["request"]["request_id"]
+        self.assertIsNone(session_sample_key(row))
+        self.assertEqual(len(self.load_rows([row], 1.0)), 1)
+
+    def test_a_session_id_the_records_keep_is_a_session(self):
+        rows = [trace(T0, ["z", "u1"], session_id=0), trace(T0 + timedelta(seconds=1), ["z", "u1", "u2"], session_id=0)]
+        self.assertEqual(session_sample_key(rows[0]), "session:0")
+        self.assertEqual(len(self.load_rows(rows, 0.5)), 2 if keeps_session("session:0", 0.5, 7) else 0)
 
     def test_a_session_is_kept_or_dropped_whole(self):
         records, stats = self.load(0.5)

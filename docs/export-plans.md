@@ -133,8 +133,9 @@ which thins trajectories after they are built, can save. `--sample-sessions FRAC
 keeps that fraction of sessions instead, deciding as each row is read and before its
 hashes are parsed; dropped rows count as `sampled_out`. A row is kept or dropped with its
 agent session id, so sessions stay whole. A row without one goes with its `x_request_id`
-(its retried attempts together), else its `request_id`; such a row can lose the earlier
-request it extends, and then replays as the start of a new trajectory. Each key's draw comes
+(its retried attempts together), else its `request_id`, else is drawn on its own; such a
+row can lose the earlier request it extends, and then replays as the start of a new
+trajectory. Each key's draw comes
 from `--seed`, so for one seed a smaller fraction keeps a subset of what a larger one keeps,
 which makes manifests at several loads comparable.
 

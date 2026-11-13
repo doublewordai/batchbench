@@ -259,12 +259,12 @@ def session_sample_key(row: Mapping[str, Any]) -> Optional[str]:
 
     Rows of one session share the key, so a session is kept or dropped whole. A row without a
     session id is keyed by its ``x_request_id`` (so a request's retried attempts go together),
-    else by its ``request_id``.
+    else by its ``request_id``. A session id is what :func:`record_from_trace` keeps as one.
     """
 
     agent = row.get("agent_context")
     session_id = agent.get("session_id") if isinstance(agent, Mapping) else None
-    if session_id:
+    if session_id not in (None, ""):
         return f"session:{session_id}"
     request = row.get("request")
     if not isinstance(request, Mapping):
@@ -334,8 +334,8 @@ def load_trace_records(
                 stats.bad_lines += 1
                 continue
             if sample_sessions is not None:
-                key = session_sample_key(row)
-                if key is None or not keeps_session(key, sample_sessions, seed):
+                key = session_sample_key(row) or f"line:{line}"
+                if not keeps_session(key, sample_sessions, seed):
                     stats.sampled_out += 1
                     continue
             record = record_from_trace(row, stats, model, window_ms)
