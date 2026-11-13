@@ -228,3 +228,47 @@ Besides the usual counts, the summary line reports, for traces: `files`,
 - **No `stream` or `max_tokens`.** Traces do not record them, so they are omitted.
 - **Timing starts at Dynamo.** `request_received_ms` is when the frontend received the
   request, after any gateway queueing.
+
+## Comparing a replay with production
+
+Each trajectory's `metadata.requests` names its requests' source rows, and
+`batchbench-agent --request-events-jsonl` records each replayed request's client-side
+timings by trajectory and invocation, so a replay can be scored request by request
+against the traces it was built from:
+
+```bash
+batchbench-compare-trace-replay \
+  --manifest plans.jsonl --request-events events.jsonl \
+  --dynamo-traces traces/2026/11/12 \
+  --score-start 2026-11-12T18:00:00Z --score-end 2026-11-12T19:00:00Z \
+  --slo-ttft-s 15 --slo-tpot-ms 33 --replay-gpus 16 \
+  --production-context context.json --model zai-org/GLM-5.3-Flash \
+  --json-out report.json
+```
+
+Only requests whose source row arrived inside the scoring window are scored, so a
+manifest exported from an earlier start lets the replay's caches and queues settle
+before scoring begins. For the requests in the window it reports, for the replay and
+for production's rows of the same requests: how many there were and how many failed,
+first-token time, time per output token (production's `avg_itl_ms`) and end-to-end
+time percentiles, and the share that succeeded with a first token within
+`--slo-ttft-s` and a time per output token within `--slo-tpot-ms`. A failed replayed
+request counts against that share. With `--replay-gpus`, the replay's successful and
+within-bound requests and output tokens per second per GPU over the window are added.
+
+A production context file names the worker set behind each decode worker id and each
+set's GPUs over the window:
+
+```json
+{"worker_sets": {"5214388210741902154": "isambard", "...": "b300"},
+ "set_gpus": {"isambard": 175.7, "b300": 9.3}}
+```
+
+With it, production's rows are also split by the set that served them (rows whose
+worker it doesn't name are `unmapped`). With `--model` as well, every request of that
+model that arrived in the window is counted by set, replayed or not, and each set with
+GPUs gets its requests, output tokens and within-bound requests per second per GPU.
+
+Replay times are the client's and production's are the frontend's, so the replay's
+include the client's round trip to its server.
+

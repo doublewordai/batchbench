@@ -7,13 +7,14 @@ wrapper, published as prebuilt wheels:
 uv pip install batchbench
 ```
 
-Three entrypoints:
+Four entrypoints:
 
 | Command | What it does |
 |---|---|
 | `batchbench` | Independent requests at a fixed concurrency with controlled token shapes |
 | `batchbench-agent` | Stateful multi-turn sessions, sampled or replayed from a manifest |
 | `batchbench-export-plans` | Builds a replay manifest from prompt-chain records in ClickHouse or from Dynamo request traces |
+| `batchbench-compare-trace-replay` | Compares a replay of Dynamo request traces with production's record of the same requests |
 
 ## Independent requests
 
@@ -121,6 +122,11 @@ It can also build one from a directory of Dynamo frontend request traces
 (`--dynamo-traces`), with no ClickHouse needed. The input tables and trace rows it
 expects, and how sessions are reconstructed, are described in
 [docs/export-plans.md](docs/export-plans.md).
+
+`batchbench-compare-trace-replay` scores a replay of such a manifest against the
+traces it came from: the same requests' first-token time, time per output token and
+end-to-end time on both sides, and their share within a latency bound
+([docs/export-plans.md](docs/export-plans.md#comparing-a-replay-with-production)).
 
 ## Report
 
