@@ -510,6 +510,16 @@ class SourceTest(unittest.TestCase):
         self.assertEqual((code, len(plans)), (0, 1))
         self.assertEqual(plans[0]["metadata"]["alias"], "alias-a")
 
+    def test_cli_streams_every_request_when_asked(self):
+        self.write("traces/frontend-a-120100-run1-0.jsonl.gz", self.session_rows())
+        code, plans = self.run_cli()
+        self.assertEqual(code, 0)
+        self.assertFalse(any("stream" in request for plan in plans for request in plan["requests"]))
+        code, plans = self.run_cli("--stream")
+        self.assertEqual(code, 0)
+        self.assertEqual(validate_plans(plans), [])
+        self.assertTrue(all(request["stream"] is True for plan in plans for request in plan["requests"]))
+
     def test_cli_rejects_mixed_sources(self):
         self.write("traces/a.jsonl.gz", self.session_rows())
         code, _ = self.run_cli("--served-by", "upstream-a")

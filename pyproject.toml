@@ -29,6 +29,7 @@ batchbench = "batchbench.__main__:main"
 batchbench-agent = "batchbench.agent:main"
 batchbench-harness = "batchbench.harness:main"
 batchbench-export-plans = "batchbench.export_plans:main"
+batchbench-compare-trace-replay = "batchbench.trace_replay:main"
 'batchbench.harness' = "batchbench.harness:main"
 
 [tool.maturin]
