@@ -23,6 +23,7 @@ from __future__ import annotations
 
 import glob
 import gzip
+import hashlib
 import json
 import os
 import uuid
@@ -92,6 +93,7 @@ class TraceStats:
     other_model: int = 0
     outside_window: int = 0
     malformed_hashes: int = 0
+    sampled_out: int = 0
     loaded: int = 0
     with_x_request_id: int = 0
     duplicate_attempts: int = 0
@@ -252,6 +254,40 @@ def _trace_lines(path: str, stats: TraceStats) -> Iterator[str]:
         stats.unreadable_files += 1
 
 
+def session_sample_key(row: Mapping[str, Any]) -> Optional[str]:
+    """What session sampling keeps or drops a row by: its agent session id, else its request.
+
+    Rows of one session share the key, so a session is kept or dropped whole. A row without a
+    session id is keyed by its ``x_request_id`` (so a request's retried attempts go together),
+    else by its ``request_id``. A session id is what :func:`record_from_trace` keeps as one.
+    """
+
+    agent = row.get("agent_context")
+    session_id = agent.get("session_id") if isinstance(agent, Mapping) else None
+    if session_id not in (None, ""):
+        return f"session:{session_id}"
+    request = row.get("request")
+    if not isinstance(request, Mapping):
+        return None
+    x_request_id = normalize_request_id(request.get("x_request_id"))
+    if x_request_id:
+        return f"x-request:{x_request_id}"
+    request_id = request.get("request_id")
+    return f"request:{request_id}" if request_id else None
+
+
+def keeps_session(key: str, fraction: float, seed: int) -> bool:
+    """Whether session sampling at ``fraction`` keeps ``key``.
+
+    Each key draws one uniform number from its seeded hash and is kept when the number falls
+    below ``fraction``, so for one seed the keys kept at a smaller fraction are a subset of those
+    kept at a larger one.
+    """
+
+    digest = hashlib.blake2b(f"{seed}:{key}".encode(), digest_size=8).digest()
+    return int.from_bytes(digest, "big") / 2.0**64 < fraction
+
+
 def load_trace_records(
     paths: Sequence[str],
     window_start: datetime,
@@ -259,11 +295,15 @@ def load_trace_records(
     link_window: timedelta = DEFAULT_LINK_WINDOW,
     model: Optional[str] = None,
     stats: Optional[TraceStats] = None,
+    sample_sessions: Optional[float] = None,
+    seed: int = 0,
 ) -> list[TraceRecord]:
     """Read ``request_end`` rows received in ``[window_start - link_window, window_end)``.
 
     Files are named by upload time and can hold rows received long before it, so every file is
-    read and rows are windowed by ``request_received_ms``.
+    read and rows are windowed by ``request_received_ms``. With ``sample_sessions``, a row whose
+    session (see :func:`session_sample_key`) the sample leaves out is dropped as it is read,
+    before its hashes are parsed, so memory follows the sample rather than the traffic.
     """
 
     stats = stats if stats is not None else TraceStats()
@@ -293,6 +333,11 @@ def load_trace_records(
             if not isinstance(row, Mapping):
                 stats.bad_lines += 1
                 continue
+            if sample_sessions is not None:
+                key = session_sample_key(row) or f"line:{line}"
+                if not keeps_session(key, sample_sessions, seed):
+                    stats.sampled_out += 1
+                    continue
             record = record_from_trace(row, stats, model, window_ms)
             if record is not None:
                 records.append(record)

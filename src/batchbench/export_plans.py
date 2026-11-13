@@ -801,6 +801,7 @@ def build_parser() -> argparse.ArgumentParser:
     shaping = parser.add_argument_group("shaping")
     shaping.add_argument("--sample", type=float, help="fraction of trajectories to keep (0-1)")
     shaping.add_argument("--seed", type=int, default=0, help="seed for deterministic sampling")
+    shaping.add_argument("--sample-sessions", type=float, metavar="FRACTION", help="with --dynamo-traces: keep this fraction (0-1] of sessions, chosen as rows are read; nested across fractions for one --seed")
     shaping.add_argument("--stratify-by-session-length", action="store_true", help="sample within power-of-two session-length buckets")
     shaping.add_argument("--time-scale", type=float, default=1.0, help="divide start offsets and delays by this factor")
 
@@ -826,6 +827,11 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
         if args.link_window_hours < 0:
             raise ExportError("--link-window-hours must be non-negative")
         link_window = timedelta(hours=args.link_window_hours)
+        if args.sample_sessions is not None:
+            if not args.dynamo_traces:
+                raise ExportError("--sample-sessions needs --dynamo-traces")
+            if not 0.0 < args.sample_sessions <= 1.0:
+                raise ExportError("--sample-sessions must be in (0, 1]")
 
         stats = ExportStats()
         extra_stats: dict[str, Any] = {}
@@ -876,7 +882,8 @@ def _export_dynamo_traces(
         raise ExportError("use --analytics-rows-jsonl or --analytics-table, not both")
     trace_stats = dynamo_traces.TraceStats()
     records = dynamo_traces.load_trace_records(
-        args.dynamo_traces, window_start, window_end, link_window, args.model, trace_stats
+        args.dynamo_traces, window_start, window_end, link_window, args.model, trace_stats,
+        sample_sessions=args.sample_sessions, seed=args.seed,
     )
     records = dynamo_traces.drop_duplicate_attempts(records, trace_stats)
     analytics_rows: Optional[list[dict[str, Any]]] = None

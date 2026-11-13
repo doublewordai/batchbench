@@ -127,6 +127,18 @@ only serve as link targets. Rows with the same `x_request_id` are attempts of on
 request (a gateway retry or failover reuses the header); the last attempt that finished
 is kept and the others are counted as `duplicate_attempts`.
 
+Every loaded row stays in memory until the manifest is written, and a long prompt's hash
+list is large, so a busy model over a long window can need more memory than `--sample`,
+which thins trajectories after they are built, can save. `--sample-sessions FRACTION`
+keeps that fraction of sessions instead, deciding as each row is read and before its
+hashes are parsed; dropped rows count as `sampled_out`. A row is kept or dropped with its
+agent session id, so sessions stay whole. A row without one goes with its `x_request_id`
+(its retried attempts together), else its `request_id`, else is drawn on its own; such a
+row can lose the earlier request it extends, and then replays as the start of a new
+trajectory. Each key's draw comes
+from `--seed`, so for one seed a smaller fraction keeps a subset of what a larger one keeps,
+which makes manifests at several loads comparable.
+
 ### Sessions and blocks
 
 Requests link with the same strict-prefix rule as prompt chains, applied to the block
